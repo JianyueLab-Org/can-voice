@@ -50,6 +50,3 @@ func SelfSignedCert() (tls.Certificate, error) {
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
 }
-
-// Serve 在 Task 2 填实。
-func Serve(ln *quic.Listener) { select {} }

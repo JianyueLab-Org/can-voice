@@ -1,3 +1,4 @@
 /probe/dist/
 /probe/reports/
+/server
 *.pem
