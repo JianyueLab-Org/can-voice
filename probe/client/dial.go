@@ -3,12 +3,31 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"regexp"
 	"time"
 
 	"github.com/quic-go/quic-go"
 )
 
 const ALPN = "can-voice-probe/1"
+
+// addrPattern 匹配错误文本里可能出现的 IP 地址，带端口的和不带端口的都算，
+// IPv6 要求带方括号（Go 的 *net.OpError.Error() 就是这么拼的）。
+var addrPattern = regexp.MustCompile(`\[[0-9a-fA-F:]+\](:\d+)?|\b(?:\d{1,3}\.){3}\d{1,3}\b(:\d+)?`)
+
+// scrubAddrs 抹掉错误文本里的 IP 地址。
+// 握手失败时，socket 级错误（no route to host / network is unreachable 等）在 Go 里是
+// *net.OpError，它的 Error() 会把本机和对端的 "IP:端口" 都拼进文本，例如：
+// "dial udp 192.168.1.23:54321->203.0.113.7:4433: connect: no route to host"
+// 其中 192.168.1.23 是测试用户的内网地址。这段文本会原样进入 HandshakeResult.Error，
+// 最终写进 Task 7 生成、由测试用户手动回传的报告文件，而 Task 8 的中文 README
+// 明确承诺"不收集任何个人信息"，所以必须在产生处就清洗掉，不能指望下游过滤。
+// 过度清洗是安全的失败方向（"context deadline exceeded"、DNS 查找失败这类不含
+// IP 的诊断信息不会被误伤），清洗不足才是泄露，所以这里不区分本机和对端，
+// 一律替换成字面量 "<addr>"。
+func scrubAddrs(s string) string {
+	return addrPattern.ReplaceAllString(s, "<addr>")
+}
 
 // HandshakeResult 是探针的第一个测量项：QUIC 握手能不能做完。
 // 握手失败是最可能的失败形态（UDP 被整体阻断），所以它的错误文本要原样留下。
@@ -34,7 +53,7 @@ func Dial(ctx context.Context, addr string, insecure bool) (quic.Connection, Han
 		res.Millis = 1 // 保证"尝试过"和"没尝试"可区分
 	}
 	if err != nil {
-		res.Error = err.Error()
+		res.Error = scrubAddrs(err.Error())
 		return nil, res, err
 	}
 	res.OK = true
