@@ -49,14 +49,58 @@ func TestScrubAddrs(t *testing.T) {
 			want: "dial udp <addr>: connect: network is unreachable",
 		},
 		{
+			// 修复轮 2：round 1 的字符集 [0-9a-fA-F:] 不含 "%"，
+			// 链路本地地址的 zone id（网卡名 en0）原样漏网。
+			name: "带 zone id 的链路本地 IPv6，两边地址都要抹",
+			in:   "dial udp [fe80::1%en0]:54321->[2001:db8::1]:4433: connect: network is unreachable",
+			want: "dial udp <addr>-><addr>: connect: network is unreachable",
+		},
+		{
+			name: "IPv4 加 :0 端口的监听错误",
+			in:   "listen udp 0.0.0.0:0: socket: too many open files",
+			want: "listen udp <addr>: socket: too many open files",
+		},
+		{
+			// IPv4 映射地址：方括号内容混了点分十进制，字符集里不含 "."，
+			// 所以方括号本身匹配不完整，只由 IPv4 分支单独抹掉内嵌的数字，
+			// 方括号结构和端口原样保留——IP 已经抹掉，可以接受。
+			name: "方括号里内嵌点分十进制的 IPv4 映射地址",
+			in:   "[::ffff:192.168.1.23]:54321",
+			want: "[::ffff:<addr>]:54321",
+		},
+		{
 			name: "超时错误必须原样通过",
 			in:   "context deadline exceeded",
 			want: "context deadline exceeded",
 		},
 		{
+			name: "网络长时间无活动的超时必须原样通过",
+			in:   "timeout: no recent network activity",
+			want: "timeout: no recent network activity",
+		},
+		{
 			name: "DNS 查询失败必须原样通过（主机名是操作者自己填的探针服务器地址，不是个人信息，且是有用的诊断信息）",
 			in:   "lookup no-such-host.invalid: no such host",
 			want: "lookup no-such-host.invalid: no such host",
+		},
+		{
+			name: "另一条 DNS 查询失败也必须原样通过",
+			in:   "lookup probe.example.com: no such host",
+			want: "lookup probe.example.com: no such host",
+		},
+		{
+			// 十六进制错误码不能被误当成地址抹掉——它不带点，IPv4 分支碰不到它，
+			// 括号是圆括号不是方括号，方括号分支也碰不到它。
+			name: "QUIC 错误码（十六进制）必须原样通过",
+			in:   "CRYPTO_ERROR 0x12a (remote): x509: certificate signed by unknown authority",
+			want: "CRYPTO_ERROR 0x12a (remote): x509: certificate signed by unknown authority",
+		},
+		{
+			// 版本号 v0.48.2 只有两个点（三段），IPv4 分支要求恰好三个点（四段），
+			// 不会误伤——这条性质不能破坏，否则版本号这条诊断信息就没了。
+			name: "版本号必须原样通过（IPv4 需要四段三个点，版本号只有三段两个点）",
+			in:   "INTERNAL_ERROR (local): quic-go v0.48.2 handshake failed",
+			want: "INTERNAL_ERROR (local): quic-go v0.48.2 handshake failed",
 		},
 	}
 
