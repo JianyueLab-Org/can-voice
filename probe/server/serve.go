@@ -50,15 +50,23 @@ func echoStreams(conn quic.Connection, connID int) {
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
+			var appErr *quic.ApplicationError
+			if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+				log.Printf("connection %d closed cleanly", connID)
+			} else {
+				log.Printf("connection %d stream accept failed: %v", connID, err)
+			}
 			return
 		}
 		go func(s quic.Stream) {
 			for {
 				b, err := readFrame(s)
 				if err != nil {
+					log.Printf("connection %d stream read failed: %v", connID, err)
 					return
 				}
 				if err := writeFrame(s, b); err != nil {
+					log.Printf("connection %d stream write failed: %v", connID, err)
 					return
 				}
 			}
