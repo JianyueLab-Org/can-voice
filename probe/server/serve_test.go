@@ -43,6 +43,44 @@ func TestServeEchoesDatagramsVerbatim(t *testing.T) {
 	}
 }
 
+func TestServeEchoesLengthPrefixedStreamFrames(t *testing.T) {
+	ln, err := Listen("127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{mustCert(t)}})
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+	go Serve(ln)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, err := quic.DialAddr(ctx, ln.Addr().String(), &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{ALPN},
+	}, &quic.Config{EnableDatagrams: true})
+	if err != nil {
+		t.Fatalf("DialAddr: %v", err)
+	}
+	defer conn.CloseWithError(0, "")
+
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+
+	payload := []byte{0xde, 0xad, 0xbe, 0xef}
+	if err := writeFrame(stream, payload); err != nil {
+		t.Fatalf("writeFrame: %v", err)
+	}
+	got, err := readFrame(stream)
+	if err != nil {
+		t.Fatalf("readFrame: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("stream echo = %v, want %v", got, payload)
+	}
+}
+
 func mustCert(t *testing.T) tls.Certificate {
 	t.Helper()
 	cert, err := SelfSignedCert()

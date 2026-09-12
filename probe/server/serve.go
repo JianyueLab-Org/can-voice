@@ -20,6 +20,7 @@ func Serve(ln *quic.Listener) {
 		connID++
 		log.Printf("connection %d opened", connID)
 		go echoDatagrams(conn, connID)
+		go echoStreams(conn, connID)
 	}
 }
 
@@ -41,5 +42,26 @@ func echoDatagrams(conn quic.Connection, connID int) {
 			log.Printf("connection %d send failed: %v", connID, err)
 			return
 		}
+	}
+}
+
+// echoStreams 接受客户端开的 stream，逐帧原样回显。
+func echoStreams(conn quic.Connection, connID int) {
+	for {
+		stream, err := conn.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		go func(s quic.Stream) {
+			for {
+				b, err := readFrame(s)
+				if err != nil {
+					return
+				}
+				if err := writeFrame(s, b); err != nil {
+					return
+				}
+			}
+		}(stream)
 	}
 }
