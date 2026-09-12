@@ -37,6 +37,9 @@ func main() {
 	rep.Handshake = hs
 	if err != nil {
 		log.Printf("handshake failed after %d ms: %v", hs.Millis, err)
+		// 握手都没成，两轮根本没有机会开始——不能把它们留在零值，
+		// 否则写进文件的 "loss_percent": 0 会被读成"跑完了、一个没丢"。
+		markRoundsAsNotRun(&rep)
 	} else {
 		defer conn.CloseWithError(0, "")
 		log.Printf("handshake succeeded in %d ms; running the datagram round for 60 s", hs.Millis)

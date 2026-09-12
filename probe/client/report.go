@@ -61,6 +61,31 @@ func WriteReport(r Report, dir string) (string, error) {
 	return path, nil
 }
 
+// unranRound 描述"这一轮根本没有机会开始"——不是跑起来又失败，也不是留着
+// 零值不管。一个全零的 RoundResult（Sent=0, Received=0, LossPercent=0,
+// Failed=false）在 JSON 里跟"跑完了、一个没丢"长得一模一样：握手失败时
+// 如果不显式标注，测试用户手动回传的文件、以及 Task 9 汇总工具要解析的
+// 输入，都会把这种零值读成"网络很好"。形状特意和 round.go 里
+// RunStreamRound 对 OpenStreamSync 失败的早期返回一致
+// （FirstLossAtSecond: -1, Failed: true），这样 Task 9 排除 Failed 轮次时
+// 不用为握手失败单开一条特例。
+func unranRound(reason string) RoundResult {
+	return RoundResult{
+		FirstLossAtSecond: -1,
+		Failed:            true,
+		Error:             reason,
+	}
+}
+
+// markRoundsAsNotRun 在握手失败后把两轮都标成"没有运行"。握手都没成功，
+// 两轮都没有机会开始，所以两个字段一起置位，不去猜"也许某一轮本可以跑
+// 起来"——两轮共用同一条连接，握手是两轮共同的前提。
+func markRoundsAsNotRun(r *Report) {
+	const reason = "handshake failed; round never started"
+	r.Datagram = unranRound(reason)
+	r.Stream = unranRound(reason)
+}
+
 // summariseRound 把一轮的结果写成人话，供 Summarise 对两轮分别调用。
 // 单独抽出来是因为"这一轮到底跑没跑起来、丢没丢全"这几条判断本身就值得
 // 复用和单独看清楚，不想把它们都摊平写在 Summarise 一个函数里。
@@ -113,8 +138,13 @@ func Summarise(r Report) string {
 		// 对照通道没跑起来，就没有"两轮的差异"可言——不能把 datagram
 		// 轮的结果单独拿出来下结论，那正是这两轮设计要防止的"读反"。
 		b.WriteString("对照通道没能跑起来，这一次测不出数据报通道是否被特殊对待，结论无法给出。\n")
+	case r.Datagram.Failed && r.Stream.Interrupted:
+		// 对照通道跑起来了，但中途被掐断——不能说它"正常"，也不能因为
+		// 数据报通道没跑起来就断言这是针对性阻断：这台网络对这类连接
+		// 本身就不友好，两轮的差异读不出结论。
+		b.WriteString("数据报通道没能跑起来，对照通道也中途被掐断 —— 这台机器的网络对这类连接本身就不友好，还不能就此断定是在针对性阻断数据报。\n")
 	case r.Datagram.Failed:
-		b.WriteString("数据报通道没能跑起来，对照通道正常——这正是我们要找的情况：这台网络很可能在针对性阻断 UDP 数据报。\n")
+		b.WriteString("数据报通道没能跑起来，对照通道跑完且没有被中途掐断——这正是我们要找的情况：这台网络很可能在针对性阻断 UDP 数据报。\n")
 	case r.Datagram.Interrupted && !r.Stream.Interrupted:
 		b.WriteString("数据报通道中途被掐断，对照通道没有 —— 这正是我们要找的情况。\n")
 	case r.Datagram.Interrupted && r.Stream.Interrupted:
