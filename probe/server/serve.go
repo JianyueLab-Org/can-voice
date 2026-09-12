@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
 
 	"github.com/quic-go/quic-go"
@@ -62,11 +63,31 @@ func echoStreams(conn quic.Connection, connID int) {
 			for {
 				b, err := readFrame(s)
 				if err != nil {
-					log.Printf("connection %d stream read failed: %v", connID, err)
+					if errors.Is(err, io.EOF) {
+						// 客户端正常结束 stream，无需日志
+						return
+					}
+					var appErr *quic.ApplicationError
+					if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+						log.Printf("connection %d closed cleanly", connID)
+					} else if errors.Is(err, io.ErrUnexpectedEOF) {
+						log.Printf("connection %d stream truncated frame: %v", connID, err)
+					} else {
+						log.Printf("connection %d stream read failed: %v", connID, err)
+					}
 					return
 				}
 				if err := writeFrame(s, b); err != nil {
-					log.Printf("connection %d stream write failed: %v", connID, err)
+					if errors.Is(err, io.EOF) {
+						// Stream closed, no need to log
+						return
+					}
+					var appErr *quic.ApplicationError
+					if errors.As(err, &appErr) && appErr.ErrorCode == 0 {
+						log.Printf("connection %d closed cleanly", connID)
+					} else {
+						log.Printf("connection %d stream write failed: %v", connID, err)
+					}
 					return
 				}
 			}
