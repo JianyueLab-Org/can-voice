@@ -12,6 +12,11 @@ import (
 const probeVersion = "p1-1"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "analyse" {
+		analyseMain(os.Args[2:])
+		return
+	}
+
 	addr := flag.String("server", "probe.ceruleanavi.net:64739", "探针服务器地址")
 	carrier := flag.String("carrier", "", "你的网络（如：中国电信 / 校园网 / 公司网络）")
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅用于本地自签名测试）")
