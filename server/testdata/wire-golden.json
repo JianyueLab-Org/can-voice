@@ -1,0 +1,30 @@
+{
+  "comment": "can-voice 数据面包头的跨实现黄金文件。Go 与 Rust 两侧都测这份。改它等于改协议。布局见 spec 5.2：ver(1) flags(1) qual(1) seq(2 BE) freq_khz(4 BE) speaker(4 BE)，其后是 Opus 载荷。",
+  "header_size": 13,
+  "cases": [
+    {
+      "name": "上行首帧：客户端填 qual=0 speaker=0",
+      "header": {"ver": 1, "flags": 1, "qual": 0, "seq": 0, "freq_khz": 121800, "speaker": 0},
+      "opus_hex": "fc",
+      "encoded_hex": "01010000000001dbc800000000fc"
+    },
+    {
+      "name": "下行普通帧：服务端填了 qual 和 speaker",
+      "header": {"ver": 1, "flags": 0, "qual": 255, "seq": 1234, "freq_khz": 118000, "speaker": 42},
+      "opus_hex": "78563412",
+      "encoded_hex": "0100ff04d20001ccf00000002a78563412"
+    },
+    {
+      "name": "尾帧：flags bit1",
+      "header": {"ver": 1, "flags": 2, "qual": 128, "seq": 65535, "freq_khz": 136975, "speaker": 4294967295},
+      "opus_hex": "",
+      "encoded_hex": "010280ffff0002170fffffffff"
+    },
+    {
+      "name": "首帧且尾帧：单帧发言",
+      "header": {"ver": 1, "flags": 3, "qual": 200, "seq": 0, "freq_khz": 199998, "speaker": 1},
+      "opus_hex": "00",
+      "encoded_hex": "0103c8000000030d3e0000000100"
+    }
+  ]
+}
