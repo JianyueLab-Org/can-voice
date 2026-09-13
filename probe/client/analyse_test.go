@@ -125,8 +125,18 @@ func TestVerdictDemandsFallbackWhenDatagramsAreInterrupted(t *testing.T) {
 	if !conclusive {
 		t.Fatalf("this sample is adequate throughout; Verdict must be conclusive; reasons=%v", reasons)
 	}
-	if len(reasons) == 0 {
-		t.Fatal("Verdict must say which threshold was crossed")
+	// 光断言 need 证明不了本行触发了：这批样本的 stream 轮都没被中断，
+	// 所以第四行(datagram 被中断而 stream 没有)也会同时越线，need 会
+	// 因为它而为真。要证明的是第二行自己，所以断言第二行自己的措辞——
+	// "过了握手的会话"这半句只有第二行有，第四行说的是"在多少比例的会话里"。
+	found := false
+	for _, r := range reasons {
+		if strings.Contains(r, "of sessions that passed the handshake") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the interrupt-rate row must fire in its own right, got reasons=%v", reasons)
 	}
 }
 

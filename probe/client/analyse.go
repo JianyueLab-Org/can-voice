@@ -171,8 +171,11 @@ func Verdict(rs []Report) (bool, bool, []string) {
 		usableCarriers[r.Carrier] = true
 	}
 	if len(usableCarriers) < minCarriers {
-		note("usable sample too narrow after exclusions: %d carrier(s) among %d usable sessions (need at least %d)",
-			len(usableCarriers), len(usable), minCarriers)
+		// 排除前后的运营商数都要报出来，理由和上面会话数那条一样：
+		// "排除后只剩 1 家"和"一开始就只有 1 家"是完全不同的两件事——
+		// 前者说明排除打偏了样本，后者说明当初就没把网络收齐。
+		note("usable sample too narrow after exclusions: %d carrier(s) among %d usable sessions, down from %d carrier(s) across %d sessions (need at least %d)",
+			len(usableCarriers), len(usable), len(carriers), len(rs), minCarriers)
 		return false, false, reasons
 	}
 
