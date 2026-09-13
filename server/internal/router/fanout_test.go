@@ -1,6 +1,7 @@
 package router
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
@@ -624,24 +625,42 @@ func TestCrossCoupleDeliversOneCopyToSomeoneOnBothFrequencies(t *testing.T) {
 // TestCoupledTargetsAreVisitedInAscendingOrder 钉住目标频率的顺序。
 //
 // 目标是"主频率在前，耦合频率升序在后"，而这个顺序是客户端可见的：同时订阅了
-// 两个**耦合**频率（都不是主频率）的人，包头上写的是先被命中的那一个，他的客户端
+// 多个**耦合**频率（都不是主频率）的人，包头上写的是先被命中的那一个，他的客户端
 // 据此把音频送到哪一部电台。coupledWith 遍历的是 map，Go 的 map 遍历是随机的，
-// 不排序的话同一个人在两次发言里会看到音频在两部电台之间跳。
+// 不排序的话同一个人在两次发言里会看到音频在几部电台之间跳。
+//
+// **五个耦合频率、连查二十次，两个数字都是故意的，别"简化"回去。** 早先这个
+// 测试只用两个耦合频率、只查一次，于是它靠运气抓人：实测把 slices.Sort 拿掉，
+// 四十次独立运行里只红了 **3 次**——也就是说排序坏了的情况下它有 92% 的概率
+// 报"没问题"。一个会在走运的种子上变绿的钉子，比没有钉子更坏，因为它还让人放心。
+// 五个元素时一次遍历碰巧升序的概率是 1/120，连续二十次是 (1/120)^20，
+// 那不是会发生的事。
 func TestCoupledTargetsAreVisitedInAscendingOrder(t *testing.T) {
 	r := New()
 	ctl := newRecorder(t, r, "1000")
 	pilot := newRecorder(t, r, "1001")
 	both := newRecorder(t, r, "1002")
 
-	// 118000 同时耦合到 121800 和 124550。
-	r.Subscribe(ctl.sess.ID, control.Sub{
-		RX: []uint32{118000, 121800, 124550},
-		TX: []uint32{118000, 121800, 124550},
-		XC: [][2]uint32{{118000, 121800}, {118000, 124550}},
-	})
+	// 118000 同时耦合到五个频率。刻意不按顺序声明。
+	coupled := []uint32{124550, 121800, 125700, 122300, 123450}
+	want := []uint32{121800, 122300, 123450, 124550, 125700}
+
+	tx := append([]uint32{118000}, coupled...)
+	pairs := make([][2]uint32, 0, len(coupled))
+	for _, f := range coupled {
+		pairs = append(pairs, [2]uint32{118000, f})
+	}
+	r.Subscribe(ctl.sess.ID, control.Sub{RX: tx, TX: tx, XC: pairs})
 	r.Subscribe(pilot.sess.ID, control.Sub{TX: []uint32{118000}})
-	// 这个人不订阅主频率，只订阅两个耦合频率。
-	r.Subscribe(both.sess.ID, control.Sub{RX: []uint32{121800, 124550}})
+	// 这个人不订阅主频率，只订阅五个耦合频率。
+	r.Subscribe(both.sess.ID, control.Sub{RX: coupled})
+
+	// 一次调用是抽一次样。抽二十次。
+	for i := 0; i < 20; i++ {
+		if got := r.coupledWith(118000); !slices.Equal(got, want) {
+			t.Fatalf("call %d: coupledWith(118000) = %v, want %v — map iteration is randomised, so this must be sorted, not merely often-sorted", i, got, want)
+		}
+	}
 
 	if _, err := r.Fanout(pilot.sess.ID, packet(118000, 1, 0xAA)); err != nil {
 		t.Fatalf("Fanout: %v", err)
@@ -650,8 +669,8 @@ func TestCoupledTargetsAreVisitedInAscendingOrder(t *testing.T) {
 		t.Fatalf("got %d copies, want 1", len(both.got))
 	}
 	h, _, _ := wire.Parse(both.got[0])
-	if h.FreqKHz != 121800 {
-		t.Fatalf("FreqKHz = %d, want the lower coupled frequency 121800 — the target order must be deterministic, or the same listener sees the audio jump between two radios from one transmission to the next", h.FreqKHz)
+	if h.FreqKHz != want[0] {
+		t.Fatalf("FreqKHz = %d, want the lowest coupled frequency %d — the target order must be deterministic, or the same listener sees the audio jump between radios from one transmission to the next", h.FreqKHz, want[0])
 	}
 }
 
@@ -1037,8 +1056,10 @@ func TestAMaximalSubStillProducesASendableAck(t *testing.T) {
 	var sub control.Sub
 	var raw []byte
 	for n := 13000; n > 0; n-- {
+		// **降序声明**是故意的：升序的话"先排序再截断"和"先截断再排序"
+		// 会给出同一个答案，那条断言就废了。
 		freqs := make([]uint32, 0, n)
-		for i := 0; i < n; i++ {
+		for i := n - 1; i >= 0; i-- {
 			freqs = append(freqs, uint32(i))
 		}
 		candidate := control.Sub{RX: []uint32{}, TX: freqs, XC: [][2]uint32{}}
@@ -1065,6 +1086,12 @@ func TestAMaximalSubStillProducesASendableAck(t *testing.T) {
 	}
 	if len(ack.Rejected) == 0 {
 		t.Fatal("12760 frequencies were refused and the client must be told something about it")
+	}
+	// 截断发生在排序**之后**，所以留下的是数值最小的那一批。声明是降序的
+	// （12767…0），MaxTX 收下最先声明的 8 个（12767…12760），所以被拒的是
+	// 0…12759，排序截断后应当从 0 开始。先截断再排序的话这里是 12504。
+	if ack.Rejected[0] != 0 {
+		t.Fatalf("Rejected[0] = %d, want 0 — the truncation keeps the numerically smallest entries, which only holds if it happens after the sort", ack.Rejected[0])
 	}
 	out, err := control.Encode(&ack)
 	if err != nil {
@@ -1124,5 +1151,92 @@ func TestFanoutGivesEachListenerItsOwnBuffer(t *testing.T) {
 	}
 	if &raw[0][0] == &raw[1][0] {
 		t.Fatal("both listeners were handed the same backing array; Send may be asynchronous, so the second header would overwrite the first packet before it is on the wire")
+	}
+}
+
+// --- qualityFor 的直接单元测试 ---
+//
+// 这一组**不经过 Fanout**，直接调 qualityFor。理由是这条线索走到最后的产物，
+// 值得完整写下来。
+//
+// "不知道就放行"这条规则在三个层次上各有一道闸门，而它们**互相遮蔽**：
+//
+//  1. Fanout 里的 `if !degraded { senderPos, senderKnown = lookup(...) }`
+//  2. qualityFor 里的 `if degraded || !senderKnown { return 255, true }`
+//     和 `lp, ok := lookup(...); if !ok { return 255, true }`
+//  3. **另一个包里的** fsdfeed.EffectiveRangeNM 里的
+//     `if !a.Known || !b.Known { return 0, false }`
+//
+// 于是经由 Fanout 的测试无论怎么写，都打不红第 2 层的任何一道——删掉它，
+// 第 1 层或第 3 层会接住，全套照绿。今天无害，因为三层执行的是同一条策略。
+// 危险在将来：哪天有人把 EffectiveRangeNM 改成"位置未知就按某个默认射程算"
+// （一个完全提得出来的提议），"位置未知就过滤"会悄悄回来，而没有一处会红。
+//
+// 通法就是这一条：**冗余的闸门互相遮蔽时，每一道都要在它自己那一层钉住。**
+// 下面这些断言不关心任何别的层做什么，所以没有任何遮蔽能盖住它们。
+// 经由 Fanout 的那些测试在同样的变异下仍然是绿的——那正是这一组存在的理由。
+func TestQualityForPassesEverythingItCannotLocate(t *testing.T) {
+	// 约 5000 海里：5000/60 ≈ 83.3 度纬度。双方半项合计 40 海里，比值 125，
+	// 正常一定被切掉。
+	const farLat = 83.4
+
+	sender := airborne("CCA1", "1000", 0.0, 120.0, 20)
+	farListener := airborne("CCA2", "1001", farLat, 120.0, 20)
+
+	cases := []struct {
+		name          string
+		degraded      bool
+		senderPos     fsdfeed.Position
+		senderKnown   bool
+		listenerPos   fsdfeed.Position
+		listenerKnown bool
+		wantQual      uint8
+		wantDeliver   bool
+	}{
+		{
+			// 钉住 `degraded ||` 那一半。
+			name:      "degraded feed, both positions known and 5000 NM apart",
+			degraded:  true,
+			senderPos: sender, senderKnown: true,
+			listenerPos: farListener, listenerKnown: true,
+			wantQual: 255, wantDeliver: true,
+		},
+		{
+			// 钉住 `|| !senderKnown` 那一半。位置带着坐标而 Known 标志是 false，
+			// 这个组合 Fanout 今天造不出来（lookup 查不到时返回的是零值）——
+			// **故意的**：这一层测的是 qualityFor 自己的契约，"调用方说了这个
+			// 位置没查到，就不许拿它去算距离"，不借任何别的层的力。
+			name:      "the caller says the sender is not located, so the position must not be used",
+			degraded:  false,
+			senderPos: sender, senderKnown: false,
+			listenerPos: farListener, listenerKnown: true,
+			wantQual: 255, wantDeliver: true,
+		},
+		{
+			// 听众那一道，和上一条完全对称。
+			name:      "the caller says the listener is not located, so the position must not be used",
+			degraded:  false,
+			senderPos: sender, senderKnown: true,
+			listenerPos: farListener, listenerKnown: false,
+			wantQual: 255, wantDeliver: true,
+		},
+		{
+			// 对照组。没有它，上面三条可能只是因为坐标写错了而全都"放行"，
+			// 什么都没测到——这一条证明这批输入**有能力**失败。
+			name:      "control: everything known and 5000 NM apart must be filtered out",
+			degraded:  false,
+			senderPos: sender, senderKnown: true,
+			listenerPos: farListener, listenerKnown: true,
+			wantQual: 0, wantDeliver: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			qual, deliver := qualityFor(tc.degraded, tc.senderPos, tc.senderKnown, tc.listenerPos, tc.listenerKnown)
+			if qual != tc.wantQual || deliver != tc.wantDeliver {
+				t.Fatalf("qualityFor = (%d, %v), want (%d, %v)", qual, deliver, tc.wantQual, tc.wantDeliver)
+			}
+		})
 	}
 }

@@ -77,7 +77,8 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 			// 的管制员因此只收到一份——两份就是回声。
 			seen[l.ID] = struct{}{}
 
-			qual, deliver := qualityFor(snap, degraded, senderPos, senderKnown, l)
+			lp, listenerKnown := lookup(snap, l)
+			qual, deliver := qualityFor(degraded, senderPos, senderKnown, lp, listenerKnown)
 			if !deliver {
 				continue
 			}
@@ -103,12 +104,18 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 // 所有"不知道"的分支都汇到这里，答案统一是**放行**而不是屏蔽：
 // 在语音系统里"听不见"比"听得太远"糟糕得多，而"位置未知"恰好就是一架
 // 刚连上、还没发位置包、正要呼叫放行的飞机所处的状态。
-func qualityFor(snap fsdfeed.Snapshot, degraded bool, senderPos fsdfeed.Position, senderKnown bool, l *Session) (uint8, bool) {
+//
+// 两个参与者都以 (位置, 有没有查到) 的形式传进来，对称——而且刻意**不**在这里
+// 查快照。查表留在 Fanout 里，是为了让这个函数成为两组位置的纯函数，否则它自己
+// 那两道"不知道就放行"的闸门根本钉不住：查表在里面的话，!ok 那一支拿到的永远是
+// 零值 Position（Known 为 false），于是 fsdfeed.EffectiveRangeNM 会替它放行，
+// 任何测试都分不出闸门在不在。代价是降级时也会为每个听众查一次表（之前可以
+// 短路掉），一次 map 查询几十纳秒，换一道能被钉住的闸门，值。
+func qualityFor(degraded bool, senderPos fsdfeed.Position, senderKnown bool, lp fsdfeed.Position, listenerKnown bool) (uint8, bool) {
 	if degraded || !senderKnown {
 		return 255, true
 	}
-	lp, ok := lookup(snap, l)
-	if !ok {
+	if !listenerKnown {
 		// 只连了语音没连 FSD 的人不该因此变成聋子。
 		return 255, true
 	}

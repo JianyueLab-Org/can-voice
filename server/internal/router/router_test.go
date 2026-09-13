@@ -418,6 +418,29 @@ func TestSubAckTxIsSortedToo(t *testing.T) {
 	}
 }
 
+// TestSubAckRejectedIsSortedToo 补齐 ACK 三个列表字段里最后一个没人守的排序。
+//
+// 它是顺着声明顺序 append 出来的、不是从 map 里遍历出来的，所以去掉 slices.Sort
+// 不会让任何测试闪烁——只会安静地换一种顺序，四十次运行四十次绿。（这一条是拿
+// map-order 变异扫全包时顺手扫出来的：另外两个排序各有 40/40 的测试接住，
+// 这一个是 0/40。）
+//
+// 而它现在是**承重**的：Rejected 超过 maxRejected 时是在排序**之后**截断的，
+// "留下的是数值最小的那一批"这个确定性承诺全靠这一行。
+func TestSubAckRejectedIsSortedToo(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 1, MaxRX: 1, Send: func([]byte) {}})
+	// MaxTX 是 1，所以第一个之后的三个都被拒，且刻意不按升序声明。
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{127800, 118000, 124550, 121800}})
+
+	if len(ack.Rejected) != 3 {
+		t.Fatalf("Rejected = %v, want the three over the MaxTX limit", ack.Rejected)
+	}
+	if !slices.IsSorted(ack.Rejected) {
+		t.Fatalf("SubAck.Rejected = %v, want ascending order — the ACK's three list fields follow one contract, and the maxRejected truncation happens after this sort", ack.Rejected)
+	}
+}
+
 // TestAFrequencyGrantedViaTxIsNotThenRejectedByTheRxLimit 钉住 RX 闸门里的
 // already 判断。
 //
