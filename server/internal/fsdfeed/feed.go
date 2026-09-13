@@ -539,13 +539,19 @@ func (f *Feed) stream(parent context.Context) error {
 
 	slog.Info("fsd feed connected", "url", f.url)
 
+	// 一次读出，之后全用局部变量。这个超时不该在一条流的中途改变，而且
+	// 第 548 行原本是在 time.AfterFunc 的回调里读它——那个回调跑在运行时的
+	// 计时器 goroutine 上，watchdog.Stop() 按文档并**不等**已经在跑的回调
+	// 返回，所以测试里那句 defer 还原能和它撞上。读一次就没有这个问题了。
+	idle := feedIdleTimeout
+
 	// 看门狗：每读到一行就续期。到期就取消请求，让 sc.Scan() 返回，
 	// stream() 得以返回，Run 才有机会把 degraded 置位。
 	// 计时器在"刚好有一行到达"的瞬间到期会白白重连一次——代价是一次
 	// reconnectDelay，比永远卡死好得多。
-	watchdog := time.AfterFunc(feedIdleTimeout, func() {
+	watchdog := time.AfterFunc(idle, func() {
 		slog.Warn("fsd feed went silent, dropping the connection",
-			"idle_timeout", feedIdleTimeout)
+			"idle_timeout", idle)
 		cancel()
 	})
 	defer watchdog.Stop()
@@ -574,7 +580,7 @@ func (f *Feed) stream(parent context.Context) error {
 	}
 
 	for sc.Scan() {
-		watchdog.Reset(feedIdleTimeout)
+		watchdog.Reset(idle)
 		line := sc.Text()
 		switch {
 		case line == "":
