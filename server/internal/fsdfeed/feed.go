@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -38,17 +39,43 @@ const maxEventBytes = 8 << 20
 // 是变量而不是常量，只为了测试能把它调小——生产代码不要改它。
 var feedIdleTimeout = 30 * time.Second
 
+// maxConsecutiveParseFailures 是连续多少个事件解析不了就认定这条流没用。
+//
+// 收得到字节但一个都用不了，和收不到字节是同一件事，只是更隐蔽：看门狗看到行
+// 就续期，于是它永远不响。Task 5 把 update 的线格式认错时正是这个样子——
+// 每秒一条 warn，快照冻结在连接那一刻，degraded 停在 false。
+//
+// 触发后主动断开而不是原地继续：只有重连才会带来一份新的 snapshot 事件，
+// 而流里是不会再自己发一份的。
+const maxConsecutiveParseFailures = 5
+
 // Position 是一个网络参与者（飞行员或管制/ATIS 席位）的位置与射程。
 type Position struct {
 	Callsign string
 	// CID 是这条记录的成员号。放进 Position 里是为了能从呼号索引反向重建
 	// cid 索引——见 indexByCID。
-	CID     string
-	Lat     float64
-	Lon     float64
-	AltFt   float64
-	RangeNM float64
-	IsATC   bool
+	CID   string
+	Lat   float64
+	Lon   float64
+	AltFt float64
+	// Known 报告 can-fsd 是否已经知道这个人在哪。
+	//
+	// 为 false 时 Lat/Lon 没有意义——它们是零值，而 (0,0) 是几内亚湾。
+	// 射程过滤必须在这种时候**放行**而不是屏蔽：刚连上还没发位置包的
+	// 那架飞机，正是停机坪上准备呼叫放行的那架。见 EffectiveRangeNM。
+	Known bool
+	// RadiusNM 是管制席位声明的权威半径（visual_range，或它为 0 时的
+	// 后缀兜底表）。只有 IsATC 为 true 时有意义，飞行员这里是 0。
+	RadiusNM float64
+	// LOSTermNM 是视距公式里属于这个参与者的那一项 1.23√h。
+	// 只有飞行员有，席位这里是 0。
+	//
+	// 它和 RadiusNM 是两种不能互换的量：半项要和对方的半项相加，半径
+	// 本身就是完整的距离。合成一个字段再让调用方猜的话，取 max 会把
+	// 两架 FL350 的 460 海里砍成 230，相加会让管制员听到 830 海里外。
+	// 合并规则只存在于 EffectiveRangeNM 一处。
+	LOSTermNM float64
+	IsATC     bool
 	// IsATIS 区分 ATIS 席位和真人管制员。两者的 IsATC 都是 true（射程规则
 	// 相同），但 cid 冲突时谁该胜出取决于这一位。它由条目来自哪个集合决定，
 	// 不看呼号后缀——can-fsd 那边就是按集合分的。
@@ -65,31 +92,41 @@ type Position struct {
 // map 一起新建），从不修改旧 Snapshot 里的 map。调用方因此可以放心持有
 // 一份 Snapshot 任意长时间——它不会在你手上变化——但也永远只是那一刻的
 // 快照，想要更新的数据必须重新调用 Snapshot。
+//
+// 调用方这一侧的义务与之对应：**两个 map 都是只读的。** 往里写会同时影响
+// 其它持有同一份快照的 goroutine，而且没有任何锁保护——那是数据竞争，不是
+// "改了自己那份"。需要一份能改的就自己拷贝。
 type Snapshot struct {
 	ByCID      map[string]Position
 	ByCallsign map[string]Position
 }
 
-// flexFloat 吃 JSON 数字也吃 JSON 字符串。
+// flexFloat 吃 JSON 数字也吃 JSON 字符串，并且记住自己有没有被真的赋过值。
 //
 // can-fsd 的 datafeed 里飞行员的经纬度是数字而管制员/ATIS 的是字符串，
 // 这是它刻意的、由 can-fsd 自己的 testdata/datafeed_golden.json 钉住的
 // 契约（不是这里要绕过的 bug）。只当数字解析会让所有管制员落在 0,0
 // （几内亚湾），表现为管制员谁都听不见，而日志里一条错误都没有。
-type flexFloat float64
+//
+// Set 这一位盖的是同一个失败的另一半：can-fsd 在第一个位置包到达之前**省略**
+// 这几个键，而零值同样是几内亚湾。键不存在时 UnmarshalJSON 根本不会被调用，
+// Set 保持 false；null 和 "" 会调用到，显式清成未赋值。
+type flexFloat struct {
+	V   float64
+	Set bool
+}
 
 func (f *flexFloat) UnmarshalJSON(b []byte) error {
 	s := strings.TrimSpace(string(b))
 	if s == "null" || s == `""` {
-		*f = 0
+		*f = flexFloat{}
 		return nil
 	}
-	s = strings.Trim(s, `"`)
-	v, err := strconv.ParseFloat(s, 64)
+	v, err := strconv.ParseFloat(strings.Trim(s, `"`), 64)
 	if err != nil {
 		return fmt.Errorf("coordinate %q is neither a JSON number nor a numeric string: %w", b, err)
 	}
-	*f = flexFloat(v)
+	*f = flexFloat{V: v, Set: true}
 	return nil
 }
 
@@ -141,18 +178,30 @@ type feedDelta struct {
 	ATIS        *deltaGroup[atcEntry]   `json:"atis"`
 }
 
+// minAntennaFt 是机载天线离地高度的下限，单位英尺。
+//
+// 没有它，停在海平面机场的飞机半项是 1.23√0 = 0，两架这样的飞机合起来
+// 0 海里，而 Quality 对射程 0 的回答是"不扇出"——同一个机坪上的两架
+// 飞机互相听不见。真实的机载 VHF 天线离地约 10–20 英尺，取 20 给出
+// 约 5.5 海里的半项，两架地面飞机合起来约 11 海里，对地面通话是合理的。
+//
+// 高原机场本来就不受影响：can-fsd 的 altitude 是 MSL，ZULS 的停机坪
+// 是 11700 英尺，半项 133 海里。这个下限只救海平面附近。
+const minAntennaFt = 20
+
 // pilotPosition 把一条 pilot 记录折算成位置。
 func pilotPosition(e pilotEntry) Position {
 	// 飞行员的射程由高度算，不用 datafeed 自带的 visual_range：
 	// VHF 是视距传播，6897 英尺就是约 102 海里，而样本里这条记录的
 	// visual_range 是 40——用它会把射程砍掉 60%。
 	return Position{
-		Callsign: e.Callsign,
-		CID:      e.CID,
-		Lat:      float64(e.Lat),
-		Lon:      float64(e.Lon),
-		AltFt:    float64(e.Altitude),
-		RangeNM:  geo.LineOfSightNM(float64(e.Altitude), 0),
+		Callsign:  e.Callsign,
+		CID:       e.CID,
+		Known:     e.Lat.Set && e.Lon.Set,
+		Lat:       e.Lat.V,
+		Lon:       e.Lon.V,
+		AltFt:     e.Altitude.V,
+		LOSTermNM: geo.LOSTermNM(math.Max(e.Altitude.V, minAntennaFt)),
 	}
 }
 
@@ -167,9 +216,10 @@ func atcPosition(e atcEntry, isATIS bool) Position {
 	return Position{
 		Callsign: e.Callsign,
 		CID:      e.CID,
-		Lat:      float64(e.Lat),
-		Lon:      float64(e.Lon),
-		RangeNM:  r,
+		Known:    e.Lat.Set && e.Lon.Set,
+		Lat:      e.Lat.V,
+		Lon:      e.Lon.V,
+		RadiusNM: r,
 		IsATC:    true,
 		IsATIS:   isATIS,
 	}
@@ -210,6 +260,39 @@ func betterForCID(a, b Position) bool {
 		return !a.IsATIS
 	}
 	return a.Callsign < b.Callsign
+}
+
+// EffectiveRangeNM 返回 a 与 b 之间的有效通联距离上限，单位海里。
+//
+// 第二个返回值是"要不要做射程过滤"，**不是**"射程是不是零"。为 false 时
+// 调用方应当放行这一包，而不是丢掉它。
+//
+// 这是合并规则唯一的所在地。分散到调用方去猜的话，没有任何一条规则同时对：
+// 两架 FL350 的飞机取 max 得 230 而正确是 460（射程凭空砍半），飞行员和
+// 管制员相加得 830 而权威值是 600（管制员听到射程外的人）。
+func EffectiveRangeNM(a, b Position) (float64, bool) {
+	// 任何一方位置未知就不过滤。理由和 Degraded() 一样：不知道的时候宁可
+	// 全放行也不要全屏蔽——"听不见"在语音系统里比"听得太远"糟糕得多
+	// （unknownSuffixRange 的注释是同一条理由的另一个实例）。而这恰好就是
+	// 一架刚连上、还没发位置包、正要呼叫放行的飞机所处的状态。
+	//
+	// 代价：一个从不发位置包的客户端能借此听到全网。可以接受——他同样不会
+	// 出现在雷达上，can-fsd 会把他超时踢掉，而收下全网音频的带宽由他自己承担。
+	if !a.Known || !b.Known {
+		return 0, false
+	}
+	switch {
+	case a.IsATC && b.IsATC:
+		// 两个席位之间取大的那个。两个都是完整的权威半径，相加没有物理意义。
+		return math.Max(a.RadiusNM, b.RadiusNM), true
+	case a.IsATC:
+		return a.RadiusNM, true
+	case b.IsATC:
+		return b.RadiusNM, true
+	default:
+		// 两架飞机：两个半项相加，这才是 1.23×(√h₁+√h₂)。
+		return a.LOSTermNM + b.LOSTermNM, true
+	}
 }
 
 // ParseDatafeed 把一份 datafeed 文档（data.json 或者 SSE `snapshot` 事件的
@@ -354,13 +437,15 @@ func (f *Feed) applyEvent(event string, data []byte) error {
 		for cs, p := range f.snap.ByCallsign {
 			merged[cs] = p
 		}
-		for cs, p := range changed {
-			merged[cs] = p
-		}
-		// 最后删：can-fsd 的 diffFeeds 保证一个呼号不会同时出现在 changed
-		// 和 removed 里，所以顺序其实无所谓，定死一个免得以后猜。
+		// 先删后改：can-fsd 的 diffFeeds 只保证一个呼号不会在**同一个集合**里
+		// 同时出现在 changed 和 removed 里——一个呼号从 pilots 消失、同一个
+		// tick 又在 controllers 里出现（换了身份重新登录）时，先应用 changed
+		// 会让随后的 removed 把它删掉而不是移过去，并且一直缺到下次重连。
 		for _, cs := range removed {
 			delete(merged, cs)
+		}
+		for cs, p := range changed {
+			merged[cs] = p
 		}
 		// cid 索引整个重建而不是增量维护——离线一个管制员之后，同 cid 的
 		// ATIS 必须顶上来，而增量维护只会把管制员那条删掉、留下一个查不到
@@ -448,6 +533,7 @@ func (f *Feed) stream(parent context.Context) error {
 	sc.Buffer(make([]byte, 0, 64<<10), maxEventBytes)
 	event := "message"
 	var data []byte
+	var consecutiveFailures int
 	for sc.Scan() {
 		watchdog.Reset(feedIdleTimeout)
 		line := sc.Text()
@@ -457,6 +543,17 @@ func (f *Feed) stream(parent context.Context) error {
 			if len(data) > 0 {
 				if err := f.applyEvent(event, data); err != nil {
 					slog.Warn("skipping an unparsable feed event", "event", event, "error", err)
+					consecutiveFailures++
+					if consecutiveFailures >= maxConsecutiveParseFailures {
+						f.mu.Lock()
+						f.degraded = true
+						f.mu.Unlock()
+						slog.Error("too many consecutive unparsable feed events, dropping the connection",
+							"count", consecutiveFailures, "url", f.url)
+						return fmt.Errorf("%d consecutive events failed to parse, last error: %w", consecutiveFailures, err)
+					}
+				} else {
+					consecutiveFailures = 0
 				}
 			}
 			event, data = "message", nil
@@ -472,13 +569,21 @@ func (f *Feed) stream(parent context.Context) error {
 				data = append(data, '\n')
 			}
 			data = append(data, v...)
+			if len(data) > maxEventBytes {
+				// 单行有 sc.Buffer 的上限兜底，但累积的 data 没有——一个不停发
+				// 短 data: 行、永远不发空行的对端会把这个切片撑到内存耗尽，
+				// 而且每一行都在喂看门狗，所以它永远不会触发。
+				slog.Warn("a multi-line feed event exceeded the size limit, discarding it",
+					"event", event, "limit", maxEventBytes)
+				event, data = "message", nil
+			}
 		}
 	}
 	if err := sc.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
 			// 重连解决不了这个：同一行会再来一次。把它单独说出来，否则它
 			// 看起来就是一条普通的掉线，而实际上是无限重连。
-			return fmt.Errorf("a feed event exceeded %d bytes; reconnecting will hit the same line again: %w", maxEventBytes, err)
+			return fmt.Errorf("a feed line exceeded %d bytes; reconnecting will hit the same line again: %w", maxEventBytes, err)
 		}
 		return err
 	}

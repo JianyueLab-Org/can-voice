@@ -100,3 +100,69 @@ func TestDistanceIsZeroForTheSamePoint(t *testing.T) {
 		t.Fatalf("DistanceNM to the same point = %v, want 0", got)
 	}
 }
+
+// TestLOSTermIsHalfOfTheLineOfSight 钉住两个函数的关系。
+// 射程公式是 1.23×(√h₁+√h₂)，每个参与者贡献自己的那一项；分开之后
+// 必须还是原来那个和，否则飞行员之间的射程就变了。
+func TestLOSTermIsHalfOfTheLineOfSight(t *testing.T) {
+	for _, c := range []struct{ a, b float64 }{{0, 0}, {35000, 35000}, {1000, 41000}, {6897, 0}} {
+		want := LineOfSightNM(c.a, c.b)
+		got := LOSTermNM(c.a) + LOSTermNM(c.b)
+		if math.Abs(got-want) > 1e-9 {
+			t.Fatalf("LOSTermNM(%v)+LOSTermNM(%v) = %v, LineOfSightNM = %v", c.a, c.b, got, want)
+		}
+	}
+}
+
+func TestLOSTermClampsNegativeAltitude(t *testing.T) {
+	// 死海边上的机场是负的 MSL 高度，NaN 会一路传染到信号质量里。
+	if got := LOSTermNM(-1300); got != 0 {
+		t.Fatalf("LOSTermNM(-1300) = %v, want 0", got)
+	}
+}
+
+func TestFallbackRangeIgnoresSurroundingWhitespace(t *testing.T) {
+	// 呼号来自网络。带空白的后缀认不出来就掉到 80 海里的默认值上，
+	// 一个 GND 席位（15 海里）会变成 80，听到五倍远的地方。
+	if got, want := FallbackRangeNM(" ZSPD_TWR "), 30.0; got != want {
+		t.Fatalf("FallbackRangeNM(%q) = %v, want %v", " ZSPD_TWR ", got, want)
+	}
+}
+
+func TestFallbackRangeTableCases(t *testing.T) {
+	for _, c := range []struct {
+		callsign string
+		want     float64
+	}{
+		{"ZSPD_GND", 15},
+		{"ZSPD_TWR", 30},
+		{"ZSSS_1_TWR", 30}, // 多个下划线：取最后一段
+		{"ZSHA_CTR", 250},
+		{"PRC_FSS", 600},
+		{"ZSSS_ATIS", 60},
+		{"ZSPD_XYZ", 80},     // 认不出的后缀
+		{"NOUNDERSCORE", 80}, // 根本没有下划线
+		{"zspd_twr", 30},     // 大小写不敏感
+		{"", 80},
+	} {
+		if got := FallbackRangeNM(c.callsign); got != c.want {
+			t.Errorf("FallbackRangeNM(%q) = %v, want %v", c.callsign, got, c.want)
+		}
+	}
+}
+
+func TestDistanceEdgeCases(t *testing.T) {
+	// 对跖点：地球半周长。
+	if got, want := DistanceNM(0, 0, 0, 180), math.Pi*3440.065; math.Abs(got-want) > 0.5 {
+		t.Fatalf("antipodal distance = %v, want about %v", got, want)
+	}
+	// 跨 180° 经线：179°E 到 179°W 只有 2 个经度，不是 358 个。
+	got := DistanceNM(0, 179, 0, -179)
+	if got > 130 {
+		t.Fatalf("distance across the antimeridian = %v NM, want about 120 — the formula went the long way round", got)
+	}
+	// 同一点。
+	if got := DistanceNM(31.2, 121.3, 31.2, 121.3); got != 0 {
+		t.Fatalf("distance to self = %v, want 0", got)
+	}
+}

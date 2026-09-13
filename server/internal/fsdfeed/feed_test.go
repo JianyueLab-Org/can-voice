@@ -10,8 +10,11 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 )
 
 func sample(t *testing.T) Snapshot {
@@ -63,15 +66,16 @@ func TestPilotRangeComesFromAltitudeNotVisualRange(t *testing.T) {
 	// 6897 英尺约 102 海里。用 visual_range 会把射程砍掉 60%。
 	s := sample(t)
 	p := s.ByCallsign["CCA5852"]
-	if p.RangeNM < 90 || p.RangeNM > 115 {
-		t.Fatalf("pilot RangeNM = %.0f, want about 102 (line of sight from 6897 ft)", p.RangeNM)
+	want := geo.LOSTermNM(6897)
+	if math.Abs(p.LOSTermNM-want) > 1e-9 {
+		t.Fatalf("pilot LOSTermNM = %v, want %v (line of sight term from 6897 ft)", p.LOSTermNM, want)
 	}
 }
 
 func TestControllerRangeUsesVisualRange(t *testing.T) {
 	s := sample(t)
-	if p := s.ByCallsign["ZSHA_CTR"]; p.RangeNM != 600 {
-		t.Fatalf("ZSHA_CTR RangeNM = %v, want 600 from visual_range", p.RangeNM)
+	if p := s.ByCallsign["ZSHA_CTR"]; p.RadiusNM != 600 {
+		t.Fatalf("ZSHA_CTR RadiusNM = %v, want 600 from visual_range", p.RadiusNM)
 	}
 }
 
@@ -82,8 +86,8 @@ func TestZeroVisualRangeFallsBackToTheSuffixTable(t *testing.T) {
 	if !ok {
 		t.Fatal("ZSSS_ATIS missing from the snapshot")
 	}
-	if p.RangeNM != 60 {
-		t.Fatalf("ZSSS_ATIS RangeNM = %v, want the 60 nm _ATIS fallback (its visual_range is 0)", p.RangeNM)
+	if p.RadiusNM != 60 {
+		t.Fatalf("ZSSS_ATIS RadiusNM = %v, want the 60 nm _ATIS fallback (its visual_range is 0)", p.RadiusNM)
 	}
 }
 
@@ -194,8 +198,8 @@ func TestControllerAndAtisDeltasApply(t *testing.T) {
 	if !c.IsATC || c.IsATIS {
 		t.Fatalf("ZSHA_CTR = %+v, want IsATC and not IsATIS", c)
 	}
-	if c.RangeNM != 600 {
-		t.Fatalf("ZSHA_CTR range = %v, want the declared 600", c.RangeNM)
+	if c.RadiusNM != 600 {
+		t.Fatalf("ZSHA_CTR range = %v, want the declared 600", c.RadiusNM)
 	}
 	a, ok := s.ByCallsign["ZSSS_ATIS"]
 	if !ok {
@@ -258,8 +262,8 @@ func TestTheAtisDoesNotDisplaceTheHumanInTheCidIndex(t *testing.T) {
 	if p.Callsign != "ZSHA_CTR" {
 		t.Fatalf("ByCID[1000] = %s, want the human controller ZSHA_CTR, not the ATIS bot", p.Callsign)
 	}
-	if p.RangeNM != 600 {
-		t.Fatalf("range = %v, want the controller's 600 (the ATIS would give 60)", p.RangeNM)
+	if p.RadiusNM != 600 {
+		t.Fatalf("range = %v, want the controller's 600 (the ATIS would give 60)", p.RadiusNM)
 	}
 	if _, ok := s.ByCallsign["ZSSS_ATIS"]; !ok {
 		t.Fatal("the ATIS must still be reachable by callsign")
@@ -496,8 +500,11 @@ func TestASilentStreamEventuallyGoesDegraded(t *testing.T) {
 	done := make(chan struct{})
 	go func() { defer close(done); f.Run(ctx) }()
 
-	// 先等它连上并清掉 degraded。
-	deadline := time.Now().Add(2 * time.Second)
+	// 先等它连上并清掉 degraded。窗口要明显大于 reconnectDelay（5 秒）：
+	// 太窄的话偶尔会错过"已经上线"的那一刻，Run 转去睡满 reconnectDelay，
+	// 撞穿测试自己的 deadline，然后以一条指向错误原因的信息失败——
+	// 这个测试要盯的是看门狗，不是连接建立的速度。
+	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) && f.Degraded() {
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -560,6 +567,12 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 	wg.Add(1)
 	go func() { defer wg.Done(); f.Run(ctx) }()
 
+	// 读者必须真的读到过东西。没有这个断言，这个测试对着一个死端点也会绿——
+	// 而它存在的全部意义就是让 -race 有东西可看：竞态检测器只报告真的并发
+	// 发生过的访问。Task 5 那次"干净的 -race"正是这么来的。
+	var seen atomic.Int64
+	var everUp atomic.Bool
+
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 		go func() {
@@ -570,11 +583,14 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 				// 真的读 map 的内容——只取结构体是测不出就地修改的。
 				for cs, p := range s.ByCallsign {
 					_, _ = cs, p.Lat
+					seen.Add(1)
 				}
 				for cid := range s.ByCID {
 					_ = cid
 				}
-				_ = f.Degraded()
+				if !f.Degraded() {
+					everUp.Store(true)
+				}
 			}
 		}()
 	}
@@ -582,4 +598,232 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	wg.Wait()
+
+	if seen.Load() == 0 {
+		t.Fatal("no reader ever observed a single entry; the stream never delivered anything and this test proved nothing about concurrency")
+	}
+	if !everUp.Load() {
+		t.Fatal("the feed was never observed as not-degraded; the stream never actually came up")
+	}
+}
+
+// TestAParticipantWithNoPositionYetIsNotPlacedAtNullIsland 是本任务的核心测试。
+//
+// can-fsd 在第一个位置包到达之前省略 latitude/longitude/altitude。把缺失当成 0
+// 会把这个人放在几内亚湾 (0,0)，离任何真实飞机五千海里——他听不到任何人，也没有
+// 人听得到他，日志里一条错误都没有。
+func TestAParticipantWithNoPositionYetIsNotPlacedAtNullIsland(t *testing.T) {
+	doc := []byte(`{"pilots":[
+		{"callsign":"CCA1","cid":"1"}
+	],"controllers":[
+		{"callsign":"ZSHA_CTR","cid":"1000","visual_range":600}
+	],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	for _, cs := range []string{"CCA1", "ZSHA_CTR"} {
+		p, ok := s.ByCallsign[cs]
+		if !ok {
+			t.Fatalf("%s is missing from the snapshot entirely", cs)
+		}
+		if p.Known {
+			t.Fatalf("%s has no coordinates in the document but Known = true; 0,0 is the Gulf of Guinea, not a position", cs)
+		}
+	}
+}
+
+// TestADeltaEntryWithNoCoordinatesIsAlsoUnknown 覆盖增量那条路径。
+//
+// 坐标缺失不只出现在全量快照里：can-fsd 自己的 TestFeedDeltaMarshalsOnlyChangedGroups
+// 构造的就是 Pilot{Callsign: "CCA101"} 其余全零，而 Latitude 是 *float64 + omitempty,
+// 所以一个 changed 条目完全可以没有坐标键。只在 ParseDatafeed 里判 Known、忘了增量
+// 路径的话，一架刚连上的飞机会在第一个 update 里被放回几内亚湾。
+func TestADeltaEntryWithNoCoordinatesIsAlsoUnknown(t *testing.T) {
+	f := NewFeed("http://example.invalid")
+	if err := f.applyEvent("snapshot", []byte(realSnapshotEvent)); err != nil {
+		t.Fatalf("applyEvent snapshot: %v", err)
+	}
+	upd := []byte(`{"update":7,"pilots":{"changed":[{"callsign":"CCA101","cid":"101"}]}}`)
+	if err := f.applyEvent("update", upd); err != nil {
+		t.Fatalf("applyEvent update: %v", err)
+	}
+	p, ok := f.Snapshot().ByCallsign["CCA101"]
+	if !ok {
+		t.Fatal("the delta entry did not apply at all")
+	}
+	if p.Known {
+		t.Fatal("a delta entry with no coordinate keys must be unknown, not 0,0")
+	}
+}
+
+// TestADeltaCanTakeAPositionAway 的方向和上一条相反：一个原本有位置的人，
+// 新的 changed 条目不带坐标了。合并是整条替换，所以 Known 必须跟着变回 false。
+func TestADeltaCanTakeAPositionAway(t *testing.T) {
+	f := NewFeed("http://example.invalid")
+	if err := f.applyEvent("snapshot", []byte(realSnapshotEvent)); err != nil {
+		t.Fatalf("applyEvent snapshot: %v", err)
+	}
+	if !f.Snapshot().ByCallsign["CCA1"].Known {
+		t.Fatal("CCA1 starts with a known position")
+	}
+	if err := f.applyEvent("update", []byte(`{"update":8,"pilots":{"changed":[{"callsign":"CCA1","cid":"1"}]}}`)); err != nil {
+		t.Fatalf("applyEvent update: %v", err)
+	}
+	if f.Snapshot().ByCallsign["CCA1"].Known {
+		t.Fatal("the new entry carries no coordinates, so the position is no longer known")
+	}
+}
+
+func TestAnExplicitNullCoordinateIsAlsoUnknown(t *testing.T) {
+	doc := []byte(`{"pilots":[{"callsign":"CCA1","cid":"1","latitude":null,"longitude":null,"altitude":null}],"controllers":[],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	if s.ByCallsign["CCA1"].Known {
+		t.Fatal("an explicit null coordinate must be unknown, not 0,0")
+	}
+}
+
+// TestAnEmptyStringCoordinateIsUnknown 是把 flexFloat 做成结构体而不是指针的理由。
+//
+// 指针版会让 "" 走进 UnmarshalJSON、被映射成 0、然后因为指针非 nil 而报告"已知"
+// ——同一个"缺失当成零"的错误只是下沉了一层。
+func TestAnEmptyStringCoordinateIsUnknown(t *testing.T) {
+	doc := []byte(`{"pilots":[],"controllers":[{"callsign":"ZSHA_CTR","cid":"1000","latitude":"","longitude":"","visual_range":600}],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	if s.ByCallsign["ZSHA_CTR"].Known {
+		t.Fatal("an empty-string coordinate must be unknown, not 0,0")
+	}
+}
+
+// TestANonNumericCoordinateIsStillAnError 确认上一条没有把真正的坏数据也放过去。
+func TestANonNumericCoordinateIsStillAnError(t *testing.T) {
+	doc := []byte(`{"pilots":[],"controllers":[{"callsign":"ZSHA_CTR","cid":"1000","latitude":"abc","longitude":"121.0"}],"atis":[]}`)
+	if _, err := ParseDatafeed(doc); err == nil {
+		t.Fatal("a non-numeric coordinate must be reported, not silently treated as unknown")
+	}
+}
+
+func TestARealPositionIsKnownIncludingZeroZero(t *testing.T) {
+	// 真的有人在 (0,0) 的话，那是一个已知位置。区别在于键在不在，不在于值。
+	doc := []byte(`{"pilots":[{"callsign":"CCA1","cid":"1","latitude":0,"longitude":0,"altitude":0}],"controllers":[],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	p := s.ByCallsign["CCA1"]
+	if !p.Known {
+		t.Fatal("coordinates that are present and zero are a known position; presence is what decides, not the value")
+	}
+	if p.Lat != 0 || p.Lon != 0 {
+		t.Fatalf("position = %v,%v, want 0,0", p.Lat, p.Lon)
+	}
+}
+
+// TestEffectiveRangeCombinesTheTwoKindsCorrectly 是 M4 的核心。
+//
+// 飞行员的 LOSTermNM 是视距公式的半项，管制席位的 RadiusNM 是权威半径。
+// 没有任何一条规则同时对这两种组合，所以合并逻辑必须只存在于一个地方。
+func TestEffectiveRangeCombinesTheTwoKindsCorrectly(t *testing.T) {
+	fl350 := Position{Callsign: "CCA1", Known: true, LOSTermNM: 230}
+	fl350b := Position{Callsign: "CCA2", Known: true, LOSTermNM: 230}
+	ctr := Position{Callsign: "ZSHA_CTR", Known: true, IsATC: true, RadiusNM: 600}
+	twr := Position{Callsign: "ZSPD_TWR", Known: true, IsATC: true, RadiusNM: 30}
+
+	// 两架飞机：两个半项相加。取 max 会得到 230，凭空把射程砍半。
+	if got, ok := EffectiveRangeNM(fl350, fl350b); !ok || got != 460 {
+		t.Fatalf("pilot+pilot = %v (ok=%v), want 460 — the two half-terms must be summed", got, ok)
+	}
+	// 飞行员 + 管制：管制的权威半径说了算。相加会得到 830，让管制员听到射程外。
+	if got, ok := EffectiveRangeNM(fl350, ctr); !ok || got != 600 {
+		t.Fatalf("pilot+CTR = %v (ok=%v), want the controller's authoritative 600", got, ok)
+	}
+	if got, ok := EffectiveRangeNM(ctr, fl350); !ok || got != 600 {
+		t.Fatalf("CTR+pilot = %v (ok=%v), want 600 — the function must be symmetric", got, ok)
+	}
+	// 两个席位：取大的。两个都是权威半径，相加没有物理意义。
+	if got, ok := EffectiveRangeNM(ctr, twr); !ok || got != 600 {
+		t.Fatalf("CTR+TWR = %v (ok=%v), want 600", got, ok)
+	}
+}
+
+func TestEffectiveRangeRefusesToFilterWhenAPositionIsUnknown(t *testing.T) {
+	// 第二个返回值是"要不要过滤"，不是"射程是不是零"。不知道的时候放行——
+	// 和 Degraded() 一样的原则。刚连上还没发位置包的飞机正要呼叫放行，
+	// 那是最不该把他静音的时刻。
+	known := Position{Callsign: "CCA1", Known: true, LOSTermNM: 230}
+	unknown := Position{Callsign: "CCA2"}
+	if _, ok := EffectiveRangeNM(known, unknown); ok {
+		t.Fatal("an unknown position must disable filtering, not produce a range")
+	}
+	if _, ok := EffectiveRangeNM(unknown, known); ok {
+		t.Fatal("must be symmetric")
+	}
+}
+
+// TestTwoAircraftParkedAtSeaLevelCanHearEachOther 是第三个症状。
+//
+// 海平面机场的飞机高度 0，半项 1.23√0 = 0，合起来 0 海里，而 Quality(d,0)
+// 的回答是"不扇出"。同一个机坪上的两架飞机互相听不见。
+func TestTwoAircraftParkedAtSeaLevelCanHearEachOther(t *testing.T) {
+	doc := []byte(`{"pilots":[
+		{"callsign":"CCA1","cid":"1","latitude":31.143,"longitude":121.805,"altitude":0},
+		{"callsign":"CCA2","cid":"2","latitude":31.145,"longitude":121.807,"altitude":0}
+	],"controllers":[],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	a, b := s.ByCallsign["CCA1"], s.ByCallsign["CCA2"]
+	rng, ok := EffectiveRangeNM(a, b)
+	if !ok {
+		t.Fatal("two aircraft with known positions must be filtered, not passed through")
+	}
+	if rng < 5 {
+		t.Fatalf("two aircraft parked at a sea-level airport get %v NM of range — they are on the same apron and cannot hear each other", rng)
+	}
+}
+
+func TestAPilotRangeStillGrowsWithAltitude(t *testing.T) {
+	// 地面下限不能把高度的影响抹平。
+	doc := []byte(`{"pilots":[
+		{"callsign":"LOW","cid":"1","latitude":30,"longitude":120,"altitude":0},
+		{"callsign":"HIGH","cid":"2","latitude":30,"longitude":120,"altitude":35000}
+	],"controllers":[],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	low, high := s.ByCallsign["LOW"], s.ByCallsign["HIGH"]
+	if !(high.LOSTermNM > 200) {
+		t.Fatalf("FL350 gives a %v NM half-term, want about 230", high.LOSTermNM)
+	}
+	if !(low.LOSTermNM < 10) {
+		t.Fatalf("a parked aircraft gives a %v NM half-term, want a small floor", low.LOSTermNM)
+	}
+}
+
+func TestControllerRadiusStillComesFromVisualRange(t *testing.T) {
+	doc := []byte(`{"pilots":[],"controllers":[
+		{"callsign":"ZSHA_CTR","cid":"1000","latitude":"31.0","longitude":"121.0","visual_range":600}
+	],"atis":[{"callsign":"ZSSS_ATIS","cid":"1001","latitude":"31.2","longitude":"121.3","visual_range":0}]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	if got := s.ByCallsign["ZSHA_CTR"].RadiusNM; got != 600 {
+		t.Fatalf("controller radius = %v, want the declared 600", got)
+	}
+	if got := s.ByCallsign["ZSSS_ATIS"].RadiusNM; got != 60 {
+		t.Fatalf("atis radius = %v, want the 60 from the suffix table (visual_range was 0)", got)
+	}
+	// 席位不带 LOS 半项，飞行员不带半径——两种量各归各的字段。
+	if s.ByCallsign["ZSHA_CTR"].LOSTermNM != 0 {
+		t.Fatal("an ATC position must not carry a line-of-sight term")
+	}
 }

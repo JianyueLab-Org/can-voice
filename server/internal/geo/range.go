@@ -32,13 +32,22 @@ func DistanceNM(lat1, lon1, lat2, lon2 float64) float64 {
 	return 2 * earthRadiusNM * math.Asin(math.Min(1, math.Sqrt(a)))
 }
 
+// LOSTermNM 是视距公式里属于一个参与者的那一项：1.23√h，高度单位英尺。
+//
+// 拆出来是因为两个参与者的射程是两项之**和**，而这个和必须在知道双方高度时
+// 才算得出来——把 1.23√h 存进某个人的"射程"字段，再在两个人之间取 max，
+// 会把两架 FL350 的 460 海里变成 230。
+func LOSTermNM(altFt float64) float64 {
+	return 1.23 * math.Sqrt(math.Max(0, altFt))
+}
+
 // LineOfSightNM 是 VHF 视距射程：1.23 × (√h₁ + √h₂)，高度单位英尺。
 //
 // 这个公式本身就产生了正确的行为——地面上听不到远处、高空能听很远——
 // 所以飞行员之间不需要任何额外规则。管制席位不能用它：一个 ACC 席位
 // 现实中是一组分布式电台，见 FallbackRangeNM 与 datafeed 的 visual_range。
 func LineOfSightNM(alt1Ft, alt2Ft float64) float64 {
-	return 1.23 * (math.Sqrt(math.Max(0, alt1Ft)) + math.Sqrt(math.Max(0, alt2Ft)))
+	return LOSTermNM(alt1Ft) + LOSTermNM(alt2Ft)
 }
 
 // suffixRange 是席位后缀的兜底半径，单位海里。
@@ -70,6 +79,7 @@ const unknownSuffixRange = 80
 // 这只是兜底：真正的权威来源是 can-fsd datafeed 里管制员自己声明的
 // visual_range 字段。只有当那个字段是 0（未声明）时才落到这张后缀表上。
 func FallbackRangeNM(callsign string) float64 {
+	callsign = strings.TrimSpace(callsign)
 	i := strings.LastIndex(callsign, "_")
 	if i < 0 {
 		return unknownSuffixRange
