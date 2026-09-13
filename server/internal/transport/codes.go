@@ -2,14 +2,15 @@ package transport
 
 import "github.com/quic-go/quic-go"
 
-// QUIC 应用层关闭码。这三个数字是**协议的一部分**：客户端靠它们决定要不要重连，
+// QUIC 应用层关闭码。这四个数字是**协议的一部分**：客户端靠它们决定要不要重连，
 // 所以改动等于改协议，不是重构。
 //
 // 客户端契约（写在这里，因为指望每个客户端作者自己想明白是行不通的）：
 //
-//	CloseNormal           → 可以按自己的策略重连。
-//	CloseHandshakeRefused → 先换一张新 token，否则不要重连。
-//	CloseEvicted          → **不要重连**，并告诉用户"你的账号在别处登录了"。
+//	CloseNormal            → 可以按自己的策略重连。
+//	CloseHandshakeRefused  → 先换一张新 token，否则不要重连。
+//	CloseEvicted           → **不要重连**，并告诉用户"你的账号在别处登录了"。
+//	CloseProtocolViolation → **不要重连**，去修客户端。
 const (
 	// CloseNormal 是正常关闭：进程退出、客户端主动断开。客户端可以重连。
 	CloseNormal quic.ApplicationErrorCode = 0
@@ -32,6 +33,19 @@ const (
 	// 顶号路径上刻意不发 BYE：被顶的那一条随时可能正卡在读上，而关闭码
 	// 一定到得了对端（它就在 CONNECTION_CLOSE 帧里）。
 	CloseEvicted quic.ApplicationErrorCode = 2
+
+	// CloseProtocolViolation 是对端把协议用坏了，坏到这条连接没法再继续。
+	// 今天只有一种情况会走到这里：控制流的写被对端按住超过了
+	// controlWriteTimeout（原因串 ReasonControlWriteStalled）。
+	//
+	// **客户端收到这个码必须去修自己的控制流读取，而不是重连。** 重连会立刻
+	// 把同一个 bug 再演一遍，于是拒绝—重连—再拒绝，无限循环——和 CloseEvicted
+	// 那个互顶形状是同一类，而且"连续失败三次就放弃"同样挡不住：重连本身是
+	// **成功**的，计数器一成功就清零，真正的失败发生在几秒之后。
+	//
+	// 这也正是它不能复用 CloseNormal 的理由：那个码的含义是"你可以按自己的
+	// 策略重连"，而在这里重连恰恰是错的答案。
+	CloseProtocolViolation quic.ApplicationErrorCode = 3
 )
 
 // 握手被拒的原因。和上面三个关闭码一样，这几个字符串是**协议的一部分**：
@@ -66,4 +80,20 @@ const (
 	// 刻意粗：对端在这一刻**还没有通过鉴权**，"是签名长度不对还是 payload 不是
 	// 合法 JSON"只对伪造 token 的人有用。详细原因留在服务端日志里。
 	ReasonRefused = "refused"
+
+	// ReasonControlWriteStalled：握手**之后**，服务端往控制流写一帧的时间超过了
+	// controlWriteTimeout——也就是对端不再读这条流了。配 CloseProtocolViolation。
+	//
+	// 这条和上面三条不同：它不是握手被拒的原因，而是一条已建立会话的死因。放在
+	// 同一组常量里，是因为它走的是同一条通道（CONNECTION_CLOSE 的 reason phrase），
+	// 客户端也用同一种方式读它。
+	//
+	// 为什么不能只是"重试这次写"：control.WriteFrame 是长度前缀加载荷两次 Write，
+	// 超时可能正好落在两次之间，这条流已经不同步了，没有任何可以续下去的东西。
+	//
+	// 症状比"连接断了"更值得写下来：写被按住时 readControl 也就**不再读**了——
+	// 读和写在同一个 goroutine 里。于是客户端之后的 SUB 一条都不会被处理，它
+	// 继续收着旧的那套频率，而它的无线电台面改动看上去毫无反应，连接却一切正常。
+	// 一个管制员重排台面却悄悄没生效，正是这套重写要躲开的那类故障。
+	ReasonControlWriteStalled = "control_write_stalled"
 )

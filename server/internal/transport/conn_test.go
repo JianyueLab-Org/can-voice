@@ -626,6 +626,7 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 		{"CloseNormal", CloseNormal, 0},
 		{"CloseHandshakeRefused", CloseHandshakeRefused, 1},
 		{"CloseEvicted", CloseEvicted, 2},
+		{"CloseProtocolViolation", CloseProtocolViolation, 3},
 	} {
 		if uint64(tc.got) != tc.want {
 			t.Errorf("%s = %d, want the wire value %d — clients hardcode this number", tc.name, tc.got, tc.want)
@@ -637,6 +638,7 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 		{"ReasonTokenExpired", ReasonTokenExpired, "token_expired"},
 		{"ReasonTokenInvalid", ReasonTokenInvalid, "token_invalid"},
 		{"ReasonRefused", ReasonRefused, "refused"},
+		{"ReasonControlWriteStalled", ReasonControlWriteStalled, "control_write_stalled"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want the wire value %q — clients match on this string", tc.name, tc.got, tc.want)
@@ -1018,4 +1020,130 @@ func ping(t *testing.T, c *client) *control.Pong {
 		t.Fatalf("after PING got %T, want *control.Pong", m)
 	}
 	return pong
+}
+
+// 本段钉住"写把读堵死"那条路已经被封上（Task 9C）。
+//
+// 形状：readControl 在同一个 goroutine 里读和写，而
+// initial_max_stream_data_bidi_remote 是**对端**的传输参数、quic-go v0.48.2 对它
+// 不设下限。一个握完手就不再读、并且把接收窗口调得很小的对端，会让服务端的下一次
+// 控制面写永久阻塞在流控上——于是这条会话之后的 SUB 一条都不会被处理，客户端继续
+// 收着旧的那套频率，台面改动看上去毫无反应，连接却一切正常。
+
+// stalledWindow 是那个不读的对端通告的流接收窗口。
+//
+// quic-go 的 populateConfig 对 InitialStreamReceiveWindow 只在为 0 时填默认值，
+// 不设下限（config.go:75-78），所以这个数能真的小到几帧就填满。
+// MaxStreamReceiveWindow 一起钉住，否则自动扩窗会把窗口抬起来。
+const stalledWindow = 1024
+
+// dialWindow 和 dial 一样，但让调用方指定流接收窗口。
+//
+// 刻意不去改 helpers_test.go 的 dial：那是 Task 10 也在用的共享脚手架。
+func dialWindow(t *testing.T, addr string, window uint64) quic.Connection {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	conn, err := quic.DialAddr(ctx, addr, &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{ALPN},
+	}, &quic.Config{
+		EnableDatagrams:            true,
+		InitialStreamReceiveWindow: window,
+		MaxStreamReceiveWindow:     window,
+	})
+	if err != nil {
+		t.Fatalf("DialAddr: %v", err)
+	}
+	t.Cleanup(func() { conn.CloseWithError(0, "") })
+	return conn
+}
+
+// TestAPeerThatStopsReadingItsControlStreamIsClosed 钉住卡住的写会把连接关掉，
+// 而且关成客户端能认出来的那个码。
+//
+// 对端是真的用 quic-go 造出来的：握手走完（所以它读过 READY），之后一个字都不读，
+// 并且它自己通告了一个 1 KB 的流接收窗口。灌 SUB，每条换一条 SUBACK，几条之后
+// 服务端的写就卡在流控上。
+func TestAPeerThatStopsReadingItsControlStreamIsClosed(t *testing.T) {
+	restore := controlWriteTimeout.Set(300 * time.Millisecond)
+	defer controlWriteTimeout.Set(restore)
+
+	addr, priv, _ := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	conn := dialWindow(t, addr, stalledWindow)
+	st, m := hello(t, conn, tok)
+	if _, ok := m.(*control.Ready); !ok {
+		t.Fatalf("handshake got %T, want *control.Ready", m)
+	}
+
+	// 从这里开始这个对端一个字都不读。每条 SUB 换一条 SUBACK，
+	// 频率填满 MaxRX 让每条回复都尽量大。
+	freqs := make([]uint32, 0, 32)
+	for i := 0; i < 32; i++ {
+		freqs = append(freqs, uint32(118000+i*25))
+	}
+	b, err := control.Encode(&control.Sub{RX: freqs})
+	if err != nil {
+		t.Fatalf("Encode SUB: %v", err)
+	}
+	for i := 0; i < 64; i++ {
+		if err := control.WriteFrame(st, b); err != nil {
+			break // 服务端已经把连接关了，这正是我们要的
+		}
+	}
+
+	ctx := conn.Context()
+	select {
+	case <-ctx.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("a peer that stopped reading its control stream was never closed; that session is now silently deaf to every later SUB while looking perfectly healthy")
+	}
+	var appErr *quic.ApplicationError
+	if !errors.As(context.Cause(ctx), &appErr) {
+		t.Fatalf("connection closed with %v, want a *quic.ApplicationError", context.Cause(ctx))
+	}
+	if appErr.ErrorCode != CloseProtocolViolation {
+		t.Fatalf("close code = %d, want CloseProtocolViolation (%d) — CloseNormal here would tell the client to reconnect, and reconnecting replays the same bug", appErr.ErrorCode, CloseProtocolViolation)
+	}
+	if appErr.ErrorMessage != ReasonControlWriteStalled {
+		t.Fatalf("reason = %q, want %q", appErr.ErrorMessage, ReasonControlWriteStalled)
+	}
+}
+
+// TestTheControlWriteDeadlineDoesNotFireForAHealthyClient 是上一条的前提证明。
+//
+// 上一条只说明"某个对端被关了"。如果那个截止时间对**每个人**都开火，它照样通过，
+// 而服务端会在生产上把所有人都掐掉。这里用**同一个**被调小的时限跑一个正常读的
+// 客户端：同样的 SUB、同样的往返次数，必须一次都不开火。
+//
+// 同一个时限是关键——换成一个更宽松的值，这条测试就什么都不证明了。
+func TestTheControlWriteDeadlineDoesNotFireForAHealthyClient(t *testing.T) {
+	restore := controlWriteTimeout.Set(300 * time.Millisecond)
+	defer controlWriteTimeout.Set(restore)
+
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+
+	freqs := make([]uint32, 0, 32)
+	for i := 0; i < 32; i++ {
+		freqs = append(freqs, uint32(118000+i*25))
+	}
+	for i := 0; i < 32; i++ {
+		c.subscribe(t, control.Sub{RX: freqs})
+		if pong := ping(t, c); pong.T != 42 {
+			t.Fatalf("round %d: PONG.T = %d, want 42", i, pong.T)
+		}
+	}
+
+	select {
+	case <-c.conn.Context().Done():
+		t.Fatalf("the write deadline fired for a client that was reading normally: %v — in production that closes every healthy session", context.Cause(c.conn.Context()))
+	default:
+	}
 }

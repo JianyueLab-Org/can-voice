@@ -63,7 +63,7 @@ func parkOutbound(t *testing.T) *parked {
 		p.free()
 	})
 
-	p.o.enqueue(frame(parkSeq, 0))
+	p.enqueue(t, frame(parkSeq, 0))
 	select {
 	case <-entered:
 	case <-time.After(waitMax):
@@ -74,6 +74,26 @@ func parkOutbound(t *testing.T) *parked {
 
 // free 放行被按住的 send。可以重复调。
 func (p *parked) free() { p.freed.Do(func() { close(p.release) }) }
+
+// enqueue 入队一帧，并且**带上界地**等它返回。
+//
+// enqueue 的契约就是永不阻塞，所以直接调本来也对。用这个包装是为了红的形状：
+// 把 enqueue 改回同步调用的回归会让这里永远卡住，于是每一条用 parkOutbound 的
+// 测试都只能以 `panic: test timed out` 的方式红——而那句话对下一个人什么都不说。
+// 和 conn_test.go 的 replyWait 是同一回事。
+//
+// （指定的那条钉子 TestASlowListenerDoesNotStallTheFanout 不经过这里，它自己
+// 有干净的 2 秒断言；这里管的是其余四条的连带伤害。）
+func (p *parked) enqueue(t *testing.T, b []byte) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() { defer close(done); p.o.enqueue(b) }()
+	select {
+	case <-done:
+	case <-time.After(waitMax):
+		t.Fatal("enqueue did not return; it must never block, and a queue whose drain goroutine is parked in send is exactly where a synchronous regression shows up")
+	}
+}
 
 // letGo 放行排空 goroutine，等到它至少发出 want 帧，返回发出去的全部帧。
 func (p *parked) letGo(t *testing.T, want int) [][]byte {
@@ -190,7 +210,7 @@ func TestOverflowDropsTheOldest(t *testing.T) {
 
 	// 正好灌满，一帧都不该丢。
 	for i := 1; i <= outboundDepth; i++ {
-		p.o.enqueue(frame(uint16(i), 0))
+		p.enqueue(t, frame(uint16(i), 0))
 	}
 	if n := p.o.dropped(); n != 0 {
 		t.Fatalf("premise: filling the queue to exactly %d already dropped %d frames", outboundDepth, n)
@@ -198,8 +218,8 @@ func TestOverflowDropsTheOldest(t *testing.T) {
 
 	// 再灌两帧，逼出两次丢弃。两次而不是一次：一次的话"最老"和"次老"
 	// 只差一帧，读断言的人分不清丢的是哪一端。
-	p.o.enqueue(frame(uint16(outboundDepth+1), 0))
-	p.o.enqueue(frame(uint16(outboundDepth+2), 0))
+	p.enqueue(t, frame(uint16(outboundDepth+1), 0))
+	p.enqueue(t, frame(uint16(outboundDepth+2), 0))
 	if n := p.o.dropped(); n != 2 {
 		t.Fatalf("dropped() = %d after two overflows, want 2", n)
 	}
@@ -224,12 +244,12 @@ func TestOverflowDropsTheOldest(t *testing.T) {
 func TestTheLastFrameOfABurstIsNeverDropped(t *testing.T) {
 	p := parkOutbound(t)
 
-	p.o.enqueue(frame(lastSeq, wire.FlagLast))
+	p.enqueue(t, frame(lastSeq, wire.FlagLast))
 	for i := 1; i < outboundDepth; i++ {
-		p.o.enqueue(frame(uint16(i), 0))
+		p.enqueue(t, frame(uint16(i), 0))
 	}
 	for i := outboundDepth; i < 2*outboundDepth; i++ {
-		p.o.enqueue(frame(uint16(i), 0))
+		p.enqueue(t, frame(uint16(i), 0))
 	}
 
 	// 前提的证明：确实丢了帧。没有这一句，"尾帧还在"在"队列根本没溢出"
@@ -273,7 +293,7 @@ func TestSurvivingFramesKeepTheirOrder(t *testing.T) {
 	p := parkOutbound(t)
 
 	for i := 1; i <= outboundDepth; i++ {
-		p.o.enqueue(frame(uint16(i), 0))
+		p.enqueue(t, frame(uint16(i), 0))
 	}
 	if n := p.o.dropped(); n != 0 {
 		t.Fatalf("premise: this test must not overflow, but %d frames were dropped", n)
@@ -295,7 +315,7 @@ func TestDropsAreCounted(t *testing.T) {
 	p := parkOutbound(t)
 
 	for i := 1; i <= outboundDepth; i++ {
-		p.o.enqueue(frame(uint16(i), 0))
+		p.enqueue(t, frame(uint16(i), 0))
 	}
 	if n := p.o.dropped(); n != 0 {
 		t.Fatalf("premise: filling the queue to exactly %d already dropped %d frames", outboundDepth, n)
@@ -303,7 +323,7 @@ func TestDropsAreCounted(t *testing.T) {
 
 	const extra = 5
 	for i := 0; i < extra; i++ {
-		p.o.enqueue(frame(uint16(outboundDepth+1+i), 0))
+		p.enqueue(t, frame(uint16(outboundDepth+1+i), 0))
 	}
 	if n := p.o.dropped(); n != extra {
 		t.Fatalf("dropped() = %d after %d overflowing enqueues, want %d", n, extra, extra)
@@ -378,4 +398,31 @@ func equalSeqs(a, b []uint16) bool {
 		}
 	}
 	return true
+}
+
+// TestDroppingFromAnEmptyQueueDoesNotPanic 钉住 dropOneLocked 的空队列早返回。
+//
+// 今天没有调用方会这么做——唯一那个先判了 len(o.q) >= outboundDepth——所以这条
+// 测试是**唯一**能让那行早返回被删掉时变红的东西。而它值得钉：没有早返回时
+// o.q[victim+1:] 是 o.q[1:0]，实测 `slice bounds out of range [1:0]`，而且它
+// panic 在扇出线程上（enqueue 是扇出调的），整条会话跟着走。
+//
+// 刻意直接调私有方法并自己持锁：绕过那个前置条件正是这里要模拟的事——
+// 将来某个"背压时主动排空"的助手不会知道有这么个不成文的规矩。
+func TestDroppingFromAnEmptyQueueDoesNotPanic(t *testing.T) {
+	o := newOutbound(func([]byte) error { return nil })
+	defer o.stop()
+
+	o.mu.Lock()
+	if len(o.q) != 0 {
+		o.mu.Unlock()
+		t.Fatal("premise: a freshly built queue must be empty")
+	}
+	o.dropOneLocked()
+	o.mu.Unlock()
+
+	// 没丢掉任何东西，所以也不该记一笔。
+	if n := o.dropped(); n != 0 {
+		t.Fatalf("dropped() = %d after dropping from an empty queue, want 0 — nothing was there to drop", n)
+	}
 }

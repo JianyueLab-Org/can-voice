@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,31 @@ var handshakeTimeout = newDuration(10 * time.Second)
 //
 // 同样是变量只为了测试能改它。
 var byeGrace = newDuration(200 * time.Millisecond)
+
+// controlWriteTimeout 是**握手之后**每一次控制面写的时限。
+//
+// 它堵的是"写把读堵死"：readControl 在同一个 goroutine 里读和写，而
+// initial_max_stream_data_bidi_remote 是**对端**的传输参数，quic-go v0.48.2
+// 对它不设下限（internal/wire/transport_parameters.go 的
+// readNumericTransportParameter 原样收下任何值）。一个把窗口调到刚好在 READY
+// 之后用完、然后再也不读的对端，会让服务端的下一次写永久阻塞在流控上——于是
+// 这条会话不再读任何东西：它之后的 SUB 一条都不会被处理，客户端继续收着旧的
+// 那套频率，台面改动看上去毫无反应，而连接一切正常。
+//
+// **空闲超时救不了这件事。** MaxIdleTimeout 是 60 秒，但它在收到任何报文时
+// 都会重置，而 KeepAlivePeriod=15s 的 PING 会被对端的传输层自动 ACK，跟应用
+// 读不读无关。所以卡住的连接会一直活着，不是"反正 60 秒后也会断"。
+//
+// 取 10 秒，两边都不对称，所以往长里取：
+//   - 误杀的代价是掐断一条**正常工作**的语音会话。这个网络的客户端跑在满负荷
+//     的模拟器旁边、经常挂在会丢包的链路上（can-audio 那条中继存在的全部理由），
+//     一次重传就能让一次合法的写走上几秒。
+//   - 命中的代价只是提前关掉一条**已经悄悄坏掉**的会话。
+//     10 秒大约是可信的合法停顿的六倍，又只有 MaxIdleTimeout 的六分之一，而且
+//     它开火的那个区间里空闲超时被证明永远不会开火。
+//
+// 同样是变量只为了测试能把它调小。
+var controlWriteTimeout = newDuration(10 * time.Second)
 
 // handleConn 处理一条连接的完整生命周期。
 func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router.Router) {
@@ -121,7 +147,11 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		conn.CloseWithError(CloseHandshakeRefused, reason)
 		return
 	}
-	// 握手过了，取消读写截止时间——控制面之后是长连接，管制员可能几分钟不说话。
+	// 握手过了，取消**读**截止时间——控制面之后是长连接，管制员可能几分钟不说话。
+	//
+	// 写不一样：它从"握手那一次性的时限"换成 writeControl 每写一帧各自设一次
+	// （controlWriteTimeout）。整条连接一个写截止时间是不行的——它要么早晚会
+	// 过期掐死一条健康会话，要么就得设成无穷大，而无穷大正是那个卡死的形状。
 	_ = st.SetReadDeadline(time.Time{})
 	_ = st.SetWriteDeadline(time.Time{})
 	slog.Info("session opened", "session", sess.ID, "cid", sess.CID, "peer", conn.RemoteAddr().String())
@@ -144,7 +174,15 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	}()
 
 	go readDatagrams(ctx, conn, r, sess.ID)
-	readControl(st, r, sess)
+	if err := readControl(st, r, sess); errors.Is(err, errControlWriteStalled) {
+		// 关在这里而不是靠外层那条 defer：那条发的是 CloseNormal，
+		// 而 CloseNormal 的意思是"你可以重连"，在这里恰恰是错的答案。
+		// 先关的那次生效（quic-go 的 closeOnce），所以 defer 变成空操作。
+		slog.Info("closing a session that stopped reading its control stream",
+			"session", sess.ID, "cid", sess.CID,
+			"timeout", controlWriteTimeout.Get().String())
+		conn.CloseWithError(CloseProtocolViolation, ReasonControlWriteStalled)
+	}
 }
 
 // handshake 要求第一条消息必须是 HELLO，验签通过后登记会话。
@@ -249,24 +287,28 @@ func reasonFor(err error) string {
 
 // noticeBudget 是每条会话为"解不开的帧"回 NOTICE 的条数上限，之后转为静默。
 //
-// 有上限的理由不是日志噪音，是**写会阻塞读**：回 NOTICE 走的是控制流，而这条流
-// 上没有写截止时间（握手过了就清掉了）。一个只管发、从不读的对端会让 QUIC 的流
-// 级流控把 WriteFrame 顶住，而 WriteFrame 和 ReadFrame 在同一个 goroutine 里——
-// 这条会话会不再读任何东西，从外面看却完全正常。8 条 NOTICE 每条不到一百字节，
-// 离任何一个流控窗口都远得很，所以有了这个上限它就永远不可能是卡住的那一方。
+// 有上限的理由不是日志噪音，是**写会阻塞读**：回 NOTICE 走的是控制流，而
+// readControl 在同一个 goroutine 里读和写，所以一个不读的对端能用流控把这条
+// 会话的读一起顶死（详见 controlWriteTimeout）。
 //
-// （SUBACK/PONG 有同样的形状且没有上限——那是既有问题，不在本任务范围内，
-// 但至少这里不要再开一条更便宜的路：一帧 `{"type":"x"}` 换一条 NOTICE。）
+// 说清楚这个上限**不是**那件事的完整答案，它只封掉最便宜的那条路：一帧 12 字节
+// 的 `{"type":"x"}` 换服务端一条回复，SUBACK/PONG 都没有这么便宜（要先构造
+// 一条合法的 SUB 或 PING）。真正兜底的是 controlWriteTimeout——因为
+// initial_max_stream_data_bidi_remote 是对端说了算的，一个把窗口调到刚好在 READY
+// 之后用完的对端，会让**握手后的第一次写**就卡住，什么预算都拦不住它。
 const noticeBudget = 8
 
 // readControl 处理握手之后的控制面消息。
-func readControl(st quic.Stream, r *router.Router, sess *router.Session) {
+//
+// 返回 errControlWriteStalled 表示对端不再读控制流了（见 controlWriteTimeout）；
+// 其余情况返回 nil——读到头、对端挂断、连接已经没了，都走正常收尾。
+func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 	// 每条会话一份预算，随连接一起消失。
 	notices := noticeBudget
 	for {
 		b, err := control.ReadFrame(st)
 		if err != nil {
-			return
+			return nil
 		}
 		m, err := control.Decode(b)
 		if err != nil {
@@ -278,7 +320,9 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) {
 			// 失败形态。
 			if notices > 0 {
 				notices--
-				sendUnknownNotice(st, b)
+				if err := sendUnknownNotice(st, b); err != nil {
+					return err
+				}
 				if notices == 0 {
 					slog.Info("this session has spent its notice budget for undecodable frames, going quiet",
 						"session", sess.ID, "budget", noticeBudget)
@@ -293,11 +337,15 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) {
 				"rx", len(ack.RX), "tx", len(ack.TX),
 				"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC))
 			if out, err := control.Encode(&ack); err == nil {
-				_ = control.WriteFrame(st, out)
+				if err := writeControl(st, out); err != nil {
+					return err
+				}
 			}
 		case *control.Ping:
 			if out, err := control.Encode(&control.Pong{T: v.T, ServerT: time.Now().UnixMilli()}); err == nil {
-				_ = control.WriteFrame(st, out)
+				if err := writeControl(st, out); err != nil {
+					return err
+				}
 			}
 		case *control.Hello:
 			// 重复的 HELLO 是客户端 bug。忽略而不是重建会话——
@@ -335,17 +383,45 @@ func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, 
 //
 // 这不是放大攻击面：QUIC 面向连接且验证过地址，NOTICE 只回到同一条**已鉴权**的
 // 连接上，到不了第三方那里。
-func sendUnknownNotice(st quic.Stream, frame []byte) {
+func sendUnknownNotice(st quic.Stream, frame []byte) error {
 	reason := control.TypeOf(frame)
 	if reason == "" {
 		reason = "unparseable"
 	}
-	if out, err := control.Encode(&control.Notice{
+	out, err := control.Encode(&control.Notice{
 		Kind:   control.KindUnknownMessage,
 		Reason: reason,
-	}); err == nil {
-		_ = control.WriteFrame(st, out)
+	})
+	if err != nil {
+		return nil
 	}
+	return writeControl(st, out)
+}
+
+// errControlWriteStalled 是"对端不再读控制流了"。
+//
+// 单独一个哨兵而不是把 os.ErrDeadlineExceeded 一路传上去：调用方要判的是
+// "这是不是一次协议违规"，而截止时间超时在别的地方也可能冒出来，含义并不相同。
+var errControlWriteStalled = errors.New("the peer stopped reading the control stream")
+
+// writeControl 写一帧控制面消息，带写截止时间。
+//
+// 每帧各自设一次而不是整条连接设一个：一个固定的绝对时刻要么早晚过期掐死一条
+// 健康会话，要么就得是无穷大。理由和取值见 controlWriteTimeout。
+//
+// 超时不重试，往上报给调用方去关连接：control.WriteFrame 是长度前缀加载荷两次
+// Write，超时可能正好落在两次之间，这条流已经不同步，没有可以续下去的东西。
+func writeControl(st quic.Stream, b []byte) error {
+	_ = st.SetWriteDeadline(time.Now().Add(controlWriteTimeout.Get()))
+	err := control.WriteFrame(st, b)
+	// 写完就清掉：留着一个过去的时刻会让下一次写立刻失败，留着一个将来的时刻
+	// 会让下一帧继承一段被吃掉的预算。下一次写自己会重设。
+	_ = st.SetWriteDeadline(time.Time{})
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		// quic-go 的 deadlineError.Unwrap() 返回的正是这个哨兵（stream.go:21）。
+		return errControlWriteStalled
+	}
+	return err
 }
 
 func sendBye(st quic.Stream, reason string) {
