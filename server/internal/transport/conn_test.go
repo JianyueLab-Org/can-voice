@@ -591,3 +591,322 @@ func TestAnUndecodableControlFrameDoesNotKillTheSession(t *testing.T) {
 		t.Fatalf("got %T, want *control.SubAck", m)
 	}
 }
+
+// TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames 钉住那几个**数字和
+// 字符串本身**。
+//
+// 别的测试写的是 `appErr.ErrorCode != CloseEvicted`，那是拿常量比常量——把
+// CloseEvicted 从 2 改成 3，一条测试都不会红。而给它们起名字的**全部理由**就是
+// 客户端那边会写死那个字面值：服务端改了、客户端没改，症状是无限互顶重新出现，
+// 两边的测试各自还是绿的。所以这里比的是字面值。
+func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  quic.ApplicationErrorCode
+		want uint64
+	}{
+		{"CloseNormal", CloseNormal, 0},
+		{"CloseHandshakeRefused", CloseHandshakeRefused, 1},
+		{"CloseEvicted", CloseEvicted, 2},
+	} {
+		if uint64(tc.got) != tc.want {
+			t.Errorf("%s = %d, want the wire value %d — clients hardcode this number", tc.name, tc.got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		name, got, want string
+	}{
+		{"ReasonTokenExpired", ReasonTokenExpired, "token_expired"},
+		{"ReasonTokenInvalid", ReasonTokenInvalid, "token_invalid"},
+		{"ReasonRefused", ReasonRefused, "refused"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want the wire value %q — clients match on this string", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+// TestADelayedReaderStillLearnsWhyItWasRefused 钉住"被拒的原因走的是关闭码那条道"。
+//
+// byeGrace 只是一个调度上的赌注：它赌对端此刻正卡在 ReadFrame 上。这个包里别的
+// 测试全都是那样写的，所以它们看不见赌输的情形。这条不一样——它建连、发 HELLO，
+// 然后 500 毫秒**不去读**（一个先去开音频设备、再回来读控制流的客户端就是这样），
+// BYE 于是被服务端自己的 CONNECTION_CLOSE 吃掉。
+//
+// 而 ApplicationError 的 reason phrase 和关闭码同属一个帧，原子送达，丢不掉。
+// 所以客户端真正该拿来判断的是它。
+func TestADelayedReaderStillLearnsWhyItWasRefused(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(-time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	conn := dial(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	b, _ := control.Encode(&control.Hello{Token: tok, Client: "test/1", Proto: 1})
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	// 故意不读。byeGrace 是 200 毫秒。
+	time.Sleep(500 * time.Millisecond)
+
+	select {
+	case <-conn.Context().Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the refused connection was never closed")
+	}
+	var appErr *quic.ApplicationError
+	if !errors.As(context.Cause(conn.Context()), &appErr) {
+		t.Fatalf("closed with %v, want a *quic.ApplicationError", context.Cause(conn.Context()))
+	}
+	if appErr.ErrorCode != CloseHandshakeRefused {
+		t.Fatalf("close code = %d, want CloseHandshakeRefused", appErr.ErrorCode)
+	}
+	if appErr.ErrorMessage != ReasonTokenExpired {
+		t.Fatalf("close reason = %q, want %q — this client missed the BYE, and the close reason is the only channel that cannot be dropped; without it it cannot tell \"go get a new token\" from \"stop trying\"",
+			appErr.ErrorMessage, ReasonTokenExpired)
+	}
+
+	// 这条测试的价值全在"BYE 确实没到"。万一它到了，上面的断言仍然成立，
+	// 但这条测试就退化成一条普通的关闭码测试——记一笔，不判失败。
+	if _, err := control.ReadFrame(st); err == nil {
+		t.Log("note: the BYE survived the race this time; the assertion above still rests on the close reason")
+	}
+}
+
+// TestTheControlStreamOutlivesTheHandshakeDeadline 钉住握手之后那两个截止时间被清掉。
+//
+// 不清的话，控制流会在连上 handshakeTimeout 之后自己死掉：不再有 PING、不再有 SUB，
+// 会话被摘除——而一个几分钟不说话的管制员是完全正常的。客户端那边看不到任何事件，
+// 只是忽然谁也听不见它了。
+func TestTheControlStreamOutlivesTheHandshakeDeadline(t *testing.T) {
+	orig := handshakeTimeout.Set(300 * time.Millisecond)
+	defer handshakeTimeout.Set(orig)
+
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+
+	// 睡过握手时限。
+	time.Sleep(600 * time.Millisecond)
+
+	// 客户端这边也要有截止时间，否则服务端真的不回时这条测试会挂到 go test
+	// 的总超时，而不是给出一句话。
+	_ = c.st.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	b, _ := control.Encode(&control.Ping{T: 99})
+	if err := control.WriteFrame(c.st, b); err != nil {
+		t.Fatalf("writing on the control stream failed after the handshake deadline passed: %v", err)
+	}
+	resp, err := control.ReadFrame(c.st)
+	if err != nil {
+		// 读和写两个截止时间都要清，这一条两边都钉得住：留着读截止时间，
+		// 上面那句 WriteFrame 就先炸了；留着写截止时间，服务端的 PONG 写不出去
+		// （那个错误被刻意忽略），这里读到超时。
+		t.Fatalf("no PONG after the handshake deadline passed: %v — one of the two post-handshake deadline clears is missing, so every session goes deaf %v after connecting", err, 300*time.Millisecond)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	pong, ok := m.(*control.Pong)
+	if !ok {
+		t.Fatalf("got %T, want *control.Pong", m)
+	}
+	if pong.T != 99 {
+		t.Fatalf("Pong.T = %d, want 99", pong.T)
+	}
+}
+
+// TestMaxTXIsEnforcedOverTheWire 是 TestMaxRXIsEnforcedOverTheWire 的另一半。
+//
+// MaxRX 是资源上限，MaxTX 是**授权**——它由成员的 rating 推出来，写在已验签的
+// token 里。只断言 READY 里的回显等于什么都没断言：一张只授权一个发送频率的
+// token 照样能在无限多个频率上发射，而回显那个数字始终是对的。
+func TestMaxTXIsEnforcedOverTheWire(t *testing.T) {
+	addr, priv, r := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 2, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	st, m := hello(t, dial(t, addr), tok)
+	ready, ok := m.(*control.Ready)
+	if !ok {
+		t.Fatalf("got %T, want *control.Ready", m)
+	}
+	if ready.MaxTX != 2 {
+		t.Fatalf("READY.MaxTX = %d, want the token's 2", ready.MaxTX)
+	}
+
+	tx := []uint32{118000, 118025, 118050, 118075, 118100}
+	b, _ := control.Encode(&control.Sub{TX: tx})
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(st)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	dm, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ack, ok := dm.(*control.SubAck)
+	if !ok {
+		t.Fatalf("got %T, want *control.SubAck", dm)
+	}
+	if len(ack.TX) != 2 {
+		t.Fatalf("accepted TX = %d, want 2 — max_tx is an authorization claim and must be enforced, not merely echoed", len(ack.TX))
+	}
+	if len(ack.Rejected) != 3 {
+		t.Fatalf("Rejected = %d, want 3", len(ack.Rejected))
+	}
+
+	// 而且不能只是 ACK 上好看：被拒的频率上真的不能发。
+	id := router.SessionID(ready.Session)
+	for _, f := range ack.Rejected {
+		if r.MayTransmit(id, f) {
+			t.Fatalf("%d was rejected in the ACK but the router still lets the session transmit on it", f)
+		}
+	}
+	// 缺席断言的前提：被接受的那两个确实能发，否则上面那句可能只是因为
+	// 这条会话在**任何**频率上都不能发。
+	for _, f := range ack.TX {
+		if !r.MayTransmit(id, f) {
+			t.Fatalf("premise failed: %d was granted in the ACK but the router refuses it too, so the assertion above proved nothing", f)
+		}
+	}
+}
+
+// TestTheFollowFieldFromHelloReachesTheSession 钉住观察员的跟随目标不会在握手里丢掉。
+//
+// 丢了的话，观察员的 Follow 是空串，扇出就拿不到它该用的那架飞机的位置——
+// 射程于是按"位置未知"算，而那条路径是放行。症状是观察员听得见本不该听见的
+// 远处电台，没有任何错误。
+func TestTheFollowFieldFromHelloReachesTheSession(t *testing.T) {
+	addr, priv, r := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	conn := dial(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	b, _ := control.Encode(&control.Hello{Token: tok, Client: "test/1", Proto: 1, Follow: "CCA101"})
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(st)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ready, ok := m.(*control.Ready)
+	if !ok {
+		t.Fatalf("got %T, want *control.Ready", m)
+	}
+	sess, ok := r.Get(router.SessionID(ready.Session))
+	if !ok {
+		t.Fatal("the session was not registered")
+	}
+	if sess.Follow != "CCA101" {
+		t.Fatalf("Session.Follow = %q, want %q from the HELLO", sess.Follow, "CCA101")
+	}
+}
+
+// TestAcceptReportsAListenerFailureRatherThanReturningNil 钉住监听器挂掉会被报上去。
+//
+// 返回 nil 的话 Serve 也返回 nil，整个进程静悄悄地"正常退出"，而端口其实
+// 已经没人在听了——没有任何一行日志说出这件事。
+func TestAcceptReportsAListenerFailureRatherThanReturningNil(t *testing.T) {
+	cert, err := SelfSignedCert()
+	if err != nil {
+		t.Fatalf("SelfSignedCert: %v", err)
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	cfg := Config{
+		Addr:      "127.0.0.1:0",
+		TLS:       &tls.Config{Certificates: []tls.Certificate{cert}},
+		PublicKey: pub,
+		MaxRX:     32,
+	}
+
+	dead, err := listen(cfg)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	dead.Close()
+	// ctx 没有取消：这是"监听器自己死了"，不是收摊。
+	if err := accept(context.Background(), dead, cfg, router.New()); err == nil {
+		t.Fatal("accept returned nil after the listener died; Serve would then report a clean shutdown while nothing is listening")
+	}
+
+	// 另一半，也是上面那条断言的前提：ctx 取消时 accept 报的必须是 ctx 的错误，
+	// 而不是把正常收摊也说成故障——不然上面那个 non-nil 什么都证明不了。
+	live, err := listen(cfg)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer live.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := accept(ctx, live, cfg, router.New()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("accept on a cancelled ctx returned %v, want context.Canceled", err)
+	}
+}
+
+// TestAnUnknownMessageTypeDoesNotDisconnectTheClient 记录的是**当前行为**，
+// 不是一个已经定下来的协议决定。
+//
+// control.Decode 对未知的 type 刻意报错（而不是静默忽略），readControl 收到这个
+// 错误之后记一条 Debug 然后 continue——**不断开**。于是一个比服务端新一个协议版本
+// 的客户端是降级，不是掉线。
+//
+// 控制方还没有裁决这是不是最终行为（见 task-9 报告 Fix round 1 第 7 条），所以
+// 这条测试只是把现状钉下来，免得它在没人注意的时候漂走。
+func TestAnUnknownMessageTypeDoesNotDisconnectTheClient(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+
+	if err := control.WriteFrame(c.st, []byte(`{"type":"SOMETHING_FROM_THE_FUTURE"}`)); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	b, _ := control.Encode(&control.Sub{RX: []uint32{118000}})
+	if err := control.WriteFrame(c.st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(c.st)
+	if err != nil {
+		t.Fatalf("the session died on an unknown message type: %v — a client one protocol version ahead would be dropped rather than degraded", err)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if _, ok := m.(*control.SubAck); !ok {
+		t.Fatalf("got %T, want *control.SubAck", m)
+	}
+}

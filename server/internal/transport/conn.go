@@ -97,14 +97,19 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		// 详细错误只进服务端日志。发给对端的是粗粒度的稳定代码——
 		// 这个对端还没有通过鉴权，告诉他"是签名错还是 base64 错"
 		// 只会帮他调试伪造，对正当客户端没有任何用处。
-		slog.Info("handshake refused", "peer", conn.RemoteAddr().String(), "error", err)
-		sendBye(st, reasonFor(err))
+		reason := reasonFor(err)
+		slog.Info("handshake refused", "peer", conn.RemoteAddr().String(),
+			"reason", reason, "error", err)
+		// 原因走两条路，以第二条为准（见 codes.go）：BYE 是给已经在读的客户端的
+		// 方便，而 CONNECTION_CLOSE 的 reason phrase 和关闭码同属一个帧、原子送达，
+		// 丢不掉。一个建连之后没立刻去读控制流的客户端只拿得到后者。
+		sendBye(st, reason)
 		// 给对端一个读 BYE 的窗口，再关。见 byeGrace。
 		select {
 		case <-time.After(byeGrace.Get()):
 		case <-ctx.Done():
 		}
-		conn.CloseWithError(CloseHandshakeRefused, "handshake refused")
+		conn.CloseWithError(CloseHandshakeRefused, reason)
 		return
 	}
 	// 握手过了，取消读写截止时间——控制面之后是长连接，管制员可能几分钟不说话。
@@ -165,10 +170,8 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 			// 是在 Router.Add 里、**新会话的握手路径上**同步调用的——直接调就是
 			// 让新来的那个人排队等旧连接拆完。
 			//
-			// 坦白一句：这个 `go` **没有测试钉着**。试过写一条计时断言，把它去掉
-			// 之后本机上旧连接拆得太快（毫秒级），断言不红——一条钉不住自己那个
-			// 机制的钉子，宁可不要。留着 `go` 的依据是 quic-go 的源码本身
-			// （connection.go 的 CloseWithError），不是那条计时。
+			// 由 TestTheEvictionCloseDoesNotBlockTheNewHandshake 钉住，它不靠计时
+			// 碰运气——假连接把断连真的按住，所以红不红跟本机有多快无关。
 			go conn.CloseWithError(CloseEvicted, "another session signed in with this account")
 		},
 	})
@@ -206,14 +209,17 @@ const errFirstMessageMustBeHello = helloError("the first control message must be
 // 但也不能一律"refused"：正当客户端需要知道"去换一张新 token 再试"
 // 和"别试了"的区别，否则它只能盲目重试，而重试会撞上限速。
 // 所以恰好两级，都是稳定字符串，客户端可以拿去做判断。
+//
+// 返回值同时是 BYE 的 reason 和 CONNECTION_CLOSE 的 reason phrase，取值见
+// codes.go 的 Reason* 常量——那里也写了为什么必须以后者为准。
 func reasonFor(err error) string {
 	switch {
 	case errors.Is(err, auth.ErrExpired):
-		return "token_expired"
+		return ReasonTokenExpired
 	case errors.Is(err, auth.ErrInvalid):
-		return "token_invalid"
+		return ReasonTokenInvalid
 	default:
-		return "refused"
+		return ReasonRefused
 	}
 }
 
