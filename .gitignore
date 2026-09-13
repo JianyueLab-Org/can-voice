@@ -2,3 +2,4 @@
 /probe/reports/
 *.pem
 can-voice-probe-*.json
+.temp/
