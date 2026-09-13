@@ -18,10 +18,22 @@ func TestLoadConfigRequiresEveryEssentialValue(t *testing.T) {
 			"CAN_VOICE_API_PUBKEY": "3q2+7w==",
 		}
 		delete(full, missing)
-		if _, err := LoadConfig(env(full)); err == nil {
+		_, err := LoadConfig(env(full))
+		if err == nil {
 			t.Fatalf("LoadConfig must fail when %s is missing", missing)
-		} else if !strings.Contains(err.Error(), missing) {
-			t.Fatalf("error must name the missing variable %s, got: %v", missing, err)
+		}
+		// 断言必须是 "<变量> is required" 这个精确短语，而不是只看错误信息里
+		// 有没有出现变量名。CAN_VOICE_API_PUBKEY 有自己专门的判空检查，但空串
+		// 一样能被 base64 解码成 0 字节，随后下游的长度检查也会报错，而那条
+		// 错误信息里同样包含 "CAN_VOICE_API_PUBKEY"（"...decodes to 0 bytes..."）。
+		// 只查子串的话，删掉专门的判空检查、只留长度检查，测试照样绿——
+		// 这正是本仓库"一个断言只有在能分辨两种实现时才算数"那条规则要求排除的
+		// 假阳性。四个变量共用同一个 "%s is required" 格式串，所以统一按这个
+		// 精确短语断言，比再给 PUBKEY 开一个专门的测试函数更省，也一样能把
+		// 四个判空检查分别钉住。
+		want := missing + " is required"
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must say %q, got: %v", want, err)
 		}
 	}
 }
@@ -71,6 +83,48 @@ func TestLoadConfigRejectsAPublicKeyOfTheWrongLength(t *testing.T) {
 	}))
 	if err == nil {
 		t.Fatal("LoadConfig must reject an Ed25519 public key that is not 32 bytes")
+	}
+}
+
+func TestLoadConfigRejectsInvalidMaxRX(t *testing.T) {
+	// n <= 0 静默地把 RX 上限砍成 0 或负数——不是配置错误弹出来，
+	// 而是启动干净地成功、日志毫无异常，然后没有人能订阅到任何频率。
+	// 这正是"宁可起不来，也不要带着半份配置跑"这套设计想防的那类失败，
+	// 所以非法输入必须让 LoadConfig 失败，而不是被 strconv.Atoi 悄悄吞掉。
+	for _, v := range []string{"abc", "0", "-5"} {
+		t.Run(v, func(t *testing.T) {
+			_, err := LoadConfig(env(map[string]string{
+				"CAN_VOICE_ADDR":       ":64738",
+				"CAN_VOICE_TLS_CERT":   "/tmp/c.pem",
+				"CAN_VOICE_TLS_KEY":    "/tmp/k.pem",
+				"CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+				"CAN_VOICE_MAX_RX":     v,
+			}))
+			if err == nil {
+				t.Fatalf("LoadConfig must reject CAN_VOICE_MAX_RX=%q", v)
+			}
+			if !strings.Contains(err.Error(), "CAN_VOICE_MAX_RX") {
+				t.Fatalf("error must name CAN_VOICE_MAX_RX, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadConfigHonoursAMaxRXOverride(t *testing.T) {
+	// 正面用例不能省：一个把 CAN_VOICE_MAX_RX 不管什么值都拒绝的变异体，
+	// 光靠上面那几个"应该失败"的用例是测不出来的——它们全部还是会通过。
+	cfg, err := LoadConfig(env(map[string]string{
+		"CAN_VOICE_ADDR":       ":64738",
+		"CAN_VOICE_TLS_CERT":   "/tmp/c.pem",
+		"CAN_VOICE_TLS_KEY":    "/tmp/k.pem",
+		"CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+		"CAN_VOICE_MAX_RX":     "64",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.MaxRX != 64 {
+		t.Fatalf("MaxRX = %d, want the 64 override", cfg.MaxRX)
 	}
 }
 
