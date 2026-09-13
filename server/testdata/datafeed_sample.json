@@ -1,0 +1,103 @@
+{
+  "atis": [
+    {
+      "callsign": "ZSSS_ATIS",
+      "cid": "1000",
+      "facility": 4,
+      "frequency": "132.250",
+      "latitude": "31.19667",
+      "logon_time": "2025-06-19 12:34:55",
+      "longitude": "121.33500",
+      "name": "Janyue AOSUGI",
+      "rating": 1,
+      "send_time": 1750336743.806609,
+      "server": "Cerulean Aviation Network Alpha Test",
+      "text_atis": [
+        "ZSSS ATIS A 1200Z DEP RWY 18L & 18R EXP ILS APCH LDG RWY 18L &",
+        "18R WIND 160 DEG 5 MPS CAVOK T 29 /DP 24 QNH 1007 HPA QNH OF",
+        "SHANGHAI TERMINAL CONTROL AREA 1008 TRANSITION ALTITUDE 3000",
+        "/LEVEL 3600 M ADZ YOU HAVE INFO A"
+      ],
+      "type": 0,
+      "visual_range": 0
+    }
+  ],
+  "controllers": [
+    {
+      "callsign": "LAX_25_CTR",
+      "cid": "5158",
+      "facility": 6,
+      "frequency": "126.525",
+      "latitude": "33.939736",
+      "logon_time": "2025-06-19 09:22:29",
+      "longitude": "-118.458879",
+      "name": "5158",
+      "rating": 10,
+      "send_time": 1750336760.2484207,
+      "server": "Cerulean Aviation Network Alpha Test",
+      "text_atis": [],
+      "type": 0,
+      "visual_range": 600
+    },
+    {
+      "callsign": "ZSHA_CTR",
+      "cid": "1000",
+      "facility": 6,
+      "frequency": "124.550",
+      "latitude": "31.20466",
+      "logon_time": "2025-06-19 12:34:34",
+      "longitude": "121.45272",
+      "name": "Janyue AOSUGI",
+      "rating": 1,
+      "send_time": 1750336743.8077528,
+      "server": "Cerulean Aviation Network Alpha Test",
+      "text_atis": [
+        "Shanghai Control",
+        "China METRIC RVSM in use -> vats.im/rvsm-china",
+        "Feedback -> j.aosugi@ceruleanavi.net"
+      ],
+      "type": 0,
+      "visual_range": 600
+    }
+  ],
+  "general": {
+    "atc": 2,
+    "pilots": 1,
+    "socket": 4,
+    "update": "2025-06-19 12:39:25",
+    "update_timestamp": 1750336765,
+    "user": 4,
+    "version": "Cerulean Aviation Network Alpha Test"
+  },
+  "pilots": [
+    {
+      "altitude": 6897,
+      "bank": 0.3515625,
+      "callsign": "CCA5852",
+      "cid": "1012",
+      "flight_plan": {
+        "aircraft": "A320",
+        "alternate": "",
+        "arrival": "ZUUU",
+        "cruise_tas": "100",
+        "cruising_altitude": "FL321",
+        "departure": "ZPPP",
+        "depatime": "1149",
+        "flight_rules": "I",
+        "raw_data": "$FPCCA5852:SERVER:I:A320:100:ZPPP:1149:0:FL321:ZUUU:0:0:0:0::/V/:NODIB W137 LPS A581 AGTIS W3 ASIPO W678 SEGDA",
+        "remarks": "/V/",
+        "route": "NODIB W137 LPS A581 AGTIS W3 ASIPO W678 SEGDA"
+      },
+      "groundspeed": 0,
+      "heading": 11.953125,
+      "latitude": 25.10232,
+      "logon_time": "2025-06-19 12:37:42",
+      "longitude": 102.933,
+      "name": "BiliYashua",
+      "pitch": -0.0,
+      "send_time": 1750336761.6318722,
+      "transponder": 7000,
+      "visual_range": 40
+    }
+  ]
+}
