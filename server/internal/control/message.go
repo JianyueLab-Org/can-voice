@@ -36,6 +36,9 @@ type Sub struct {
 }
 
 // SubAck 回显服务端实际接受的集合，并列出被拒的频率。
+//
+// Rejected 是没有按声明给到的频率。一个频率可以同时出现在 RX 和
+// Rejected 里：那表示 TX 被限额拒了，但 RX 给了。
 type SubAck struct {
 	Type     string   `json:"type"`
 	RX       []uint32 `json:"rx"`

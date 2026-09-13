@@ -41,7 +41,15 @@ type Session struct {
 	Follow string
 	// MaxTX 来自 token：客户端最多能在几个频率上发送。
 	MaxTX int
-	// MaxRX 来自服务端配置：客户端最多能订阅几个频率。
+	// MaxRX 来自服务端配置：客户端最多能订阅几个纯 RX 频率。
+	//
+	// 真实上界不是 MaxRX 本身，而是 max(MaxTX, MaxRX)：TX 蕴含 RX
+	// （spec 9.1 的耦合规则），且 TX 频率不受 RX 限额挤压——见
+	// TestTxIsNotSqueezedOutByTheRxLimit，这是有意的设计，不是漏洞。
+	//
+	// MaxRX 为 0 时，纯 RX 声明会全部被拒，而 TX 蕴含进来的那些照常通过；
+	// 这是配置校验的责任（Task 11 的 LoadConfig 拒绝非正的
+	// CAN_VOICE_MAX_RX），这里不重复校验，见 TestZeroMaxRXStillAllowsTxImpliedRx。
 	//
 	// 必须真的强制，不能只在 READY 里通告一下。每个 RX 频率都要写进
 	// Router 的倒排索引，而那是在写锁里做的——一个声明了一万个频率的
@@ -52,6 +60,13 @@ type Session struct {
 	// send 把一个数据面包发给这个会话。由传输层注入，
 	// router 因此不依赖 QUIC，可以纯逻辑测试。
 	send func([]byte)
+
+	// closeConn 断开这条会话的底层连接。同一个 CID 再次登录时用它顶掉旧会话。
+	// 和 send 一样由传输层注入，router 因此仍然不认识 QUIC。
+	//
+	// 只在顶号时调用，正常的 Remove 不调用——那条路径上传输层本来就正在
+	// 拆连接，回调进去等于让它自己拆自己。
+	closeConn func()
 
 	subs atomic.Pointer[subs]
 }
@@ -80,4 +95,11 @@ func (s *Session) crossCoupled(freq uint32) []uint32 {
 
 var nextID atomic.Uint32
 
-func newSessionID() SessionID { return SessionID(nextID.Add(1)) }
+func newSessionID() SessionID {
+	for {
+		if id := SessionID(nextID.Add(1)); id != 0 {
+			return id
+		}
+		// 回绕到 0。0 是包头里的哨兵值，不能发给任何人。
+	}
+}

@@ -11,8 +11,8 @@ import (
 
 func newSession(t *testing.T, r *Router, cid string, maxTX int) *Session {
 	t.Helper()
-	// maxRX 给一个宽松的默认值，只有专门测它的用例才自己调 Add。
-	s := r.Add(cid, "", maxTX, 64, func([]byte) {})
+	// maxRX 给一个宽松的默认值，只有专门测它的用例才自己构造 SessionOpts。
+	s := r.Add(SessionOpts{CID: cid, MaxTX: maxTX, MaxRX: 64, Send: func([]byte) {}})
 	if s == nil {
 		t.Fatal("Add returned nil")
 	}
@@ -95,12 +95,176 @@ func TestRemoveClearsEveryFrequency(t *testing.T) {
 	}
 }
 
+// TestRetuningOneSessionLeavesTheOtherListenersAlone 钉住倒排索引的清理只清自己。
+//
+// unindex 里"最后一个订阅者走了就删掉整个频率条目"那一步，如果写成无条件删除，
+// 全部单会话测试仍然会绿——而真实后果是一个人调走频率会把同频率上的其他人
+// 一起从索引里抹掉，那个频率就此对所有人静默。
+func TestRetuningOneSessionLeavesTheOtherListenersAlone(t *testing.T) {
+	r := New()
+	a := newSession(t, r, "1000", 8)
+	b := newSession(t, r, "1001", 8)
+	r.Subscribe(a.ID, control.Sub{RX: []uint32{118000}})
+	r.Subscribe(b.ID, control.Sub{RX: []uint32{118000}})
+	if got := len(r.Listeners(118000)); got != 2 {
+		t.Fatalf("118000 has %d listeners, want 2", got)
+	}
+
+	// a 调到别的频率去。
+	r.Subscribe(a.ID, control.Sub{RX: []uint32{121800}})
+
+	if got := len(r.Listeners(118000)); got != 1 {
+		t.Fatalf("118000 has %d listeners after one of two retuned, want 1 — retuning must not evict the other listener", got)
+	}
+	if r.Listeners(118000)[0].ID != b.ID {
+		t.Fatal("the surviving listener is the wrong session")
+	}
+	if got := len(r.Listeners(121800)); got != 1 {
+		t.Fatalf("121800 has %d listeners, want 1", got)
+	}
+}
+
+// TestRemovingOneOfTwoListenersLeavesTheOther 是同一条，走 Remove 那条路径。
+func TestRemovingOneOfTwoListenersLeavesTheOther(t *testing.T) {
+	r := New()
+	a := newSession(t, r, "1000", 8)
+	b := newSession(t, r, "1001", 8)
+	r.Subscribe(a.ID, control.Sub{RX: []uint32{118000}})
+	r.Subscribe(b.ID, control.Sub{RX: []uint32{118000}})
+
+	r.Remove(a.ID)
+
+	if got := len(r.Listeners(118000)); got != 1 {
+		t.Fatalf("118000 has %d listeners after one of two was removed, want 1", got)
+	}
+}
+
+// TestAnEmptyDeclarationClearsEverything 钉住"全量声明"的下界。
+//
+// SUB 是整体替换，所以一份空声明的意思是"我什么都不收、什么都不发"。
+// 在 Subscribe 开头加一句"空的就直接返回"会让全部现有测试保持绿，而一个
+// 下班的管制员会继续收着他原来那一堆频率的音频。
+func TestAnEmptyDeclarationClearsEverything(t *testing.T) {
+	r := New()
+	s := newSession(t, r, "1000", 8)
+	r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 121800}, TX: []uint32{118000}})
+
+	ack := r.Subscribe(s.ID, control.Sub{})
+
+	for _, f := range []uint32{118000, 121800} {
+		if got := len(r.Listeners(f)); got != 0 {
+			t.Fatalf("%d still has %d listeners after an empty declaration", f, got)
+		}
+		if r.MayTransmit(s.ID, f) {
+			t.Fatalf("%d is still transmittable after an empty declaration", f)
+		}
+	}
+	if len(ack.RX) != 0 || len(ack.TX) != 0 {
+		t.Fatalf("ack = %+v, want empty RX and TX", ack)
+	}
+}
+
+// TestWhichFrequenciesSurviveALimitIsDeterministic 钉住超限时留下哪几个。
+//
+// 现有的排序断言只钉住了 ACK 的**顺序**，没钉住**内容**。把 dedup 换成基于 map
+// 的写法（同样去重）会让全部现有测试保持绿，而同一份 SUB 在多次运行里会接受
+// 不同的频率子集——客户端每次重连都落在不同的频率上。
+//
+// 规则是"按客户端声明的先后顺序接受，超出的拒绝"，所以答案唯一。
+func TestWhichFrequenciesSurviveALimitIsDeterministic(t *testing.T) {
+	sub := control.Sub{RX: []uint32{127800, 118000, 124550, 121800}}
+	for i := 0; i < 50; i++ {
+		r := New()
+		s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 2, Send: func([]byte) {}})
+		ack := r.Subscribe(s.ID, sub)
+		// 声明顺序里的前两个：127800 和 118000。ACK 是排过序的。
+		if len(ack.RX) != 2 || ack.RX[0] != 118000 || ack.RX[1] != 127800 {
+			t.Fatalf("run %d: accepted RX = %v, want the first two in declaration order (127800, 118000)", i, ack.RX)
+		}
+		if len(r.Listeners(124550)) != 0 || len(r.Listeners(121800)) != 0 {
+			t.Fatalf("run %d: a rejected frequency reached the inverted index", i)
+		}
+	}
+}
+
+// TestRejectedHasNoDuplicatesAcrossTxAndRxLimits 钉住 0e 的第一半：同一个频率
+// 可以先被 TX 限额拒、又被 RX 限额拒（一个真实测出的形状：MaxTX=1/MaxRX=1 下
+// Rejected = [121800 121800]），dedup 必须把 Rejected 自身的重复去掉。
+func TestRejectedHasNoDuplicatesAcrossTxAndRxLimits(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 1, MaxRX: 1, Send: func([]byte) {}})
+	// 118000 挤满 TX 名额；121800 先被 TX 限额拒，再作为纯 RX 声明被 RX 限额拒。
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{118000, 121800}, RX: []uint32{121800}})
+
+	var n int
+	for _, f := range ack.Rejected {
+		if f == 121800 {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("Rejected = %v, want 121800 exactly once even though it was rejected by both the TX and RX limits", ack.Rejected)
+	}
+}
+
+// TestATxRejectedFrequencyCanStillBeGrantedForRx 钉住 0e 的第二半：一个频率
+// 同时出现在 RX 和 Rejected 里是有意义的（TX 被限额拒了，但 RX 给了），
+// 不能被"修掉"——那样会丢掉信息（control.SubAck 的文档注释）。
+func TestATxRejectedFrequencyCanStillBeGrantedForRx(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 1, MaxRX: 8, Send: func([]byte) {}})
+	// 118000 占掉唯一的 TX 名额；121800 因此被 TX 限额拒，但显式声明的 RX 还有余量。
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{118000, 121800}, RX: []uint32{121800}})
+
+	if !contains(ack.RX, 121800) {
+		t.Fatalf("SubAck.RX = %v, want 121800 present — it was granted for RX even though TX refused it", ack.RX)
+	}
+	if !contains(ack.Rejected, 121800) {
+		t.Fatalf("Rejected = %v, want 121800 present — TX refused it", ack.Rejected)
+	}
+	if r.MayTransmit(s.ID, 121800) {
+		t.Fatal("121800 was rejected for TX and must not be transmittable")
+	}
+	if len(r.Listeners(121800)) != 1 {
+		t.Fatal("121800 was granted for RX and must be in the inverted index")
+	}
+}
+
+// TestZeroMaxRXStillAllowsTxImpliedRx 钉住 0f 的第二条：MaxRX 为 0 时的行为
+// 是有意的，不是碰巧。MaxRX=0 本不该发生——配置校验会拒绝非正的
+// CAN_VOICE_MAX_RX（Task 11 的 LoadConfig）——但如果它真的是 0，纯 RX 声明
+// 必须全部被拒，而 TX 蕴含的那些照常通过：TX 频率不受 RX 限额挤压
+// （TestTxIsNotSqueezedOutByTheRxLimit 钉的是同一条规则）。
+func TestZeroMaxRXStillAllowsTxImpliedRx(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 1, MaxRX: 0, Send: func([]byte) {}})
+	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{121800}, TX: []uint32{118000}})
+
+	if len(ack.RX) != 1 || ack.RX[0] != 118000 {
+		t.Fatalf("SubAck.RX = %v, want just the TX-implied frequency 118000", ack.RX)
+	}
+	if !contains(ack.Rejected, 121800) {
+		t.Fatalf("Rejected = %v, want the pure-RX frequency 121800 rejected under MaxRX=0", ack.Rejected)
+	}
+	if !r.MayTransmit(s.ID, 118000) {
+		t.Fatal("the TX-implied frequency must still be transmittable when MaxRX is 0")
+	}
+	if len(r.Listeners(121800)) != 0 {
+		t.Fatal("the pure-RX frequency must not reach the inverted index when MaxRX is 0")
+	}
+}
+
+// TestSubscribeDeduplicatesFrequencies 现在是 0d：钉住重复声明去重后 ACK 也是唯一的。
+//
+// 倒排索引是 map，本来就不会有重复条目——把 dedup 整个删掉，这个测试原来的
+// 断言（数 r.Listeners(118000) 的长度）照样绿。改成断言 ack.RX：它是切片，
+// 对重复敏感，删掉 dedup 就会看到长度为 3。
 func TestSubscribeDeduplicatesFrequencies(t *testing.T) {
 	r := New()
 	s := newSession(t, r, "1000", 8)
-	r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 118000, 118000}})
-	if got := r.Listeners(118000); len(got) != 1 {
-		t.Fatalf("a repeated frequency produced %d listener entries, want 1", len(got))
+	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 118000, 118000}})
+	if len(ack.RX) != 1 {
+		t.Fatalf("SubAck.RX = %v, want exactly one entry — the inverted index is a map and hides duplicates, so the ack is what has to be asserted", ack.RX)
 	}
 }
 
@@ -219,7 +383,7 @@ func TestSubscribeCopiesTheCrossCoupleList(t *testing.T) {
 // 写锁里做的——一个声明了一万个频率的会话会让全网的扇出排队等它。
 func TestSubscribeRejectsRxBeyondMaxRX(t *testing.T) {
 	r := New()
-	s := r.Add("1000", "", 8, 2, func([]byte) {})
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 2, Send: func([]byte) {}})
 	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 121800, 124550, 127800}})
 
 	if len(ack.RX) != 2 {
@@ -242,7 +406,7 @@ func TestSubscribeRejectsRxBeyondMaxRX(t *testing.T) {
 // 不该让自己声明的 TX 被自己的 RX 上限挤掉。
 func TestTxIsNotSqueezedOutByTheRxLimit(t *testing.T) {
 	r := New()
-	s := r.Add("1000", "", 2, 2, func([]byte) {})
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 2, Send: func([]byte) {}})
 	r.Subscribe(s.ID, control.Sub{RX: []uint32{127800, 128000}, TX: []uint32{118000, 121800}})
 
 	for _, f := range []uint32{118000, 121800} {
@@ -268,6 +432,154 @@ func TestASessionWithNoSubscriptionYetIsSafeToRead(t *testing.T) {
 	}
 	if len(r.Listeners(118000)) != 0 {
 		t.Fatal("a session that has not subscribed must not be a listener")
+	}
+}
+
+// TestASecondLoginOnTheSameCidEvictsTheFirst 是本任务的核心。
+//
+// 不顶号的话，半开连接掉线重连的成员会有最长 60 秒（QUIC 的 MaxIdleTimeout）两条
+// 会话同时订阅同一批频率。他一说话，扇出送给"除自己以外的每个订阅者"——而"自己"
+// 判的是 SessionID 不是 CID，旧会话不是这条新会话，于是它收到了，客户端把他自己的
+// 声音播了出来。只在丢线重连之后出现，本地测不出来。
+func TestASecondLoginOnTheSameCidEvictsTheFirst(t *testing.T) {
+	r := New()
+	closed := make(chan SessionID, 4)
+
+	first := r.Add(SessionOpts{
+		CID: "1000", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 1 },
+	})
+	r.Subscribe(first.ID, control.Sub{RX: []uint32{118000}, TX: []uint32{118000}})
+	if len(r.Listeners(118000)) != 1 {
+		t.Fatal("the first session did not subscribe")
+	}
+
+	second := r.Add(SessionOpts{
+		CID: "1000", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 2 },
+	})
+	if second.ID == first.ID {
+		t.Fatal("the second login must get its own session id")
+	}
+
+	// 旧会话必须不在了：既不在会话表里，也不在任何频率的订阅者集合里。
+	if _, ok := r.Get(first.ID); ok {
+		t.Fatal("the first session is still registered after the same cid logged in again")
+	}
+	if got := len(r.Listeners(118000)); got != 0 {
+		t.Fatalf("118000 still has %d listeners; the evicted session must leave the inverted index", got)
+	}
+	if r.MayTransmit(first.ID, 118000) {
+		t.Fatal("an evicted session must not be able to transmit")
+	}
+
+	// 而且它的连接必须被真的断开，否则客户端会以为自己还在线。
+	select {
+	case id := <-closed:
+		if id != 1 {
+			t.Fatalf("Close fired for session %d, want the evicted first one", id)
+		}
+	default:
+		t.Fatal("the evicted session's Close callback was never called; its connection is still open and it will keep hearing traffic")
+	}
+
+	// 新会话完好。
+	r.Subscribe(second.ID, control.Sub{RX: []uint32{118000}})
+	if len(r.Listeners(118000)) != 1 {
+		t.Fatal("the surviving session must still be able to subscribe")
+	}
+}
+
+// TestEvictionDoesNotTouchOtherCids 确认顶号只顶自己那一条。
+func TestEvictionDoesNotTouchOtherCids(t *testing.T) {
+	r := New()
+	other := newSession(t, r, "2000", 8)
+	r.Subscribe(other.ID, control.Sub{RX: []uint32{118000}})
+
+	_ = newSession(t, r, "1000", 8)
+	_ = newSession(t, r, "1000", 8) // 顶掉上一条
+
+	if _, ok := r.Get(other.ID); !ok {
+		t.Fatal("a different cid's session was evicted")
+	}
+	if len(r.Listeners(118000)) != 1 {
+		t.Fatal("a different cid's subscription was disturbed")
+	}
+}
+
+// TestRemoveClearsTheCidIndex 钉住正常下线也要清 cid 索引。
+// 不清的话，索引里留着一个已注销的 id；下一次同 cid 登录会对着它调 Close，
+// 而那个闭包捕获的是一条已经关掉的连接。
+func TestRemoveClearsTheCidIndex(t *testing.T) {
+	r := New()
+	var closes int
+	first := r.Add(SessionOpts{
+		CID: "1000", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closes++ },
+	})
+	r.Remove(first.ID)
+	if closes != 0 {
+		t.Fatal("an ordinary Remove must not call Close — the transport is already tearing that connection down, and calling back into it invites a loop")
+	}
+
+	_ = r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	if closes != 0 {
+		t.Fatal("the new login tried to evict a session that had already been removed; Remove must clear the cid index")
+	}
+}
+
+// TestEvictionIsSafeWithoutACloseCallback 确认 Close 可以不给。
+// 测试里到处都是只给 Send 的会话，nil 回调不能让 Add panic。
+func TestEvictionIsSafeWithoutACloseCallback(t *testing.T) {
+	r := New()
+	_ = r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	_ = r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	// 走到这里没 panic 就算过。
+}
+
+// TestAnEmptyCidIsNotEvictable 确认空 CID 不会互相顶。
+// 空 CID 不该出现（鉴权拒绝空 CID），但如果真出现了，让所有空 CID 会话互相顶号
+// 是比放过去糟糕得多的失败模式。
+func TestAnEmptyCidIsNotEvictable(t *testing.T) {
+	r := New()
+	a := r.Add(SessionOpts{CID: "", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	b := r.Add(SessionOpts{CID: "", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	if _, ok := r.Get(a.ID); !ok {
+		t.Fatal("a session with an empty cid was evicted by another empty-cid session")
+	}
+	if _, ok := r.Get(b.ID); !ok {
+		t.Fatal("the second empty-cid session is missing")
+	}
+}
+
+// TestConcurrentLoginsOnOneCidLeaveExactlyOneSurvivor 在 -race 下跑。
+// 重连风暴里同一个 CID 短时间内连上好几次是真实存在的。
+func TestConcurrentLoginsOnOneCidLeaveExactlyOneSurvivor(t *testing.T) {
+	r := New()
+	var wg sync.WaitGroup
+	ids := make(chan SessionID, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+			ids <- s.ID
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	var alive int
+	for id := range ids {
+		if _, ok := r.Get(id); ok {
+			alive++
+		}
+	}
+	if alive != 1 {
+		t.Fatalf("%d sessions survived 16 concurrent logins on one cid, want exactly 1", alive)
 	}
 }
 
