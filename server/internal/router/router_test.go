@@ -1,6 +1,7 @@
 package router
 
 import (
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -261,8 +262,11 @@ func TestZeroMaxRXStillAllowsTxImpliedRx(t *testing.T) {
 // 那个版本照样绿。
 //
 // 断言必须落在 ack.TX 上——它是按去重后的切片顺序 append 的，对重复敏感。
-// 去重失效时的真实后果不是"ack 里多一项"，而是重复**吃掉一个 MaxTX 名额**，
-// 于是 121800 被误拒：一个合法声明的频率因为别处的重复而发不出去。
+//
+// 去重失效的真实后果是 ack.TX 里出现字面上的重复项：客户端拿 ACK 对账时
+// 会看到同一个频率两次。它**不会**挤掉别的频率——闸门是 len(next.tx)，
+// 而那是一张 map，重复写的是同一个 key，计数不增。（这一点我一开始写反了，
+// 留个记号免得下一个人照着错的因果去找。）
 func TestSubscribeDeduplicatesFrequencies(t *testing.T) {
 	r := New()
 	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 64, Send: func([]byte) {}})
@@ -277,6 +281,26 @@ func TestSubscribeDeduplicatesFrequencies(t *testing.T) {
 	}
 	if !r.MayTransmit(s.ID, 121800) {
 		t.Fatal("121800 was declared and fits within MaxTX; a duplicate of another frequency must not have squeezed it out")
+	}
+}
+
+// TestADuplicateNeverLandsInBothAcceptedAndRejected 钉住一个自相矛盾的 ACK。
+//
+// 去重失效时，一个**已经被接受**的频率的重复项会在限额用满之后再次进入循环，
+// 于是被追加进 Rejected——客户端同时收到"121800 已接受"和"121800 被拒"，
+// 而 MayTransmit 说可以发。这和 RX 与 Rejected 的重叠不是一回事：那一种带着
+// 信息（TX 被拒、RX 给了），这一种是 TX 这一个决定内部自相矛盾。
+func TestADuplicateNeverLandsInBothAcceptedAndRejected(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 64, Send: func([]byte) {}})
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{118000, 121800, 121800}})
+
+	for _, f := range ack.TX {
+		for _, g := range ack.Rejected {
+			if f == g {
+				t.Fatalf("%d is in both TX %v and Rejected %v; the client is told it may and may not transmit on the same frequency", f, ack.TX, ack.Rejected)
+			}
+		}
 	}
 }
 
@@ -548,23 +572,26 @@ func TestRemoveClearsTheCidIndex(t *testing.T) {
 
 // TestRepeatedConnectDisconnectDoesNotGrowTheCidIndex 是上一条真正的价值所在。
 //
-// byCID 不清理的话，每一次连接/断开循环都会永久留下一条记录。一台长期运行
-// 的服务器上，那是一条只增不减的索引——从外部完全看不出来，直到内存出问题。
+// byCID 不清理的话，每一个不同的成员连接/断开一次，就会永久留下一条记录。
+// 一台长期运行的服务器上，那是一条只增不减的索引——从外部完全看不出来，
+// 直到内存出问题。每次循环必须用不同的 CID：同一个 CID 重复登录只会覆写
+// map 里的同一个 key，测不出"从外部看不出来的累积"这件事。
 func TestRepeatedConnectDisconnectDoesNotGrowTheCidIndex(t *testing.T) {
 	r := New()
 	for i := 0; i < 1000; i++ {
-		s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+		cid := fmt.Sprintf("%d", 1000+i)
+		s := r.Add(SessionOpts{CID: cid, MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
 		r.Subscribe(s.ID, control.Sub{RX: []uint32{118000}})
 		r.Remove(s.ID)
 	}
 	if len(r.byCID) != 0 {
-		t.Fatalf("byCID has %d entries after 1000 connect/disconnect cycles, want 0", len(r.byCID))
+		t.Fatalf("byCID has %d entries after 1000 distinct members connected and disconnected, want 0", len(r.byCID))
 	}
 	if len(r.sessions) != 0 {
-		t.Fatalf("sessions has %d entries after 1000 cycles, want 0", len(r.sessions))
+		t.Fatalf("sessions has %d entries after 1000 distinct members connected and disconnected, want 0", len(r.sessions))
 	}
 	if len(r.rx) != 0 {
-		t.Fatalf("rx has %d frequency entries after 1000 cycles, want 0", len(r.rx))
+		t.Fatalf("rx has %d frequency entries after 1000 distinct members connected and disconnected, want 0", len(r.rx))
 	}
 }
 
