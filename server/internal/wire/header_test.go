@@ -1,6 +1,7 @@
 package wire
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -109,5 +110,36 @@ func TestParseAcceptsHeaderWithNoPayload(t *testing.T) {
 	}
 	if len(opus) != 0 {
 		t.Fatalf("opus = %v, want empty", opus)
+	}
+}
+
+// TestAppendToAppendsRatherThanOverwrites 钉住 AppendTo 的 dst 契约。
+// 扇出路径会把包头追加进一个复用的缓冲区（那是零分配转发的做法），
+// 所以"往非空 dst 里写"才是它真正的用法，而此前所有测试都只传 nil。
+// 如果哪天它改成覆盖写，扇出出去的每个包都会少掉前缀、且只在 Task 8
+// 那边表现为音频错乱——在这里钉住，坏了就当场红。
+func TestAppendToAppendsRatherThanOverwrites(t *testing.T) {
+	prefix := []byte{0xde, 0xad, 0xbe, 0xef}
+	h := Header{Ver: 1, Flags: FlagFirst, Qual: 255, Seq: 7, FreqKHz: 121800, Speaker: 42}
+
+	got := h.AppendTo(prefix)
+	if len(got) != len(prefix)+HeaderSize {
+		t.Fatalf("len = %d, want %d (prefix must survive)", len(got), len(prefix)+HeaderSize)
+	}
+	if !bytes.Equal(got[:len(prefix)], []byte{0xde, 0xad, 0xbe, 0xef}) {
+		t.Fatalf("prefix was overwritten: %x", got[:len(prefix)])
+	}
+	if !bytes.Equal(got[len(prefix):], h.AppendTo(nil)) {
+		t.Fatalf("header bytes differ when appended to a non-empty dst:\n got %x\nwant %x",
+			got[len(prefix):], h.AppendTo(nil))
+	}
+
+	// 带富余容量的 dst：append 会就地写进那段容量，这是最容易写错成
+	// "覆盖 dst 开头"的情形。
+	spare := make([]byte, 4, 4+HeaderSize+8)
+	copy(spare, prefix)
+	got2 := h.AppendTo(spare)
+	if !bytes.Equal(got2, got) {
+		t.Fatalf("dst with spare capacity produced different bytes:\n got %x\nwant %x", got2, got)
 	}
 }
