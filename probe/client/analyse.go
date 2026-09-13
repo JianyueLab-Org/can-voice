@@ -39,11 +39,25 @@ const (
 )
 
 // Verdict 判定是否必须实现 stream 回退通道。
+//
+// 三个返回值：needFallback 是判定本身；conclusive 说明这个判定是否
+// 立得住（数据是否足够支撑它）；reasons 是每一条越过的阈值 + 每一条
+// 诊断性说明（排除了多少可疑样本、排除后样本是否还够）。
+//
+// needFallback 只在 conclusive 为真时才有意义——调用方必须先看
+// conclusive，见 analyseMain 的用法。之所以不用一个 bool 硬顶两件事：
+// "排除了 N 个可疑样本"这类无害的说明本不该把结论拨向"必须回退"，
+// 也不该被读成"结论不成立"；三个返回值把"结论是什么"和"结论立不立得住"
+// 彻底分开，不需要调用方用 len(reasons)>0 去猜。
+//
 // 样本不足时拒绝出结论：用太少的数据决定一个要维护多年的传输层，
-// 比没有数据更危险，因为它看起来像有依据。
-func Verdict(rs []Report) (bool, []string) {
+// 比没有数据更危险，因为它看起来像有依据——这条规矩不仅在排除之前
+// 检查一次，排除之后也要重新检查一次（见下面 usable 那一段的注释），
+// 否则"少于 8 个会话/少于 3 家运营商就拒绝判定"这条门槛会被排除路径
+// 悄悄绕过去。
+func Verdict(rs []Report) (bool, bool, []string) {
 	if len(rs) < minSessions {
-		return false, []string{fmt.Sprintf(
+		return false, false, []string{fmt.Sprintf(
 			"sample too small: %d sessions, need at least %d", len(rs), minSessions)}
 	}
 	carriers := map[string]bool{}
@@ -51,14 +65,14 @@ func Verdict(rs []Report) (bool, []string) {
 		carriers[r.Carrier] = true
 	}
 	if len(carriers) < minCarriers {
-		return false, []string{fmt.Sprintf(
+		return false, false, []string{fmt.Sprintf(
 			"sample too narrow: %d carriers, need at least %d", len(carriers), minCarriers)}
 	}
 
 	// reasons 里混着两种东西：真正越过了某条阈值的结论(会把 crossed
-	// 置位)，和纯粹说明"这次分析排除了什么"的诊断性说明(不会)。
-	// needFallback 只看 crossed，不看 reasons 是否为空——不然一条无害的
-	// "排除了 N 个可疑样本"的说明会把 need 意外地拨到 true。
+	// 置位)，和纯粹说明"这次分析排除了什么/为什么拒绝"的诊断性说明
+	// (不会)。needFallback 只看 crossed，不看 reasons 是否为空——不然
+	// 一条无害的"排除了 N 个可疑样本"的说明会把 need 意外地拨到 true。
 	var reasons []string
 	crossed := false
 	cross := func(format string, args ...any) {
@@ -88,9 +102,11 @@ func Verdict(rs []Report) (bool, []string) {
 
 	if len(passed) == 0 {
 		// 全部会话都没握手成功，后面几行没有对象可算——上面 hsFail 那行
-		// 已经把这个情况的结论说清楚了(如果它越过了阈值)，这里不用再算
-		// 一次 0/0。
-		return crossed, reasons
+		// 已经把这个情况的结论说清楚了(它必然越过了阈值：分母是全部
+		// 会话，全部会话都没过握手意味着比例是 100%)，这个结论建立在
+		// 全部会话(已经过了顶部的样本量/运营商门槛)之上，立得住，
+		// 不用再算一次 0/0。
+		return crossed, true, reasons
 	}
 
 	// datagram 轮被中断的比例：分母是"过了握手的会话数"，不是全部会话
@@ -137,14 +153,27 @@ func Verdict(rs []Report) (bool, []string) {
 			suspect)
 	}
 
-	if len(usable) == 0 {
-		// 排除之后没有能用的样本了。median(nil) 会返回 0，而 0 天然读作
-		// "低于阈值"——如果这里不专门挡住，一批"stream 轮根本没跑起来"
-		// 的会话会被悄悄判定成"不需要回退"。必须像样本太少、运营商太少
-		// 那样明确拒绝下结论 (Ruling 6)，而不是让空切片的默认值蒙混过关。
-		note("no usable sessions for the loss/comparison analysis after excluding rounds that never ran and sessions with send failures (%d sessions passed the handshake)",
-			len(passed))
-		return crossed, reasons
+	// 修复轮 1：样本充足性此前只在排除之前检查过一次(顶部的 minSessions/
+	// minCarriers 门槛)。排除路径能悄悄绕过它本身要防的情况——usable
+	// 缩小到个位数、甚至全来自一家运营商，去决定一个要维护多年的传输层。
+	// 排除之后必须重新做一次同样的检查，拒绝的方式和顶部两条完全一致：
+	// 明确拒绝(conclusive=false)，理由里把排除前后的数字都摆出来，
+	// 不然读的人会以为一开始就没收够。这一条吸收了原来 Ruling 6 的空集
+	// 检查——len(usable)==0 只是 len(usable)<minSessions 的一个特例，
+	// 不再单独判断一次。
+	if len(usable) < minSessions {
+		note("usable sample too small after exclusions: %d of %d sessions that passed the handshake remain usable (need at least %d)",
+			len(usable), len(passed), minSessions)
+		return false, false, reasons
+	}
+	usableCarriers := map[string]bool{}
+	for _, r := range usable {
+		usableCarriers[r.Carrier] = true
+	}
+	if len(usableCarriers) < minCarriers {
+		note("usable sample too narrow after exclusions: %d carrier(s) among %d usable sessions (need at least %d)",
+			len(usableCarriers), len(usable), minCarriers)
+		return false, false, reasons
 	}
 
 	var dgLoss []float64
@@ -169,7 +198,7 @@ func Verdict(rs []Report) (bool, []string) {
 			rate*100, maxDatagramOnlyInterruptRate*100)
 	}
 
-	return crossed, reasons
+	return crossed, true, reasons
 }
 
 func median(xs []float64) float64 {
@@ -209,16 +238,17 @@ func analyseMain(args []string) {
 		rs = append(rs, r)
 	}
 
-	need, reasons := Verdict(rs)
+	need, conclusive, reasons := Verdict(rs)
 	fmt.Printf("%d reports\n", len(rs))
 	for _, r := range reasons {
 		fmt.Printf("  - %s\n", r)
 	}
-	if need {
-		fmt.Println("VERDICT: a stream fallback channel is required")
-	} else if len(reasons) > 0 {
+	switch {
+	case !conclusive:
 		fmt.Println("VERDICT: inconclusive — collect more data")
-	} else {
+	case need:
+		fmt.Println("VERDICT: a stream fallback channel is required")
+	default:
 		fmt.Println("VERDICT: datagram-only is sufficient")
 	}
 }
