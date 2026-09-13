@@ -254,17 +254,29 @@ func TestZeroMaxRXStillAllowsTxImpliedRx(t *testing.T) {
 	}
 }
 
-// TestSubscribeDeduplicatesFrequencies 现在是 0d：钉住重复声明去重后 ACK 也是唯一的。
+// TestSubscribeDeduplicatesFrequencies 钉住 0d，第二版。
 //
-// 倒排索引是 map，本来就不会有重复条目——把 dedup 整个删掉，这个测试原来的
-// 断言（数 r.Listeners(118000) 的长度）照样绿。改成断言 ack.RX：它是切片，
-// 对重复敏感，删掉 dedup 就会看到长度为 3。
+// 上一版断言 ack.RX，前提是错的：ack.RX 是遍历 next.rx 这张 map 构造的，
+// 和它取代的 r.Listeners() 计数一样会把重复吞掉，把 dedup 换成恒等函数
+// 那个版本照样绿。
+//
+// 断言必须落在 ack.TX 上——它是按去重后的切片顺序 append 的，对重复敏感。
+// 去重失效时的真实后果不是"ack 里多一项"，而是重复**吃掉一个 MaxTX 名额**，
+// 于是 121800 被误拒：一个合法声明的频率因为别处的重复而发不出去。
 func TestSubscribeDeduplicatesFrequencies(t *testing.T) {
 	r := New()
-	s := newSession(t, r, "1000", 8)
-	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 118000, 118000}})
-	if len(ack.RX) != 1 {
-		t.Fatalf("SubAck.RX = %v, want exactly one entry — the inverted index is a map and hides duplicates, so the ack is what has to be asserted", ack.RX)
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 64, Send: func([]byte) {}})
+
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{118000, 118000, 121800}})
+
+	if len(ack.TX) != 2 || ack.TX[0] != 118000 || ack.TX[1] != 121800 {
+		t.Fatalf("SubAck.TX = %v, want [118000 121800] — a duplicate must not consume a MaxTX slot", ack.TX)
+	}
+	if len(ack.Rejected) != 0 {
+		t.Fatalf("Rejected = %v, want empty — nothing here exceeds MaxTX=2 once duplicates are removed", ack.Rejected)
+	}
+	if !r.MayTransmit(s.ID, 121800) {
+		t.Fatal("121800 was declared and fits within MaxTX; a duplicate of another frequency must not have squeezed it out")
 	}
 }
 
@@ -525,9 +537,34 @@ func TestRemoveClearsTheCidIndex(t *testing.T) {
 		t.Fatal("an ordinary Remove must not call Close — the transport is already tearing that connection down, and calling back into it invites a loop")
 	}
 
-	_ = r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
-	if closes != 0 {
-		t.Fatal("the new login tried to evict a session that had already been removed; Remove must clear the cid index")
+	// 直接断言索引本身。这是包内测试，读 r.byCID 是正当的——而且这里
+	// 没有别的办法：从外部看，"索引里留着一条指向已注销会话的记录"和
+	// "索引是干净的"表现完全一样，因为 Add 的顶号路径查到的 session
+	// 本来就已经不在 r.sessions 里了。
+	if len(r.byCID) != 0 {
+		t.Fatalf("byCID has %d entries after the only session was removed, want 0", len(r.byCID))
+	}
+}
+
+// TestRepeatedConnectDisconnectDoesNotGrowTheCidIndex 是上一条真正的价值所在。
+//
+// byCID 不清理的话，每一次连接/断开循环都会永久留下一条记录。一台长期运行
+// 的服务器上，那是一条只增不减的索引——从外部完全看不出来，直到内存出问题。
+func TestRepeatedConnectDisconnectDoesNotGrowTheCidIndex(t *testing.T) {
+	r := New()
+	for i := 0; i < 1000; i++ {
+		s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+		r.Subscribe(s.ID, control.Sub{RX: []uint32{118000}})
+		r.Remove(s.ID)
+	}
+	if len(r.byCID) != 0 {
+		t.Fatalf("byCID has %d entries after 1000 connect/disconnect cycles, want 0", len(r.byCID))
+	}
+	if len(r.sessions) != 0 {
+		t.Fatalf("sessions has %d entries after 1000 cycles, want 0", len(r.sessions))
+	}
+	if len(r.rx) != 0 {
+		t.Fatalf("rx has %d frequency entries after 1000 cycles, want 0", len(r.rx))
 	}
 }
 
