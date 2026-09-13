@@ -13,11 +13,11 @@ import (
 // Report 是用户回传给我们的全部内容。
 // 刻意不含 IP、主机名、用户名 —— 运营商由用户手填，其余全是网络测量值。
 type Report struct {
-	SchemaVersion int             `json:"schema_version"`
-	ProbeVersion  string          `json:"probe_version"`
-	OS            string          `json:"os"`
-	Arch          string          `json:"arch"`
-	Carrier       string          `json:"carrier"`
+	SchemaVersion int    `json:"schema_version"`
+	ProbeVersion  string `json:"probe_version"`
+	OS            string `json:"os"`
+	Arch          string `json:"arch"`
+	Carrier       string `json:"carrier"`
 	// Timezone 是缩写（如 CST），不能单独使用——它同时是"中国标准时间"和
 	// "美国中部时间"的缩写，光凭它分不清用户在哪个时区。真正能用来对齐当地
 	// 时刻（从而分辨"晚高峰拥塞"和"被封锁"）的是 StartedAt 里带偏移量的
