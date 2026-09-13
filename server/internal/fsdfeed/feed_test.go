@@ -1346,3 +1346,118 @@ func TestABadStatusFailsFastNotViaTheWatchdog(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestAGracefulCloseAlsoGoesDegraded 钉住第三条掉进"快照过期却没人知道"的门路。
+//
+// 前两条是 Task 5 原本的死连接（看门狗管）和 Fix round 1 的超限累积（
+// recordFailure 管）；这是第三条：stream() 干干净净地返回 nil——
+// sc.Scan() 因为对端正常关闭而返回 false，sc.Err() 是 nil，没有任何错误，
+// 也没有看门狗触发。can-fsd 的一次平滑重启，或者中间代理礼貌地断开流，
+// 都长这样。Run() 现在把 f.degraded = true 放在 if/else if 之外，对
+// 错误返回和干净返回一视同仁地生效；但这行为从来没有被钉住过——如果有人
+// 把它挪进 err != nil 分支里（读起来像是在"只在真出错时才降级"，很自然的
+// 一次"整理"），干净关闭就会让 degraded 停在 false，快照在整个重连
+// 窗口期间继续被当作权威数据，没有任何信号能告诉调用方这份快照已经过期。
+func TestAGracefulCloseAlsoGoesDegraded(t *testing.T) {
+	closeNow := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		// 撑住这个响应，等测试确认 degraded 已经因为这份快照变成 false，
+		// 再主动、干净地返回——不是被 ctx 取消，也没有出错，就是单纯的
+		// "这次响应结束了"，模拟 can-fsd 的一次平滑重启或者代理的礼貌断开。
+		select {
+		case <-closeNow:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.Run(ctx)
+	}()
+
+	// 先等它真的连上、吃到快照、退出初始的 degraded=true——这段时间里
+	// 服务端一直卡在 select 里没有返回，所以这个窗口是稳定的，不会被
+	// "服务端立刻又关闭"抢先盖掉。
+	upDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(upDeadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up long enough to observe a graceful close")
+	}
+
+	// 现在让服务端干净地返回：没有错误，没有被看门狗或 ctx 取消打断。
+	close(closeNow)
+
+	// degraded 必须重新变成 true——不需要等下一次重连尝试，Run() 在
+	// stream() 一返回就该置位，不管返回值是不是 nil。
+	degradedDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(degradedDeadline) {
+		if f.Degraded() {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("a graceful close (clean EOF, stream() returned nil) never made the feed degraded")
+}
+
+// TestTheRequestCarriesTheAcceptHeader 钉住 req.Header.Set("Accept", ...)
+// 这一行。
+//
+// 现有的假服务端全都不检查请求头，所以删掉这一行不会让本文件里任何一个
+// 既有测试变红。真实环境里更严格的 can-fsd 部署，或者中间的反向代理，
+// 可能会因为缺这个头而把响应整体缓冲起来再发（SSE 就变成了假的），或者
+// 干脆答 406——两种情况看起来都会像"连不上/连上了但一直没数据"，而不是
+// "客户端忘了声明自己要 SSE"。
+func TestTheRequestCarriesTheAcceptHeader(t *testing.T) {
+	headerOK := make(chan bool, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case headerOK <- r.Header.Get("Accept") == "text/event-stream":
+		default:
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f.Run(ctx)
+	}()
+
+	select {
+	case ok := <-headerOK:
+		cancel()
+		<-done
+		if !ok {
+			t.Fatal(`the request did not carry "Accept: text/event-stream"`)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("the server never received a request")
+	}
+}
