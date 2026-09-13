@@ -228,6 +228,11 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	slices.Sort(ack.RX)
 	slices.Sort(ack.TX)
 	slices.Sort(ack.Rejected)
+	// 截断在排序之后，所以留下的是确定的那一批（数值最小的 maxRejected 个），
+	// 而不是"碰巧先算出来的"。
+	if len(ack.Rejected) > maxRejected {
+		ack.Rejected = ack.Rejected[:maxRejected]
+	}
 	return ack
 }
 
@@ -291,6 +296,26 @@ func (r *Router) unindex(freq uint32, id SessionID) {
 // 客户端给的整份列表并往 rejected 里抄。控制帧上限是 64 KiB（control.MaxFrame），
 // 一份塞满的 SUB 能带七千多个对，所以"反正最后都会被拒"不是不设界的理由。
 const maxXCPairs = 64
+
+// maxRejected 是 SubAck.Rejected 里最多回报多少个频率。
+//
+// 不设界的话 ACK 会超过出站帧上限而根本发不出去——一条**已经生效**的 SUB
+// 得不到任何回应。实测的最坏输入：贪心地用短数字塞满一条 SUB，12768 个互不相同
+// 的 TX 频率正好是 65535 字节（`control.MaxFrame` 是 65536），而回来的 SubAck 是
+// 65575 字节，超了 39 个。放大倍数约等于 1 加上几十字节的 JSON 键名，所以这不是
+// 一个能拿去打别人的放大器，但它是自伤的、活的。
+//
+// 截断是安全的，理由值得写下来：**客户端随时可以自己算出被拒的集合**——它自己
+// 的声明减去 ack.RX ∪ ack.TX 就是。Rejected 是给"拒了三两个"这种常见情况用的
+// 便利字段，不是权威记录。声明了几千个频率却只拿回一截列表的客户端没有受害；
+// 什么 ACK 都没拿到的客户端才受害。
+//
+// 256 的来历（算出来的，不是拍的）：频率是 uint32，十进制最长 10 位加一个逗号，
+// 按 11 字节算；RejectedXC 最坏 2*maxXCPairs = 128 对，每对最长 23 字节。于是固定
+// 部分约 64（键名）+ 128*23 + 256*11 = 5824 字节，给 ack.RX + ack.TX 留下约 59700
+// 字节、合 5400 个频率。RX/TX 的长度由 MaxRX/MaxTX 决定，是服务端配置（通常
+// 32/8），离 5400 有三个数量级的余量。真要把 MaxRX 配到几千，这个上界要重算。
+const maxRejected = 256
 
 // normaliseXC 校验并规范化客户端声明的交叉耦合对，返回生效的对和被拒的对。
 //

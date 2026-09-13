@@ -103,6 +103,33 @@ func TestFanoutStampsSpeakerAndLeavesOpusUntouched(t *testing.T) {
 	}
 }
 
+// TestFanoutPreservesFlagLast 钉住 flags 是**透传**的，不是填一个常数。
+//
+// 上一条用的是 FlagFirst，而 FlagFirst 恰好就是 packet() 造的那个值——把
+// `Flags: h.Flags` 写死成 `wire.FlagFirst` 它照样绿。要紧的是 FlagLast：
+// 接收端靠它立刻熄灭 RX 指示灯。丢了它，指示灯只能等超时循环来关，
+// 松开 PTT 之后还要多亮半秒——can-audio 里这正是一条真实的抱怨，
+// FlagLast 这一位的存在就是为了消掉它。
+func TestFanoutPreservesFlagLast(t *testing.T) {
+	r := New()
+	speaker := newRecorder(t, r, "1000")
+	listener := newRecorder(t, r, "1001")
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(listener.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 尾帧：FlagLast，而且不带音频（尾帧不必携带载荷）。
+	last := wire.Header{
+		Ver: wire.Version, Flags: wire.FlagLast, Seq: 42, FreqKHz: 121800,
+	}.AppendTo(nil)
+	if _, err := r.Fanout(speaker.sess.ID, last); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	h, _, _ := wire.Parse(listener.got[0])
+	if h.Flags != wire.FlagLast {
+		t.Fatalf("Flags = %#x, want FlagLast (%#x) — flags are passed through; stamping a constant leaves the receiver's RX lamp lit after the speaker releases PTT", h.Flags, wire.FlagLast)
+	}
+}
+
 func TestFanoutRefusesAnUndeclaredTransmitFrequency(t *testing.T) {
 	r := New()
 	speaker := newRecorder(t, r, "1000")
@@ -259,24 +286,60 @@ func TestFanoutStampsQualityForListenersInTheEdgeBand(t *testing.T) {
 	}
 }
 
+// TestFanoutDeliversToEveryoneWhenTheFeedIsDegraded 钉住"降级即放行"。
+//
+// 快照**故意是满的、而且两个人隔着 4800 海里**（射程合计 40）。这一点是复审逼出来的：
+// 原来这里给的是空快照，于是这条测试什么都没测到——位置查不到本来就会放行，
+// 降级这一支删掉它也一样绿。有了内容之后，它断言的是"降级时满格放行，**尽管**
+// 这个距离在正常情况下会被切掉"。
+//
+// 这条规则由**两道闸门**共同守着，而它们互相遮蔽——这一点值得写下来，因为它
+// 解释了为什么单条变异永远打不红这个测试：
+//
+//  1. Fanout 里的 `if !degraded { senderPos, senderKnown = lookup(...) }`
+//  2. qualityFor 里的 `if degraded || !senderKnown { return 255, true }`
+//
+// 任何一道单独都足够。只去掉 (1)，(2) 仍然短路；只去掉 (2)，(1) 保证了 senderPos
+// 是未知的，而 EffectiveRangeNM 见到未知位置本来就返回"别过滤"。两条都实测过，
+// 各自全绿。**两道一起去掉，这个测试就红**（也实测过）——所以钉住的是规则，
+// 不是某一行。(2) 留着是纵深防御：它让"不知道就放行"在这个函数里看得见，
+// 不必跨两个包去推。
+//
+// 而它红得起来，全靠上面那个满的快照。用空快照的话，两道闸门都去掉它**照样绿**
+// （谁都查不到，本来就会放行）——这正是这一版之前的样子，一条什么都没测到的测试。
 func TestFanoutDeliversToEveryoneWhenTheFeedIsDegraded(t *testing.T) {
 	r := New()
 	a := newRecorder(t, r, "1000")
 	b := newRecorder(t, r, "1001")
 	r.Subscribe(a.sess.ID, control.Sub{TX: []uint32{121800}})
 	r.Subscribe(b.sess.ID, control.Sub{RX: []uint32{121800}})
-	r.SetLocator(stubLocator{degraded: true})
+
+	// 降级，但快照里两个人都在，而且远到正常一定会被切掉。
+	r.SetLocator(stubLocator{degraded: true, snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
+		"1000": airborne("CCA1", "1000", 0.0, 120.0, 20),
+		"1001": airborne("CCA2", "1001", 80.0, 120.0, 20), // 约 4800 海里
+	}}})
 
 	if _, err := r.Fanout(a.sess.ID, packet(121800, 1, 0xAA)); err != nil {
 		t.Fatalf("Fanout: %v", err)
 	}
 	if len(b.got) != 1 {
-		t.Fatal("when we do not know where anyone is we must pass everything, not block everything")
+		t.Fatal("when the feed is degraded we must pass everything, not block everything — even a listener 4800 NM away, because a stale snapshot is not evidence of anything")
+	}
+	h, _, _ := wire.Parse(b.got[0])
+	if h.Qual != 255 {
+		t.Fatalf("Qual = %d, want 255 — a degraded feed must not attenuate either; we have no basis to", h.Qual)
 	}
 }
 
+// TestFanoutDeliversWithNoLocatorAtAll 钉住没装 Locator 时不炸、而且全放行。
+//
+// 启动顺序里 Fanout 完全可能先于 SetLocator。这里**不能**给快照——整条测试的前提
+// 就是没有位置来源——所以要说清楚它钉住的是什么：`positions()` 里那个 nil 判断。
+// 去掉它就是对 nil 接口调 Snapshot()，一次 panic 把服务端带下去。
+// 至于那个分支返回的 degraded 是 true 还是 false，在这里**观察不到**（空快照里
+// 谁都查不到，两条路都通向放行），所以不要假装这条测试守着它。
 func TestFanoutDeliversWithNoLocatorAtAll(t *testing.T) {
-	// 没装 Locator 等于永久降级。启动顺序里 Fanout 完全可能先于 SetLocator。
 	r := New()
 	a := newRecorder(t, r, "1000")
 	b := newRecorder(t, r, "1001")
@@ -288,6 +351,10 @@ func TestFanoutDeliversWithNoLocatorAtAll(t *testing.T) {
 	}
 	if len(b.got) != 1 {
 		t.Fatal("with no locator installed every packet must be forwarded")
+	}
+	h, _, _ := wire.Parse(b.got[0])
+	if h.Qual != 255 {
+		t.Fatalf("Qual = %d, want 255", h.Qual)
 	}
 }
 
@@ -317,6 +384,10 @@ func TestFanoutDeliversWhenAPositionIsUnknown(t *testing.T) {
 }
 
 // TestAnUnknownSpeakerPositionDisablesFilteringEntirely 是上一条的对称面。
+//
+// 听众是**已知的、而且在 4800 海里外**，所以这条测试有内容：只要发送方位置未知，
+// 哪怕听众的位置清清楚楚、远得离谱，也必须满格送达。把未知的发送方当成 (0,0)
+// （几内亚湾，Position.Known 那条注释里的原话）去算距离，这里就会红。
 func TestAnUnknownSpeakerPositionDisablesFilteringEntirely(t *testing.T) {
 	r := New()
 	a := newRecorder(t, r, "1000")
@@ -324,8 +395,9 @@ func TestAnUnknownSpeakerPositionDisablesFilteringEntirely(t *testing.T) {
 	r.Subscribe(a.sess.ID, control.Sub{TX: []uint32{121800}})
 	r.Subscribe(far.sess.ID, control.Sub{RX: []uint32{121800}})
 
+	// 说话人 1000 根本不在快照里；听众在，而且远。
 	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
-		"1001": airborne("CCA2", "1001", 60.0, 10.0, 20), // 半个地球外
+		"1001": airborne("CCA2", "1001", 80.0, 120.0, 20), // 约 4800 海里
 	}}})
 
 	if _, err := r.Fanout(a.sess.ID, packet(121800, 1, 0xAA)); err != nil {
@@ -333,6 +405,10 @@ func TestAnUnknownSpeakerPositionDisablesFilteringEntirely(t *testing.T) {
 	}
 	if len(far.got) != 1 {
 		t.Fatal("if we do not know where the speaker is we cannot filter at all; pass rather than block")
+	}
+	h, _, _ := wire.Parse(far.got[0])
+	if h.Qual != 255 {
+		t.Fatalf("Qual = %d, want 255 — an unknown speaker position must not be attenuated either", h.Qual)
 	}
 }
 
@@ -401,6 +477,45 @@ func TestAnObserverIsFilteredByTheAircraftTheyFollow(t *testing.T) {
 	}
 }
 
+// TestAnObserversOwnCidDoesNotOverrideTheAircraftTheyFollow 钉住 lookup 里的
+// **优先级**，而不只是 Follow 会不会被用到。
+//
+// 上面两条只保证"Follow 被查了"。把 lookup 改成先查 ByCID、查不到再查 Follow，
+// 两条都还是绿的，因为那两个快照里都没有观察员自己的 cid。可它是会有的：
+// 右座那位机组成员有自己的账号，而他很可能同时也在网上飞（自己的飞机停在别处、
+// 或者他刚从另一架飞机上下来）。cid 优先的话，他的射程是按**他自己那架飞机**
+// 算的，而不是按他正在跟随的这架——于是他听得见的和左座听得见的是两回事。
+func TestAnObserversOwnCidDoesNotOverrideTheAircraftTheyFollow(t *testing.T) {
+	r := New()
+	speaker := newRecorder(t, r, "1000")
+	obs := &recorder{}
+	obs.sess = r.Add(SessionOpts{
+		CID: "9999", Follow: "CCA1", MaxTX: 0, MaxRX: 64,
+		Send: func(b []byte) { obs.got = append(obs.got, append([]byte(nil), b...)) },
+	})
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(obs.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 观察员自己的 cid **在**快照里，就在说话人旁边（射程内）；
+	// 他跟随的那架飞机在 480 海里外（射程外）。跟随的那架说了算。
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{
+		ByCID: map[string]fsdfeed.Position{
+			"1000": airborne("CCA2", "1000", 30.0, 120.0, 20),
+			"9999": airborne("CES9", "9999", 30.05, 120.0, 20), // 自己的飞机，就在旁边
+		},
+		ByCallsign: map[string]fsdfeed.Position{
+			"CCA1": airborne("CCA1", "1002", 38.0, 120.0, 20), // 跟随的那架，480 海里外
+		},
+	}})
+
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(obs.got) != 0 {
+		t.Fatal("Follow must win over the observer's own cid; consulting the cid first computes their range from their own aircraft instead of the one they are sitting in")
+	}
+}
+
 // --- 交叉耦合 ---
 
 // TestCrossCoupleCarriesAnyonesTransmission 是宽读的核心。
@@ -423,7 +538,8 @@ func TestCrossCoupleCarriesAnyonesTransmission(t *testing.T) {
 	r.Subscribe(pilotA.sess.ID, control.Sub{TX: []uint32{121800}})
 	r.Subscribe(pilotB.sess.ID, control.Sub{RX: []uint32{124550}})
 
-	if _, err := r.Fanout(pilotA.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+	n, err := r.Fanout(pilotA.sess.ID, packet(121800, 1, 0xAA))
+	if err != nil {
 		t.Fatalf("Fanout: %v", err)
 	}
 	if len(pilotB.got) != 1 {
@@ -432,6 +548,38 @@ func TestCrossCoupleCarriesAnyonesTransmission(t *testing.T) {
 	h, _, _ := wire.Parse(pilotB.got[0])
 	if h.FreqKHz != 124550 {
 		t.Fatalf("FreqKHz = %d, want 124550 — the header must name the frequency this listener actually subscribed to, so their client routes it to the right radio", h.FreqKHz)
+	}
+	// 返回值要把耦合频率上的那几份也算进去：只在主频率上 n++ 也能让上面每一条
+	// 断言通过。这个数字将来是日志行和指标的来源，一次扇出投了 2 份却报 1 份，
+	// 是那种没人会发现、直到有人在查别的问题时才撞上的偏差。
+	if n != 2 {
+		t.Fatalf("delivered = %d, want 2 (the controller on 121800 and the pilot on the coupled 124550) — counting only the primary frequency under-reports every cross-coupled fan-out", n)
+	}
+}
+
+// TestTheDeliveredCountIncludesCoupledFrequencies 把上一条的计数断言单独放大：
+// 耦合频率上有三个听众，主频率上一个都没有。只在主频率上 n++ 的实现会报 0。
+func TestTheDeliveredCountIncludesCoupledFrequencies(t *testing.T) {
+	r := New()
+	ctl := newRecorder(t, r, "1000")
+	pilot := newRecorder(t, r, "1001")
+	r.Subscribe(ctl.sess.ID, control.Sub{
+		RX: []uint32{124550},
+		TX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	r.Subscribe(pilot.sess.ID, control.Sub{TX: []uint32{121800}})
+	for _, cid := range []string{"1002", "1003"} {
+		r.Subscribe(newRecorder(t, r, cid).sess.ID, control.Sub{RX: []uint32{124550}})
+	}
+
+	n, err := r.Fanout(pilot.sess.ID, packet(121800, 1, 0xAA))
+	if err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	// ctl 订阅了 121800（TX 蕴含 RX）和 124550，加上两个只听 124550 的，共 3 份。
+	if n != 3 {
+		t.Fatalf("delivered = %d, want 3 — the count must include every listener reached through a coupled frequency", n)
 	}
 }
 
@@ -706,6 +854,51 @@ func TestAnUngrantedCrossCoupleIsRefused(t *testing.T) {
 	}
 }
 
+// TestAnRxOnlyCrossCoupleDeclarationIsRefused 钉住校验用的是 **TX** 授权集合，
+// 不是 RX 的。
+//
+// 这条测试的来历值得记下来。上一轮把五条耦合测试里漏掉的 TX 补了上去——原来
+// 它们只声明 RX，于是那一对必然被拒，测试全是空绿的。补得对，但补完之后**整个
+// 测试集里再没有一处 RX 授权集合和 TX 授权集合不一样的输入**了：把
+// normaliseXC(sub.XC, next.tx) 改成 next.rx，一个词的改动，整套仍然全绿。
+// 教训是通用的——**修一个空绿的测试，可能顺手删掉了它本来该守的那条分界线**；
+// 往测试输入里补一个字段之前，先想想那个字段是不是别处正在考的那一个。
+//
+// 场景是真实的：一个飞行员发 SUB {rx:[121800,124550], xc:[[121800,124550]]}，
+// 一个 TX 都没有。按 TX 校验会拒；按 RX 校验会放行，于是 121.8 上的每一句话
+// 都会出现在 124.55 上，全网生效，而声明的人这两个频率一个都发不了。
+func TestAnRxOnlyCrossCoupleDeclarationIsRefused(t *testing.T) {
+	r := New()
+	rogue := newRecorder(t, r, "1000")
+	speaker := newRecorder(t, r, "1001")
+	victim := newRecorder(t, r, "1002")
+
+	// 两个频率都在 RX 里，一个都不在 TX 里。
+	ack := r.Subscribe(rogue.sess.ID, control.Sub{
+		RX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	if len(ack.RejectedXC) != 1 {
+		t.Fatalf("RejectedXC = %v, want the pair refused — cross-couple is a transmit-side feature and must be validated against the granted TX set, not the RX set", ack.RejectedXC)
+	}
+	if got := r.coupledWith(121800); len(got) != 0 {
+		t.Fatalf("coupledWith(121800) = %v, want empty", got)
+	}
+	if got := r.coupledWith(124550); len(got) != 0 {
+		t.Fatalf("coupledWith(124550) = %v, want empty", got)
+	}
+
+	// 而且要真的没接通：第三方在 121800 上发言不能到达 124550 的听众。
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(victim.sess.ID, control.Sub{RX: []uint32{124550}})
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(victim.got) != 0 {
+		t.Fatal("an RX-only declaration bridged two frequencies network-wide; validating against RX means anyone who can listen can couple any two frequencies they can listen to")
+	}
+}
+
 // TestACrossCoupleRejectedByMaxTXDoesNotTakeEffect 钉住权限检查用的是**授权后**
 // 的 TX 集合，不是客户端声明的那一份——否则 MaxTX 限额可以被 XC 绕过。
 func TestACrossCoupleRejectedByMaxTXDoesNotTakeEffect(t *testing.T) {
@@ -821,6 +1014,65 @@ func TestAHostileCrossCoupleListStillProducesASendableAck(t *testing.T) {
 	}
 	if len(b) > control.MaxFrame {
 		t.Fatalf("the SUBACK is %d bytes, over the %d byte frame limit — it could never be sent", len(b), control.MaxFrame)
+	}
+}
+
+// TestAMaximalSubStillProducesASendableAck 钉住 ack.Rejected 的上界。
+//
+// 这不是理论风险，是量出来的：贪心地用短数字塞满一条 SUB，12768 个互不相同的
+// TX 频率正好 65535 字节，刚好在 control.MaxFrame（65536）之内；不设界的话回来的
+// SubAck 是 65575 字节，**超了 39 个**。WriteFrame 会拒绝它，于是一条**已经生效**
+// 的 SUB 得不到任何回应——客户端的订阅状态和服务端的对不上，而它收不到任何
+// 说明。（放大倍数约等于 1 加上几十字节的键名，所以它是自伤的，不是拿去打别人的
+// 放大器；但自伤也是伤。）
+//
+// 截断为什么是安全的：**客户端随时可以自己算出被拒的集合**——自己的声明减去
+// ack.RX ∪ ack.TX 就是。Rejected 是"拒了三两个"这种常见情况的便利字段，不是权威
+// 记录。拿回一截列表的客户端没有受害，什么都没拿到的才受害。
+func TestAMaximalSubStillProducesASendableAck(t *testing.T) {
+	// 0,1,2,… ——小数字占的字节少，所以这是在 MaxFrame 之内能塞进最多频率的形状。
+	// 数量是**量出来的**而不是写死的：贴着上限往回收，直到这条 SUB 真的发得进来。
+	// 写死一个数字会在 JSON 形状变一点（比如 nil 切片编成 null 而不是 []）的时候
+	// 悄悄失去意义。
+	var sub control.Sub
+	var raw []byte
+	for n := 13000; n > 0; n-- {
+		freqs := make([]uint32, 0, n)
+		for i := 0; i < n; i++ {
+			freqs = append(freqs, uint32(i))
+		}
+		candidate := control.Sub{RX: []uint32{}, TX: freqs, XC: [][2]uint32{}}
+		b, err := control.Encode(&candidate)
+		if err != nil {
+			t.Fatalf("Encode sub: %v", err)
+		}
+		if len(b) <= control.MaxFrame {
+			sub, raw = candidate, b
+			break
+		}
+	}
+	if raw == nil {
+		t.Fatal("could not build a SUB that fits the frame limit")
+	}
+	t.Logf("the largest admissible SUB carries %d TX frequencies in %d bytes (limit %d)", len(sub.TX), len(raw), control.MaxFrame)
+
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	ack := r.Subscribe(s.ID, sub)
+
+	if len(ack.Rejected) > maxRejected {
+		t.Fatalf("Rejected = %d entries, want at most %d", len(ack.Rejected), maxRejected)
+	}
+	if len(ack.Rejected) == 0 {
+		t.Fatal("12760 frequencies were refused and the client must be told something about it")
+	}
+	out, err := control.Encode(&ack)
+	if err != nil {
+		t.Fatalf("Encode ack: %v", err)
+	}
+	t.Logf("SUBACK is %d bytes (limit %d)", len(out), control.MaxFrame)
+	if len(out) > control.MaxFrame {
+		t.Fatalf("the SUBACK is %d bytes, over the %d byte frame limit — a SUB that was applied would get no ACK at all", len(out), control.MaxFrame)
 	}
 }
 
