@@ -36,8 +36,14 @@ func TestWriteReportProducesReadableJSON(t *testing.T) {
 	if got.Datagram.Sent != 3000 {
 		t.Fatalf("Datagram.Sent = %d, want 3000", got.Datagram.Sent)
 	}
-	if !strings.Contains(string(b), "\n") {
-		t.Fatal("report must be indented; the user is asked to read it before sending it")
+	// 终审 Finding G：WriteReport 无条件在末尾追加一个 '\n'，所以只断言
+	// 内容里"有换行"对 json.Marshal(紧凑、单行)也成立——把 MarshalIndent
+	// 换成 Marshal 这个测试照样是绿的，而用户拿到的会是一整行读不了的
+	// JSON。改成断言 MarshalIndent 特有的形状："\n" 后面紧跟两个空格再
+	// 跟一个字段名的引号——紧凑输出里除了末尾那一个之外没有任何换行，
+	// 更不会有换行后跟两个空格的模式。
+	if !strings.Contains(string(b), "\n  \"") {
+		t.Fatalf("report must be indented (MarshalIndent, not Marshal); the user is asked to read it before sending it, got:\n%s", b)
 	}
 }
 
@@ -93,5 +99,27 @@ func TestSummariseReportNamesTheDecisiveComparison(t *testing.T) {
 	}
 	if !strings.Contains(s, "100") && !strings.Contains(s, "全部") {
 		t.Fatalf("summary must make total datagram loss obvious, got:\n%s", s)
+	}
+}
+
+// TestSummariseReportsElevatedDatagramLossAgainstTheRealThreshold 钉住终审
+// Finding E：单份报告里"数据报丢包率偏高"这句话现在直接对照
+// maxDatagramLoss(汇总判定表真正采信的量)，而不是已经从判定表里删掉的
+// "和对照通道丢包率的差值"(那是算术上恒等于 datagram 丢包率本身的死指标，
+// 见 analyse.go 里 maxDatagramOnlyInterruptRate 的注释)。丢包率 5.0%
+// 高于 maxDatagramLoss(2.0%)，对照通道干净、两轮都没被中断，应该命中
+// 这一句而不是默认的"表现接近"。
+func TestSummariseReportsElevatedDatagramLossAgainstTheRealThreshold(t *testing.T) {
+	r := Report{
+		Handshake: HandshakeResult{OK: true, Millis: 42},
+		Datagram:  RoundResult{Sent: 3000, Received: 2850, LossPercent: 5.0},
+		Stream:    RoundResult{Sent: 3000, Received: 3000, LossPercent: 0},
+	}
+	s := Summarise(r)
+	if !strings.Contains(s, "5.0") {
+		t.Fatalf("summary must name the actual datagram loss percentage, got:\n%s", s)
+	}
+	if strings.Contains(s, "两个通道表现接近") {
+		t.Fatalf("elevated datagram loss must not fall through to the clean-network default, got:\n%s", s)
 	}
 }

@@ -131,26 +131,34 @@ func Summarise(r Report) string {
 	b.WriteString(summariseRound("对照通道  ", r.Stream))
 	b.WriteString("\n")
 
+	// 走到这里说明 r.Handshake.OK 为真(上面已经对握手失败提前返回过)。
+	// Datagram.Failed 只可能由 markRoundsAsNotRun 置位，而那个函数只在
+	// 握手失败时被调用——round.go 里也写了 datagram 轮目前没有对应的
+	// 早期失败路径，它的 Failed 恒为 false。所以下面不会出现
+	// r.Datagram.Failed == true 的情况：曾经写过的"两个通道都没跑起来"、
+	// "数据报没跑起来但对照通道中途被掐断"、"数据报没跑起来"三个分支
+	// 永远进不去，是死代码，删掉——不留着，免得以后被人当成还有用而
+	// 重新踩进这个坑（终审 Finding D）。
 	switch {
-	case r.Stream.Failed && r.Datagram.Failed:
-		b.WriteString("两个通道都没能跑起来，这台机器的网络对这类连接不友好。\n")
 	case r.Stream.Failed:
 		// 对照通道没跑起来，就没有"两轮的差异"可言——不能把 datagram
 		// 轮的结果单独拿出来下结论，那正是这两轮设计要防止的"读反"。
 		b.WriteString("对照通道没能跑起来，这一次测不出数据报通道是否被特殊对待，结论无法给出。\n")
-	case r.Datagram.Failed && r.Stream.Interrupted:
-		// 对照通道跑起来了，但中途被掐断——不能说它"正常"，也不能因为
-		// 数据报通道没跑起来就断言这是针对性阻断：这台网络对这类连接
-		// 本身就不友好，两轮的差异读不出结论。
-		b.WriteString("数据报通道没能跑起来，对照通道也中途被掐断 —— 这台机器的网络对这类连接本身就不友好，还不能就此断定是在针对性阻断数据报。\n")
-	case r.Datagram.Failed:
-		b.WriteString("数据报通道没能跑起来，对照通道跑完且没有被中途掐断——这正是我们要找的情况：这台网络很可能在针对性阻断 UDP 数据报。\n")
 	case r.Datagram.Interrupted && !r.Stream.Interrupted:
 		b.WriteString("数据报通道中途被掐断，对照通道没有 —— 这正是我们要找的情况。\n")
 	case r.Datagram.Interrupted && r.Stream.Interrupted:
 		b.WriteString("两个通道都中途被掐断，这台机器的网络对长时间连接不友好。\n")
-	case r.Datagram.LossPercent > r.Stream.LossPercent+2:
-		b.WriteString("数据报通道明显比对照通道差。\n")
+	case r.Datagram.LossPercent > maxDatagramLoss:
+		// 终审 Finding E：这里原来比较的是"数据报丢包率 - 对照通道丢包率
+		// > 2"，跟汇总判定表里已经删掉的旧指标是同一个算式(stream 轮
+		// 丢包率恒为 ~0，两者算术上等价)，而且这个 2 是凭空写的，跟
+		// analyse.go 里真正用来下结论的 maxDatagramLoss 只是数值凑巧
+		// 相同、含义并不是一回事。改成直接对照汇总判定真正采信的量
+		// (datagram 轮丢包率本身)和它的阈值，不再提"和对照通道的差值"，
+		// 并且明说这只是单份报告的直觉提示，真正的结论要看多份报告汇总
+		// 后的中位数——不能让人拿单独一份报告里的这句话当独立证据引用。
+		fmt.Fprintf(&b, "数据报通道丢包率 %.1f%%，高于我们汇总判定时使用的 %.0f%% 参考线（最终结论以多份报告汇总后的中位数为准，这一份单独看不能说明什么）。\n",
+			r.Datagram.LossPercent, maxDatagramLoss)
 	default:
 		b.WriteString("两个通道表现接近，这台机器的网络没有特殊对待数据报。\n")
 	}

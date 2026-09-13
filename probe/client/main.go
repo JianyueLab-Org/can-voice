@@ -31,7 +31,10 @@ func main() {
 	started := time.Now()
 	rep := NewReport(probeVersion, *carrier, started)
 
-	fmt.Println("正在测试，大约需要两分半，请不要关闭窗口，也不要切换网络。")
+	// 与 README-测试说明.md 里的"大约两分钟"对齐(终审 Finding F)：
+	// 实际是 60+2 秒(数据报轮 + 轮内 drain) + 60+2 秒(对照轮 + drain) +
+	// 握手，约 2 分 5 秒，不是"两分半"。
+	fmt.Println("正在测试，大约需要两分钟，请不要关闭窗口，也不要切换网络。")
 
 	// 两轮各 60 秒（+ 轮内 2 秒 drain）再加上握手，5 分钟放不下两轮，
 	// 放宽到 10 分钟。
