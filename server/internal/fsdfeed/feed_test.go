@@ -568,11 +568,34 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 	wg.Add(1)
 	go func() { defer wg.Done(); f.Run(ctx) }()
 
+	// 先同步确认第一份快照真的落地了，再放并发读者进场——这不是弱化测试，
+	// 服务端在这之后还会以 1ms 一次的频率持续推 update 事件，applyEvent
+	// 仍然在不断替换/合并 map，读者仍然要在这个过程中并发地读它；这一步
+	// 只是把"读者到底有没有看到过东西"从一场读者和写者谁先被调度器选中
+	// 的赌局，变成测试自己保证到位的前提。
+	//
+	// 不这样做的话，这条测试在单核（GOMAXPROCS=1）下是确定性失败的：8 个
+	// 读者 + Run 的 goroutine + httptest 的 handler goroutine 抢一个核，
+	// 写者能不能在读者 300ms 的窗口里抢到哪怕一次调度纯属运气——这就是
+	// 复审在 GOMAXPROCS=1 下跑出 5/5 必现失败的原因，而失败的正是下面
+	// 这条"读者必须真的读到过东西"的断言本身：它准确地报告了"这次测试
+	// 没有证明任何东西"，问题是这让整个包在单核跑者上永远红。
+	readyDeadline := time.Now().Add(2 * time.Second)
+	for f.Degraded() {
+		if time.Now().After(readyDeadline) {
+			cancel()
+			wg.Wait()
+			t.Fatal("the first snapshot never landed within 2s; the writer goroutine never got scheduled at all")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
 	// 读者必须真的读到过东西。没有这个断言，这个测试对着一个死端点也会绿——
 	// 而它存在的全部意义就是让 -race 有东西可看：竞态检测器只报告真的并发
-	// 发生过的访问。Task 5 那次"干净的 -race"正是这么来的。
+	// 发生过的访问。Task 5 那次"干净的 -race"正是这么来的。上面的同步等待
+	// 保证了这里不会再是运气问题，只有真的出了 bug（比如 Snapshot() 本身
+	// 被改坏，不管内部存了什么都读不出来）才会触发。
 	var seen atomic.Int64
-	var everUp atomic.Bool
 
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
@@ -589,9 +612,6 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 				for cid := range s.ByCID {
 					_ = cid
 				}
-				if !f.Degraded() {
-					everUp.Store(true)
-				}
 			}
 		}()
 	}
@@ -601,10 +621,7 @@ func TestConcurrentReadersAgainstALiveStream(t *testing.T) {
 	wg.Wait()
 
 	if seen.Load() == 0 {
-		t.Fatal("no reader ever observed a single entry; the stream never delivered anything and this test proved nothing about concurrency")
-	}
-	if !everUp.Load() {
-		t.Fatal("the feed was never observed as not-degraded; the stream never actually came up")
+		t.Fatal("no reader ever observed a single entry even though the first snapshot had already landed before they started; this proves nothing about concurrency")
 	}
 }
 
