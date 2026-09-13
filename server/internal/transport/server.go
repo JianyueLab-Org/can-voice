@@ -17,6 +17,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
@@ -46,15 +47,50 @@ type Config struct {
 	MaxRX int
 }
 
+// shutdownGrace 是关停时等所有连接把 CONNECTION_CLOSE 送出去的上限。
+//
+// 有界，因为 quic-go 的 CloseWithError 末尾是 `<-s.ctx.Done()`——它等到那条连接
+// 的主循环真的退出。一条正在往一个已经不可达的对端写东西的连接可能要等上一个
+// 重传周期，而关停不能被任何一个走掉的客户端拖住。
+//
+// 2 秒：CONNECTION_CLOSE 是一个包，本地发出去就算数；这个值留的是 quic-go 自己
+// 拆循环的时间，不是等对端确认的时间（QUIC 的关闭本来就不等确认）。
+//
+// 是变量只为了测试能把它调小，和 handshakeTimeout 同样的理由。
+var shutdownGrace = newDuration(2 * time.Second)
+
 // Serve 起监听并接受连接，直到 ctx 取消。
 func Serve(ctx context.Context, cfg Config, r *router.Router) error {
 	ln, err := listen(cfg)
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
 	slog.Info("listening", "addr", ln.Addr().String(), "alpn", ALPN)
-	return accept(ctx, ln, cfg, r)
+	return serve(ctx, ln, cfg, r)
+}
+
+// serve 是 Serve 去掉"建监听器"那一步之后的本体。
+//
+// 拆出来是为了可测：Serve 自己建监听器，所以测试没办法知道它绑到了哪个端口，
+// 而关停这条路径**只能**从一个真的连上来的客户端那一侧观察。
+func serve(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router) error {
+	live := newConnSet()
+	err := accept(ctx, ln, cfg, r, live)
+
+	// 顺序是这条路径的全部内容，别换。
+	//
+	// 原来这里是 `defer ln.Close()`，于是 accept 一返回就先关监听器。而
+	// quic-go 的 Listener.Close() 走的是 Transport.closeServer()：它把 server
+	// 摘掉、关掉 UDP socket，**从不遍历 handlerMap**——已经建立的连接一条都
+	// 不会收到 CONNECTION_CLOSE。socket 一关，它们连发都发不出去了。
+	//
+	// 于是重启部署的表现是：每个客户端挂在那儿，直到自己的空闲超时（60 秒）
+	// 才发现服务端没了，然后按"断网"处理。而码 0 的含义恰恰是"重启了，你可以
+	// 重连"——**重启部署是唯一会产生码 0 的路径**，它送不出去就等于这个码在
+	// 生产上从不存在，客户端那套"码 0 就重连、其它码别重连"的规则也就无从谈起。
+	live.closeAll(shutdownGrace.Get())
+	ln.Close()
+	return err
 }
 
 func listen(cfg Config) (*quic.Listener, error) {
@@ -79,7 +115,7 @@ func listen(cfg Config) (*quic.Listener, error) {
 // 返回 error 而不是 void：监听器因为 ctx 之外的原因挂掉时，
 // Serve 必须把它报上去。原文 `accept(...); return ctx.Err()` 在那种情况下
 // 返回 nil，于是整个进程静悄悄地"正常退出"，而端口其实已经没人在听了。
-func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router) error {
+func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router, live *connSet) error {
 	for {
 		conn, err := ln.Accept(ctx)
 		if err != nil {
@@ -89,7 +125,80 @@ func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router
 			slog.Error("accept failed", "error", err)
 			return err
 		}
-		go handleConn(ctx, conn, cfg, r)
+		// 登记要在起 goroutine **之前**：反过来的话，一条刚接进来、还没被
+		// handleConn 登记上的连接会被关停整个漏掉，而那恰好是重启那一瞬间
+		// 最可能发生的事。
+		live.add(conn)
+		go func() {
+			defer live.remove(conn)
+			handleConn(ctx, conn, cfg, r)
+		}()
+	}
+}
+
+// connSet 是当前活着的连接，只为关停时能挨个把关闭码送出去。
+//
+// 不复用 router 的会话表：那里只有**握手成功**的连接，而一条正卡在握手里的
+// 连接同样要被告知服务端走了；而且 router 刻意不认识 QUIC。
+type connSet struct {
+	mu sync.Mutex
+	m  map[quic.Connection]struct{}
+}
+
+func newConnSet() *connSet {
+	return &connSet{m: map[quic.Connection]struct{}{}}
+}
+
+func (s *connSet) add(c quic.Connection) {
+	s.mu.Lock()
+	s.m[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *connSet) remove(c quic.Connection) {
+	s.mu.Lock()
+	delete(s.m, c)
+	s.mu.Unlock()
+}
+
+// closeAll 给每条活着的连接发 CloseNormal，最多等 grace。
+//
+// 并发发而不是挨个发：CloseWithError 会等到那条连接的主循环退出，串行的话
+// 一条慢连接就能把它后面所有人的关闭码拖到超时之后。
+func (s *connSet) closeAll(grace time.Duration) {
+	s.mu.Lock()
+	conns := make([]quic.Connection, 0, len(s.m))
+	for c := range s.m {
+		conns = append(conns, c)
+	}
+	s.mu.Unlock()
+	if len(conns) == 0 {
+		return
+	}
+
+	slog.Info("closing live connections before shutting down",
+		"connections", len(conns), "code", uint64(CloseNormal))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var wg sync.WaitGroup
+		wg.Add(len(conns))
+		for _, c := range conns {
+			go func(c quic.Connection) {
+				defer wg.Done()
+				// 空 reason：码 0 自己就说完了——"服务端正常关闭，你可以重连"。
+				c.CloseWithError(CloseNormal, "")
+			}(c)
+		}
+		wg.Wait()
+	}()
+	select {
+	case <-done:
+	case <-time.After(grace):
+		// 没等到不是灾难：CONNECTION_CLOSE 本地发出去就算数，这里等的只是
+		// quic-go 拆自己的循环。但要说一声，否则关停变慢的时候无从下手。
+		slog.Warn("some connections did not finish closing within the shutdown grace",
+			"connections", len(conns), "grace", grace.String())
 	}
 }
 

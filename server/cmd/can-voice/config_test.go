@@ -145,3 +145,44 @@ func TestLoadConfigDefaultsTheOptionalValues(t *testing.T) {
 		t.Fatal("FeedURL must have a default; it is how range filtering gets its input")
 	}
 }
+
+// TestLoadConfigRejectsAnOutOfRangeMaxRX 钉住 MaxRX 的上界。
+//
+// router 里 maxRejected 那段算术明说它依赖这个值。配到几千之后 SUBACK 会超过
+// 64 KiB 的帧上限而根本发不出去——一条**已经生效**的 SUB 得不到任何回应，
+// 客户端只能一遍遍重发同一份声明，两端都没有一行日志说出这件事。
+func TestLoadConfigRejectsAnOutOfRangeMaxRX(t *testing.T) {
+	for _, v := range []string{"1025", "100000"} {
+		t.Run(v, func(t *testing.T) {
+			_, err := LoadConfig(env(map[string]string{
+				"CAN_VOICE_ADDR":       ":64738",
+				"CAN_VOICE_TLS_CERT":   "/tmp/c.pem",
+				"CAN_VOICE_TLS_KEY":    "/tmp/k.pem",
+				"CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+				"CAN_VOICE_MAX_RX":     v,
+			}))
+			if err == nil {
+				t.Fatalf("LoadConfig must reject CAN_VOICE_MAX_RX=%q; the SUBACK for that many frequencies does not fit a control frame", v)
+			}
+			if !strings.Contains(err.Error(), "CAN_VOICE_MAX_RX") {
+				t.Fatalf("error must name CAN_VOICE_MAX_RX, got: %v", err)
+			}
+		})
+	}
+
+	// 对照：恰好在上界上的值必须**通过**。没有这一条的话，一个把上界写成 1 的
+	// 实现照样让上面两个子用例绿。
+	cfg, err := LoadConfig(env(map[string]string{
+		"CAN_VOICE_ADDR":       ":64738",
+		"CAN_VOICE_TLS_CERT":   "/tmp/c.pem",
+		"CAN_VOICE_TLS_KEY":    "/tmp/k.pem",
+		"CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+		"CAN_VOICE_MAX_RX":     "1024",
+	}))
+	if err != nil {
+		t.Fatalf("LoadConfig rejected CAN_VOICE_MAX_RX at exactly the limit: %v", err)
+	}
+	if cfg.MaxRX != maxMaxRX {
+		t.Fatalf("MaxRX = %d, want %d", cfg.MaxRX, maxMaxRX)
+	}
+}

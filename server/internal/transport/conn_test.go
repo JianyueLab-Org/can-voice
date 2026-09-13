@@ -43,7 +43,7 @@ func testServer(t *testing.T) (addr string, priv ed25519.PrivateKey, r *router.R
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); ln.Close() })
-	go accept(ctx, ln, cfg, r)
+	go accept(ctx, ln, cfg, r, newConnSet())
 	return ln.Addr().String(), priv, r
 }
 
@@ -111,11 +111,19 @@ func TestHelloWithAValidTokenGetsReady(t *testing.T) {
 	}
 }
 
+// TestHelloWithABadTokenGetsByeAndNoSession 钉住被拒的握手不留下会话。
+//
+// 断言的是**会话数没有增加**，不是"某个具体 id 不存在"。原文查的是
+// r.Get(SessionID(1))，而 newSessionID 由进程全局的 nextID 驱动、从不重置：
+// 整包一起跑的时候 1 号早就被别的测试用掉了，所以那句话恒真。实测过——
+// 在被拒路径上**故意**登记一条会话，整包跑全绿，
+// 只有 `-run` 单跑才红。而 CI 跑的正是整包。
 func TestHelloWithABadTokenGetsByeAndNoSession(t *testing.T) {
 	addr, priv, r := testServer(t)
 	_, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
 	tok, _ := auth.Sign(otherPriv, auth.Claims{CID: "1000", Exp: time.Now().Add(time.Minute).Unix()})
 
+	before := r.SessionCount()
 	_, m := hello(t, dial(t, addr), tok)
 	bye, ok := m.(*control.Bye)
 	if !ok {
@@ -124,14 +132,14 @@ func TestHelloWithABadTokenGetsByeAndNoSession(t *testing.T) {
 	if bye.Reason == "" {
 		t.Fatal("BYE must say why")
 	}
-	if _, ok := r.Get(router.SessionID(1)); ok {
-		t.Fatal("a rejected HELLO must not leave a session behind")
+	if got := r.SessionCount(); got != before {
+		t.Fatalf("sessions = %d, want %d — a rejected HELLO must not leave a session behind", got, before)
 	}
 
-	// 上面那一条是一句**缺席断言**，而缺席断言要自己证明前提：r.Get 在这个
-	// router 上确实会对一条真的存在的会话返回 true。不证的话，"Get 永远返回
-	// false"（比如握手根本没接上 router）也会让它绿。
-	good, err := auth.Sign(priv, auth.Claims{CID: "1001", MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
+	// 上面那一条是一句**缺席断言**，而缺席断言要自己证明前提：这个 router 上
+	// 一次成功的握手确实会让会话数 +1。不证的话，"握手根本没接上 router"
+	// 也会让它绿。
+	good, err := auth.Sign(priv, auth.Claims{CID: "1001", Rating: 5, MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -143,11 +151,14 @@ func TestHelloWithABadTokenGetsByeAndNoSession(t *testing.T) {
 	if _, ok := r.Get(router.SessionID(ready.Session)); !ok {
 		t.Fatal("premise check failed: r.Get returns false even for a session that was just registered, so the assertion above proved nothing")
 	}
+	if got := r.SessionCount(); got != before+1 {
+		t.Fatalf("premise check failed: sessions = %d after one successful handshake, want %d — the count does not move, so the assertion above proved nothing", got, before+1)
+	}
 }
 
 func TestSubGetsSubAckAndTakesEffect(t *testing.T) {
 	addr, priv, r := testServer(t)
-	tok, _ := auth.Sign(priv, auth.Claims{CID: "1000", MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix()})
+	tok, _ := auth.Sign(priv, auth.Claims{CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix()})
 	st, m := hello(t, dial(t, addr), tok)
 	ready := m.(*control.Ready)
 
@@ -210,7 +221,7 @@ func TestAFirstMessageOtherThanHelloIsRefused(t *testing.T) {
 
 	// 缺席断言的前提证明：同一个 router 上，一条鉴权过的 SUB 确实会让
 	// Listeners(118000) 变成 1。
-	tok, err := auth.Sign(priv, auth.Claims{CID: "1000", MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
+	tok, err := auth.Sign(priv, auth.Claims{CID: "1000", Rating: 5, MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -344,7 +355,7 @@ func TestABadTokenGetsACoarseReasonNotTheInternalError(t *testing.T) {
 
 	// 缺席断言的前提证明：同一个 router 上，一次真的 HELLO+SUB 确实会让
 	// Listeners(121800) 变成 1。不证的话，"扇出索引根本没接上"也会让上面绿。
-	good, err := auth.Sign(priv, auth.Claims{CID: "1001", MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
+	good, err := auth.Sign(priv, auth.Claims{CID: "1001", Rating: 5, MaxTX: 1, Exp: time.Now().Add(time.Minute).Unix()})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -639,6 +650,8 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 		{"ReasonTokenInvalid", ReasonTokenInvalid, "token_invalid"},
 		{"ReasonRefused", ReasonRefused, "refused"},
 		{"ReasonControlWriteStalled", ReasonControlWriteStalled, "control_write_stalled"},
+		{"ReasonControlReadStalled", ReasonControlReadStalled, "control_read_stalled"},
+		{"ReasonAckUndeliverable", ReasonAckUndeliverable, "ack_undeliverable"},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s = %q, want the wire value %q — clients match on this string", tc.name, tc.got, tc.want)
@@ -880,7 +893,7 @@ func TestAcceptReportsAListenerFailureRatherThanReturningNil(t *testing.T) {
 	}
 	dead.Close()
 	// ctx 没有取消：这是"监听器自己死了"，不是收摊。
-	if err := accept(context.Background(), dead, cfg, router.New()); err == nil {
+	if err := accept(context.Background(), dead, cfg, router.New(), newConnSet()); err == nil {
 		t.Fatal("accept returned nil after the listener died; Serve would then report a clean shutdown while nothing is listening")
 	}
 
@@ -893,7 +906,7 @@ func TestAcceptReportsAListenerFailureRatherThanReturningNil(t *testing.T) {
 	defer live.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := accept(ctx, live, cfg, router.New()); !errors.Is(err, context.Canceled) {
+	if err := accept(ctx, live, cfg, router.New(), newConnSet()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("accept on a cancelled ctx returned %v, want context.Canceled", err)
 	}
 }

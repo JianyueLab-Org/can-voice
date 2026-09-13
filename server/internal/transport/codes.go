@@ -96,4 +96,27 @@ const (
 	// 继续收着旧的那套频率，而它的无线电台面改动看上去毫无反应，连接却一切正常。
 	// 一个管制员重排台面却悄悄没生效，正是这套重写要躲开的那类故障。
 	ReasonControlWriteStalled = "control_write_stalled"
+
+	// ReasonControlReadStalled：握手**之后**，对端开了一帧（长度前缀已经到了）
+	// 然后不把它发完，超过了 controlReadTimeout。配 CloseProtocolViolation。
+	//
+	// 和上一条是同一个形状的读侧版本：一条永远发不完的帧能占住一条会话和它的
+	// 三个 goroutine，而 QUIC 的空闲超时救不了——包**确实在到达**，每一个都会
+	// 把空闲计时器重置。
+	//
+	// **一个字节都不发不算这一条**：几分钟不说话的管制员是正常的，那种连接上
+	// 没有开始过任何一帧。分界线是"你已经承诺了一帧"。
+	ReasonControlReadStalled = "control_read_stalled"
+
+	// ReasonAckUndeliverable：一份 SUB **已经生效**，但它的 SUBACK 发不出去
+	// （编码失败，或者超过 64 KiB 的帧上限）。配 CloseProtocolViolation。
+	//
+	// 为什么不能沿用 CloseNormal：那个码说"你可以重连"，而客户端的订阅状态此刻
+	// 和服务端的对不上。它会重连、重放同一份声明，再一次得到同样的静默——
+	// 两端都没有一个字的死循环，正是这套协议在别处反复拒绝的失败形态。
+	//
+	// 正常情况下客户端碰不到它：声明本身有上界（router 的 declarationLimit），
+	// 回报也各自有上界（maxRejected、maxXCPairs）。它是一条防线，不是一条日常
+	// 路径——但防线要出声，否则它在的时候和不在的时候看起来一模一样。
+	ReasonAckUndeliverable = "ack_undeliverable"
 )

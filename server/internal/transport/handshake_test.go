@@ -2,9 +2,11 @@ package transport
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -31,6 +33,11 @@ type memStream struct {
 
 func (s *memStream) Read(p []byte) (int, error) { return s.in.Read(p) }
 
+// 截止时间在这条假流上是空操作。handleConn 和 writeControl 都会设它，
+// 而这里没有真的 I/O 可以打断——真的截止时间由走真 QUIC 连接的那几条测试钉。
+func (s *memStream) SetReadDeadline(time.Time) error  { return nil }
+func (s *memStream) SetWriteDeadline(time.Time) error { return nil }
+
 func (s *memStream) Write(p []byte) (int, error) {
 	if s.failWrite {
 		// 真实世界里的对应物：对端把 initial_max_stream_data 通告成 0，
@@ -48,9 +55,24 @@ type stubConn struct {
 	// block 非 nil 时 CloseWithError 会等它——用来模拟 quic-go 的
 	// CloseWithError 末尾那句 `<-s.ctx.Done()`（它等到连接主循环真的退出）。
 	block chan struct{}
+	// stream 非 nil 时 AcceptStream 返回它。只有直接调 handleConn 的测试要用
+	// （goroutine 泄漏那条）——handshake 自己收的是已经开好的流。
+	stream quic.Stream
 }
 
 func (c *stubConn) SendDatagram([]byte) error { return nil }
+
+func (c *stubConn) AcceptStream(ctx context.Context) (quic.Stream, error) {
+	if c.stream == nil {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return c.stream, nil
+}
+
+func (c *stubConn) RemoteAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+}
 
 func (c *stubConn) CloseWithError(quic.ApplicationErrorCode, string) error {
 	c.closed.Store(true)

@@ -41,6 +41,35 @@ type Claims struct {
 	Exp    int64  `json:"exp"`
 }
 
+// maxTokenLifetime 是 exp 允许比现在远出多少。超过就按 ErrInvalid 拒。
+//
+// 为什么必须有这道闸：**短有效期就是这套设计里唯一的吊销机制**。本包的包注释
+// 明令禁止任何网络调用（不查撤销列表、不拉公钥、不做 introspection），所以一张
+// 已经签出去的 token 在它过期之前没有任何办法作废。没有上界的话，`exp` 写成
+// `now + 1000 年` 或者 `2^62` 都验得过——一次签发方的失误（一个写错的
+// `expires_in`、一张为了调试手签的长 token 漏进生产）就是一张**永久**有效、
+// 永远吊销不掉的凭据，而且这边完全看不出来。
+//
+// 取值的来历：设计文档 §6 写的是 can-api 签 60 秒的 token（`expires_in: 60`）。
+// 这里取它的十倍，而不是恰好 60 秒——签发方将来可能为"掉线重连不必重新取票"
+// 之类的理由把有效期放宽一点，那不该要求服务端跟着改一次代码；而十分钟已经
+// 足够短：一张误签的 token 最坏也只是十分钟之后自己消失，不是永远。
+const maxTokenLifetime = 10 * time.Minute
+
+// clockSkew 是验期时容忍的两端时钟偏差。
+//
+// 它防的是一种**全网同时发生**的故障：服务端的时钟比真实时间快，于是每一张
+// 刚签出来的 token 一到这里就已经"过期"，所有人被以 token_expired 拒掉，而
+// 客户端照着这个原因串去换新 token——换回来的还是过期的。整个网络下线，症状
+// 却指向 can-api。
+//
+// 取 5 秒，刻意远小于 60 秒的有效期：容差是在有效期尾巴上多接受一小段，所以它
+// 直接削弱吊销窗口，给大了等于偷偷把 token 寿命拉长。同步过 NTP 的主机偏差在
+// 毫秒级，5 秒覆盖的是"这台机器根本没在同步"那类事故的起头一段。它不是万能的
+// ——偏差超过一整个有效期时仍然会全网拒绝，那种情况要靠日志和 README 的排障
+// 条目认出来，而不是靠把容差调大。
+const clockSkew = 5 * time.Second
+
 var enc = base64.RawURLEncoding
 
 // Sign 签发一个 token。生产环境里签发由 can-api 完成（持有私钥的一方）；
@@ -104,10 +133,22 @@ func Verify(pub ed25519.PublicKey, token string, now time.Time) (Claims, error) 
 		return Claims{}, fmt.Errorf("%w: token payload is not valid JSON: %w", ErrInvalid, err)
 	}
 
-	// exp 是右开区间的上界：now == exp 视为已过期。这样"有效期 60 秒"的
-	// token 不会在恰好第 60 秒这个瞬间产生"到底算不算过期"的歧义——
-	// 一个 token 要么在窗口内（now < exp），要么不在，没有中间态。
-	if !now.Before(time.Unix(c.Exp, 0)) {
+	// 有效期上界先判，顺序有意义：一张 exp 写成一千年后的 token 既"没过期"又
+	// 不可接受，而这两条给客户端的指示相反——ErrExpired 的意思是"去换一张新的
+	// 再来"，对这种 token 来说换回来的会是同样一张。所以它必须落在 ErrInvalid。
+	//
+	// 比的是整数秒而不是 time.Time：`exp` 是对端给的任意 int64，
+	// time.Unix(math.MaxInt64, 0) 内部会溢出，比较结果不再有意义。
+	if c.Exp > now.Add(maxTokenLifetime+clockSkew).Unix() {
+		return Claims{}, fmt.Errorf("%w: token is valid until %d, which is more than %s from now (%d)",
+			ErrInvalid, c.Exp, maxTokenLifetime, now.Unix())
+	}
+
+	// exp 是右开区间的上界：到点即过期。这样"有效期 60 秒"的 token 不会在恰好
+	// 第 60 秒这个瞬间产生"到底算不算过期"的歧义——一个 token 要么在窗口内，
+	// 要么不在，没有中间态。区间的右端现在是 exp + clockSkew（见 clockSkew），
+	// 等价地：把 now 往回拨 clockSkew 再比。
+	if c.Exp <= now.Add(-clockSkew).Unix() {
 		return Claims{}, fmt.Errorf("%w: token expired at %d, now is %d", ErrExpired, c.Exp, now.Unix())
 	}
 	if c.CID == "" {

@@ -160,9 +160,34 @@ func (r *Router) removeLocked(id SessionID) {
 // 不是"随便留哪几个都行"：客户端要拿 ACK 对账，接受集合如果不确定，
 // 每次重连就会落在不同的频率上。
 //
+// 声明本身还有一道与限额无关的上界（declarationLimit）：超出的部分在**拿锁
+// 之前**就被截掉，并和其它被拒的频率一起回报。它挡的不是"能订阅几个"，而是
+// "服务端愿意为一句声明在全局写锁里干多少活"。
+//
 // 未知会话返回空 ACK。控制面保证 SUB 只会在会话存在时到达，所以这里
 // 只是防御；调用方不应当靠 ACK 的内容去判断会话在不在。
 func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
+	// 截断在**拿写锁之前**。这一步不是整理，是这条路径上唯一挡住"客户端声明
+	// 多少、服务端就在全局写锁里干多少活"的东西。
+	//
+	// 实测：一份塞满的 SUB 装得下 9356 个频率（65533 字节），一次 Subscribe
+	// 因此持 r.mu 长达 280 微秒，而同一时间 50 次 Listeners() 从 11 微秒被推到
+	// 67 毫秒——**6039 倍**。r.mu 是全服务端一把锁，所以那不是"这个客户端自己
+	// 慢一点"，是全网的扇出排队等一条会话的一句声明。
+	//
+	// 上界本来就隐含在 MaxTX/MaxRX 里（超出的必然被拒），但那个隐含上界是
+	// **判完之后**才成立的，而判本身要给整份列表建去重 map、逐个走闸门。
+	// maxXCPairs 的注释（下面）逐字论证过同一件事，只是当时只落实到了 XC 上。
+	limit, ok := r.declarationLimit(id)
+	if !ok {
+		return control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}, RejectedXC: [][2]uint32{}}
+	}
+	// 去重和排序都在截断**之后**做：反过来的话，为了截断先得把整份列表过一遍，
+	// 那正是要避免的工作量。
+	var excessTX, excessRX []uint32
+	sub.TX, excessTX = truncateDeclaration(sub.TX, limit)
+	sub.RX, excessRX = truncateDeclaration(sub.RX, limit)
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -217,6 +242,16 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 		ack.RX = append(ack.RX, f)
 	}
 	r.bumpXC(next.xc, +1)
+	// 被上界截掉的那一截也要**回报**，不能静默丢弃——这是本协议在别处反复申明
+	// 的规矩（SubAck.RejectedXC 存在的全部理由）。
+	//
+	// 排在逐条判掉的那些**后面**，不是随便放的：这两截的数值分布不一样（截掉的
+	// 是声明尾巴上的那一段），所以先加哪一截决定了"先截断后排序"这个错误实现
+	// 会留下什么。放在后面，两种实现的结果才不同，
+	// TestAMaximalSubStillProducesASendableAck 才分辨得出它们。
+	ack.Rejected = append(ack.Rejected, excessTX...)
+	ack.Rejected = append(ack.Rejected, excessRX...)
+
 	// Rejected 里可能有重复：同一个频率可以先被 TX 限额拒、又被 RX 限额拒
 	// （比如 max_tx=1 且 max_rx=1 时的第二个频率）。这里只去重 Rejected 自身——
 	// 一个频率同时出现在 RX 和 Rejected 里是有意义的（TX 被拒但 RX 给了），
@@ -265,6 +300,18 @@ func (r *Router) MayTransmit(id SessionID, freq uint32) bool {
 	return ok
 }
 
+// SessionCount 返回当前登记的会话数。
+//
+// 存在的理由是"被拒的握手有没有留下一条会话"这个问题从外面问不出来：被拒的
+// 那一条永远拿不到 id，所以只能拿别的 id 去猜——而猜出来的断言恰好在整包一起
+// 跑的时候永远成立（newSessionID 是进程全局递增、从不重置的）。数一下会话数
+// 是那个问题的直接说法。
+func (r *Router) SessionCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.sessions)
+}
+
 // Get 取一条会话。
 func (r *Router) Get(id SessionID) (*Session, bool) {
 	r.mu.RLock()
@@ -287,6 +334,53 @@ func (r *Router) unindex(freq uint32, id SessionID) {
 			delete(r.rx, freq)
 		}
 	}
+}
+
+// declaredSlack 是"允许客户端声明的频率数"相对"可能被接受的频率数"的倍数。
+//
+// 上界取 slack × max(MaxTX, MaxRX) 而不是恰好 max(MaxTX, MaxRX)，是因为声明
+// 里合法地存在接受不了的东西：重复项不占名额（见 TestSubscribeDeduplicates-
+// Frequencies），而且契约本来就允许客户端多声明几个、由服务端按声明顺序挑
+// （TestWhichFrequenciesSurviveALimitIsDeterministic 钉的就是这个）。给 4 倍
+// 是为了不误伤这类正当声明；真正要挡的是那种差三个数量级的——默认配置
+// MaxRX=32 下这个上界是 128，而实测的最坏输入是 9356。
+//
+// 4 这个数字本身不承重：往上调到 8 或往下调到 2 都不会改变任何一条正当声明的
+// 结果，只会改变"从多荒唐开始被截断"。承重的是**存在一个与客户端声明无关的
+// 上界**。
+const declaredSlack = 4
+
+// declarationLimit 取该会话允许声明的频率数上界。
+//
+// 单独一次读锁，而不是在写锁里顺手读：整件事的意义就在于截断发生在写锁**之前**。
+// 会话在这之后、拿到写锁之前消失是可能的，所以写锁里还会再查一次——那一次才是
+// 权威的，这一次只用来取两个不可变字段。
+func (r *Router) declarationLimit(id SessionID) (int, bool) {
+	r.mu.RLock()
+	s, ok := r.sessions[id]
+	r.mu.RUnlock()
+	if !ok {
+		return 0, false
+	}
+	n := max(s.MaxTX, s.MaxRX)
+	if n < 0 {
+		n = 0
+	}
+	return n * declaredSlack, true
+}
+
+// truncateDeclaration 把一份声明截到 limit，并返回**有界的**超出部分。
+//
+// 超出部分只回报最多 maxRejected 个，理由和 normaliseXC 的上界分支一字不差：
+// SubAck 要经 control.WriteFrame 发出去，那里是 64 KiB 的上限，原样抄回九千个
+// 频率会让 ACK 超限而根本发不出去——客户端于是什么都收不到，比截断更糟。
+// 多抄的部分反正也会被末尾的 maxRejected 砍掉，抄它只是白干一趟 O(n) 的活，
+// 而这个函数存在的全部理由就是不干那趟活。
+func truncateDeclaration(xs []uint32, limit int) (kept, excess []uint32) {
+	if len(xs) <= limit {
+		return xs, nil
+	}
+	return xs[:limit], xs[limit:min(len(xs), limit+maxRejected)]
 }
 
 // maxXCPairs 是一份声明里最多处理多少个耦合对。

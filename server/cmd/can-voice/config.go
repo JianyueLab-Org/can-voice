@@ -71,7 +71,27 @@ func LoadConfig(get func(string) string) (Config, error) {
 		if err != nil || n <= 0 {
 			return Config{}, fmt.Errorf("CAN_VOICE_MAX_RX must be a positive integer, got %q", v)
 		}
+		if n > maxMaxRX {
+			return Config{}, fmt.Errorf("CAN_VOICE_MAX_RX is %d, over the %d limit", n, maxMaxRX)
+		}
 		cfg.MaxRX = n
 	}
 	return cfg, nil
 }
+
+// maxMaxRX 是 CAN_VOICE_MAX_RX 的上界。
+//
+// 有上界，因为 router 里 maxRejected 那段算术**明说**它依赖这个值："RX/TX 的
+// 长度由 MaxRX/MaxTX 决定……真要把 MaxRX 配到几千，这个上界要重算。" 一份
+// SUBACK 要塞进 64 KiB 的控制帧：固定部分加 RejectedXC 约 5.8 KB，剩下约 59.7 KB
+// 给 ack.RX 加 ack.TX，按每个频率 11 字节算是约 5400 个。传输层已经把 MaxTX 夹到
+// MaxRX 以内（grantedMaxTX），所以 RX+TX 最多 2×MaxRX，于是安全线在 2700 上下。
+//
+// 取 1024，离那条线还有两倍半的余量，而且远远超出任何真实用法——一个管制员
+// 同时监听的频率是几十个量级。配大了的后果不是"慢一点"：SUBACK 一旦超过帧上限
+// 就根本发不出去，一条**已经生效**的 SUB 得不到任何回应，而客户端只能一遍遍
+// 重发同一份声明。
+//
+// 与其让那条路在生产上被一个手滑的环境变量踩出来，不如启动就失败——这个进程
+// 的全部配置哲学就是"宁可起不来，也不要带着半份配置跑"。
+const maxMaxRX = 1024

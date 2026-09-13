@@ -2,6 +2,7 @@ package router
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -735,4 +736,123 @@ func contains(xs []uint32, v uint32) bool {
 		}
 	}
 	return false
+}
+
+// TestTruncateDeclarationBoundsWhatItKeepsAndWhatItReports 在**它自己那一层**
+// 钉住截断。
+//
+// 必须在这一层钉，因为从 Subscribe 的出口看不见它：超出上界的频率反正也会被
+// MaxRX/MaxTX 拒，而超出的部分同样进 Rejected，所以"截了"和"没截"给出的 ACK
+// 一模一样。两道闸执行同一条策略、互相遮蔽——正是本仓库那条"每道闸要在它自己
+// 那一层被钉住"说的情形。它们唯一的区别是**干了多少活**，而那由下面那条
+// TestAnOverlongDeclarationDoesNotAllocateInProportionToIt 量。
+func TestTruncateDeclarationBoundsWhatItKeepsAndWhatItReports(t *testing.T) {
+	xs := make([]uint32, 0, 5000)
+	for i := 0; i < 5000; i++ {
+		xs = append(xs, uint32(i))
+	}
+
+	kept, excess := truncateDeclaration(xs, 128)
+	if len(kept) != 128 {
+		t.Fatalf("kept %d, want the first 128", len(kept))
+	}
+	if kept[0] != 0 || kept[127] != 127 {
+		t.Fatalf("kept = %v…%v, want the declaration order preserved", kept[0], kept[127])
+	}
+	// 回报也要有界，理由和 normaliseXC 的上界分支一样：整份抄回去会让 SUBACK
+	// 超过 64 KiB 的帧上限而根本发不出去，客户端于是什么都收不到。
+	if len(excess) != maxRejected {
+		t.Fatalf("excess = %d entries, want it capped at maxRejected (%d) — copying all %d back makes the ACK too large to send at all", len(excess), maxRejected, len(xs)-128)
+	}
+	if excess[0] != 128 {
+		t.Fatalf("excess starts at %d, want the first entry past the limit (128)", excess[0])
+	}
+
+	// 对照：没超界的声明必须原样通过，而且**不报**任何超出。一个无条件截断的
+	// 实现光靠上面那半是抓不住的。
+	short := xs[:10]
+	kept, excess = truncateDeclaration(short, 128)
+	if len(kept) != 10 || len(excess) != 0 {
+		t.Fatalf("a declaration inside the limit came back as %d kept / %d excess, want 10 / 0", len(kept), len(excess))
+	}
+}
+
+// TestTheDeclarationLimitFollowsTheSessionsOwnCeilings 钉住上界是从会话算出来的，
+// 不是一个写死的数。
+//
+// 写死的话，一个 MaxRX 配得很大的部署会在完全正当的声明上被截断——症状是
+// 管制员台面上靠后的几个频率安静地不生效。
+func TestTheDeclarationLimitFollowsTheSessionsOwnCeilings(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 4, MaxRX: 100, Send: func([]byte) {}})
+	limit, ok := r.declarationLimit(s.ID)
+	if !ok {
+		t.Fatal("declarationLimit did not find a session that was just added")
+	}
+	if want := 100 * declaredSlack; limit != want {
+		t.Fatalf("limit = %d, want %d — the bound is slack × max(MaxTX, MaxRX), so the larger ceiling wins", limit, want)
+	}
+
+	// TX 那一侧也要算进去：MaxTX 比 MaxRX 大时（router 允许这种组合），
+	// 按 MaxRX 算会把合法的 TX 声明截掉。
+	s2 := r.Add(SessionOpts{CID: "1001", MaxTX: 50, MaxRX: 8, Send: func([]byte) {}})
+	limit, _ = r.declarationLimit(s2.ID)
+	if want := 50 * declaredSlack; limit != want {
+		t.Fatalf("limit = %d, want %d", limit, want)
+	}
+
+	if _, ok := r.declarationLimit(SessionID(999999)); ok {
+		t.Fatal("declarationLimit claims to know an unknown session")
+	}
+}
+
+// TestAnOverlongDeclarationDoesNotAllocateInProportionToIt 是声明上界真正要防的
+// 那件事的**确定性**度量。
+//
+// 缺陷是这样的：Subscribe 在全服务端那一把写锁里处理客户端声明了多少就是多少
+// 的频率。实测一份塞满的 SUB 装 9356 个频率（65533 字节），一次调用持 r.mu
+// 280 微秒，同一时间 50 次 Listeners() 从 11 微秒被推到 67 毫秒——6039 倍。
+//
+// 为什么量分配字节而不是量时间：时间断言在一台忙机器上、在 GOMAXPROCS=1 下
+// （那里根本不会发生并行等待）要么假绿要么闪烁，本仓库明令"概率性的钉子不算
+// 钉子"。分配量是同一件事的确定性投影——干 O(n) 的活就要为 n 建去重 map。
+//
+// 量出来的数（Go 1.27，-race 与非 -race、GOMAXPROCS=1 与默认，四种组合各三次，
+// 全部相同）：有截断 32776 字节，去掉截断 1151104 字节，相差 35 倍。上限取
+// 128 KiB，两边各留约 4 倍和 9 倍余量。
+func TestAnOverlongDeclarationDoesNotAllocateInProportionToIt(t *testing.T) {
+	const declared = 9356 // 一条 64 KiB 的 SUB 塞得下的最多频率数（实测）
+	const budget = 128 << 10
+
+	freqs := make([]uint32, 0, declared)
+	for i := 0; i < declared; i++ {
+		freqs = append(freqs, uint32(i))
+	}
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 32, Send: func([]byte) {}})
+	// 先跑一次小的：把首次调用里那些一次性的分配（map 的初始桶之类）挪到
+	// 测量窗口之外，否则它们会被算到这一份声明头上。
+	r.Subscribe(s.ID, control.Sub{RX: []uint32{118000}})
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	ack := r.Subscribe(s.ID, control.Sub{RX: freqs, TX: freqs})
+	runtime.ReadMemStats(&after)
+
+	if got := after.TotalAlloc - before.TotalAlloc; got > budget {
+		t.Fatalf("one SUB declaring %d frequencies allocated %d bytes, over the %d byte budget — the declaration is being processed in full inside the router's global write lock, and every fan-out on the server waits behind it",
+			declared, got, budget)
+	}
+	// 前提：这份声明确实被处理了，而不是被整个丢掉。
+	if len(ack.RX) != 32 {
+		t.Fatalf("accepted RX = %d, want MaxRX (32) — if the declaration were simply dropped the budget above would pass for the wrong reason", len(ack.RX))
+	}
+	// 而且超出上界的部分不是静默消失的。
+	if len(ack.Rejected) == 0 {
+		t.Fatal("nothing was reported as rejected; a client that declared 9356 frequencies and got 32 must be told something")
+	}
+	if len(ack.Rejected) > maxRejected {
+		t.Fatalf("Rejected = %d entries, want at most %d", len(ack.Rejected), maxRejected)
+	}
 }

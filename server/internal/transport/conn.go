@@ -89,6 +89,58 @@ var byeGrace = newDuration(200 * time.Millisecond)
 // 同样是变量只为了测试能把它调小。
 var controlWriteTimeout = newDuration(10 * time.Second)
 
+// controlReadTimeout 是**一帧已经开始到达之后**，它剩下的部分必须读完的时限。
+//
+// 它堵的是读侧的 slowloris，和 controlWriteTimeout 堵写侧的是同一个形状——
+// conn.go 已经为写侧论证过一遍，读侧却一直没有闸。手法：写一个声称 64 KiB 的
+// 长度前缀，然后每 30 秒发一个字节。control.ReadFrame 于是永远停在 io.ReadFull
+// 里，这条会话和它的三个 goroutine（readControl、readDatagrams、outbound 的排空）
+// 被永久占住。
+//
+// **QUIC 的空闲计时器救不了这件事**，理由和写侧一模一样：包**确实在到达**，
+// MaxIdleTimeout 每收到一个报文就重置。连接因此一直健康，而它什么事都不做。
+//
+// 为什么不能给整条控制流设一个读截止时间：管制员几分钟不说话是完全正常的，
+// 那种连接上**一个字节都没有**，和上面那种恰好相反。所以截止时间只在一帧的
+// 第一个字节到达之后才上弦，帧读完就撤（见 framedReader）。分界线是"你已经
+// 承诺了一帧"而不是"你有没有在说话"。
+//
+// 取 10 秒，和写侧同一个数、同一套理由：误杀一条健康会话的代价远大于多留一条
+// 已经坏掉的会话十秒；而这个网络的客户端常挂在会丢包的链路上，一次重传就能让
+// 一帧合法的 SUB 走上几秒。
+//
+// 同样是变量只为了测试能把它调小。
+var controlReadTimeout = newDuration(10 * time.Second)
+
+// framedReader 在一帧的第一个字节到达之后，给这一帧剩下的部分上读截止时间。
+//
+// 它必须包在 control.ReadFrame **外面**而不是里面：ReadFrame 收的是 io.Reader，
+// 而截止时间是 quic.Stream 的东西，本包不该把 QUIC 的概念推进控制面协议包里。
+type framedReader struct {
+	st    quic.Stream
+	armed bool
+}
+
+func (f *framedReader) Read(p []byte) (int, error) {
+	n, err := f.st.Read(p)
+	if n > 0 && !f.armed {
+		// 上弦一次就够：一帧之内的后续 Read 继承同一个绝对时刻，
+		// 所以"每收到一个字节就把时限往后推"那种打法拖不动它。
+		f.armed = true
+		_ = f.st.SetReadDeadline(time.Now().Add(controlReadTimeout.Get()))
+	}
+	return n, err
+}
+
+// endFrame 撤掉截止时间。一帧读完就要撤，否则下一次等待（可能是几分钟的正常
+// 静默）会继承一个已经过去的时刻，每条会话都在收到第一帧之后不久自己死掉。
+func (f *framedReader) endFrame() {
+	if f.armed {
+		f.armed = false
+		_ = f.st.SetReadDeadline(time.Time{})
+	}
+}
+
 // handleConn 处理一条连接的完整生命周期。
 func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router.Router) {
 	// 无论从哪条路径退出，连接都要关掉。没有这一条的话，readControl 返回、
@@ -174,14 +226,37 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	}()
 
 	go readDatagrams(ctx, conn, r, sess.ID)
-	if err := readControl(st, r, sess); errors.Is(err, errControlWriteStalled) {
+	if code, reason, ok := closeAfterControl(readControl(st, r, sess)); ok {
 		// 关在这里而不是靠外层那条 defer：那条发的是 CloseNormal，
 		// 而 CloseNormal 的意思是"你可以重连"，在这里恰恰是错的答案。
 		// 先关的那次生效（quic-go 的 closeOnce），所以 defer 变成空操作。
-		slog.Info("closing a session that stopped reading its control stream",
-			"session", sess.ID, "cid", sess.CID,
-			"timeout", controlWriteTimeout.Get().String())
-		conn.CloseWithError(CloseProtocolViolation, ReasonControlWriteStalled)
+		slog.Info("closing a session that broke the control-stream contract",
+			"session", sess.ID, "cid", sess.CID, "reason", reason, "code", uint64(code))
+		conn.CloseWithError(code, reason)
+	}
+}
+
+// closeAfterControl 把 readControl 的返回值翻成关闭码和原因串。
+//
+// 单独一个纯函数，是因为它**在别处钉不住**：走到这里的三种死因各有各的难走——
+// 一种要造一个会卡住流控的对端，一种要一帧永远发不完，第三种在声明有了上界之后
+// 根本不可达。而这张表本身是协议的一部分——码和原因串是客户端写死在自己代码里
+// 的字面值。
+//
+// 第三个返回值是"要不要主动关"，而不是拿 code == 0 当哨兵：CloseNormal 就是 0，
+// 那样就没法表达"什么都不用做，走外层那条正常收尾"。
+func closeAfterControl(err error) (quic.ApplicationErrorCode, string, bool) {
+	switch {
+	case errors.Is(err, errControlWriteStalled):
+		return CloseProtocolViolation, ReasonControlWriteStalled, true
+	case errors.Is(err, errControlReadStalled):
+		return CloseProtocolViolation, ReasonControlReadStalled, true
+	case errors.Is(err, errAckUndeliverable):
+		return CloseProtocolViolation, ReasonAckUndeliverable, true
+	default:
+		// nil（正常读到头、对端挂断）以及别的写错误都走外层的 CloseNormal：
+		// 那些情况下"你可以重连"是对的答案。
+		return 0, "", false
 	}
 }
 
@@ -208,6 +283,22 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	if err != nil {
 		return nil, err
 	}
+	// 未定级的成员不能用语音。这不是新加的策略，是**把已有的那道闸补回来**：
+	// can-api 的 /api/v1/public/auth——这个网络上其它每一个组件用的那道凭据
+	// 检查——明文拒绝 rating < 1，can-audio 的文档也写着"未定级成员即便凭据
+	// 正确也不能用语音"。签名验过只说明这张票是 can-api 签的，不说明持票人
+	// 够格；少了这一条，can-voice 就是全网唯一一个放未定级成员进来的入口，
+	// 也就是一次针对被它替换掉的那套系统的准入回退。
+	//
+	// 判在这里而不是 auth.Verify 里：Verify 回答的是"这张票是不是真的、有没有
+	// 过期"，rating 是准入策略。两者混在一起的话，一个未定级成员会收到
+	// token_invalid，然后照着那个指示反复去换新票。
+	if claims.Rating < minRating {
+		return nil, errRatingTooLow
+	}
+
+	// MaxTX 是**唯一**一个直接来自对端的资源上限，所以它也要被服务端夹一次。
+	maxTX := grantedMaxTX(claims.MaxTX, cfg.MaxRX)
 
 	sess := r.Add(router.SessionOpts{
 		CID:    claims.CID,
@@ -216,7 +307,7 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 		// MaxRX 必须真的传下去：只在 READY 里通告的话那个数字就只是一句建议，
 		// 一个已鉴权的会话可以声明一万个频率，每个都要在写锁里进倒排索引，
 		// 全网扇出排队等它。
-		MaxTX: claims.MaxTX,
+		MaxTX: maxTX,
 		MaxRX: cfg.MaxRX,
 		// 入队，不是直接发。所有权在这里移交：Fanout 已经给每个听众 append 出
 		// 一份新缓冲，队列不再拷贝一次，调用方交出去之后不得再碰它。
@@ -240,8 +331,10 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	ready := &control.Ready{
 		Session: uint32(sess.ID),
 		Server:  ServerVersion,
-		MaxTX:   claims.MaxTX,
-		MaxRX:   cfg.MaxRX,
+		// 回显的必须是**夹过之后**的值。回显 token 原样的那个数字等于对客户端
+		// 撒谎：它照着灰不掉多余的 TX 开关，按下去之后只会拿到一条静默的拒绝。
+		MaxTX: maxTX,
+		MaxRX: cfg.MaxRX,
 	}
 	out, err := control.Encode(ready)
 	if err != nil {
@@ -260,6 +353,44 @@ type helloError string
 func (e helloError) Error() string { return string(e) }
 
 const errFirstMessageMustBeHello = helloError("the first control message must be HELLO")
+
+// minRating 是能用语音的最低等级。
+//
+// 1 而不是 0，因为 can-api 的 /api/v1/public/auth 就是这么判的（`rating < 1`
+// 拒绝），而那是这个网络上每一个组件共用的凭据检查。这个数字必须跟着它走，
+// 不是本服务端自己的政策。
+const minRating = 1
+
+// serverMaxTX 是服务端对"同时发射几个频率"的硬上限，不管 token 里写了什么。
+//
+// 为什么已鉴权的字段还要夹：`session.go` 自己写着"**已鉴权不等于可信**"，而
+// MaxTX 是唯一一个没有被这句话约束住的已鉴权字段——MaxRX 是服务端配置，
+// CID/Rating 是身份，只有 MaxTX 是对端带进来的一个**资源上限**。一张
+// `max_tx: 100000` 的 token（签发方一个笔误，或者私钥出了事）能让一条会话在
+// 十万个频率上登记，而每一个都要进写锁里的倒排索引。
+//
+// 16 的来历：这是"一个管制员同时发射的频率数"的上界，不是订阅数。真实的
+// 无线电台面（can-audio 的 controller 那一套、TrackAudio）是个位数；16 已经
+// 是它的两三倍，够宽到不会误伤任何真实席位。
+const serverMaxTX = 16
+
+// grantedMaxTX 是 token 声明的 max_tx、服务端硬上限和 MaxRX 三者取小。
+//
+// 为什么要再夹一次 MaxRX：TX ⊆ RX，TX 频率会先写进 next.rx，而且**不受 MaxRX
+// 闸门挤压**（router.Subscribe 里那个 `already` 判断，是有意的设计）。于是
+// 一条会话真正能进倒排索引的频率数是 max(MaxTX, MaxRX)，MaxTX 比 MaxRX 大多少
+// 就绕过多少——一张 max_tx=10000 的 token 在 MaxRX=32 的服务器上照样能登记
+// 一万个频率。夹到 MaxRX 之后这个数就真的是 MaxRX 了。
+func grantedMaxTX(claimed, maxRX int) int {
+	return min(claimed, serverMaxTX, maxRX)
+}
+
+// errRatingTooLow 走 reasonFor 的 default 分支，也就是 ReasonRefused。
+//
+// 刻意不给它一个自己的原因串：对端拿到的两级代码分的是"去换一张新 token 再试"
+// 和"别试了"，而一个未定级的成员换多少张票都一样——换票不会给他升级。他该做的
+// 是去考试，那是服务端说不出口的事，只能落在"refused"。真正的原因在服务端日志里。
+const errRatingTooLow = helloError("the member's rating is below the minimum for voice")
 
 // reasonFor 把握手失败翻译成发给对端的粗粒度代码。
 //
@@ -305,11 +436,21 @@ const noticeBudget = 8
 func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 	// 每条会话一份预算，随连接一起消失。
 	notices := noticeBudget
+	fr := &framedReader{st: st}
 	for {
-		b, err := control.ReadFrame(st)
+		b, err := control.ReadFrame(fr)
 		if err != nil {
+			// 只有**帧读到一半**时的超时算协议违规。上弦的判据就是这个：
+			// 一个字节都没来的时候 framedReader 没有上弦，那种静默是正常的。
+			if fr.armed && errors.Is(err, os.ErrDeadlineExceeded) {
+				slog.Info("a peer started a control frame and then stopped sending it",
+					"session", sess.ID, "cid", sess.CID,
+					"timeout", controlReadTimeout.Get().String())
+				return errControlReadStalled
+			}
 			return nil
 		}
+		fr.endFrame()
 		m, err := control.Decode(b)
 		if err != nil {
 			// Debug 而不是 Warn：对端可以无限发垃圾帧，Warn 会把日志刷满，
@@ -336,10 +477,33 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 			slog.Debug("subscription replaced", "session", sess.ID,
 				"rx", len(ack.RX), "tx", len(ack.TX),
 				"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC))
-			if out, err := control.Encode(&ack); err == nil {
-				if err := writeControl(st, out); err != nil {
-					return err
+			out, err := control.Encode(&ack)
+			if err != nil {
+				// 这条 SUB **已经生效了**，而它的回执发不出去。以前这里是
+				// `if err == nil` 一笔带过，于是走到外层那条 defer 的
+				// CloseNormal——实测的样子是 `Application error 0x0`、reason 为空、
+				// 日志只有一行 `session closed dropped=0`。而码 0 的意思是
+				// "你可以重连"，客户端于是重连、重放同一份 SUB，再一次静默失败：
+				// 两端都没有一个字说出发生了什么的死循环。
+				slog.Error("cannot encode the SUBACK for a subscription that already took effect",
+					"session", sess.ID, "cid", sess.CID,
+					"rx", len(ack.RX), "tx", len(ack.TX),
+					"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC),
+					"error", err)
+				return errAckUndeliverable
+			}
+			if err := writeControl(st, out); err != nil {
+				if len(out) > control.MaxFrame {
+					// 同上，另一半：编得出来但超过帧上限。声明有了上界之后这条路应当
+					// 不可达（声明本身有上界，maxRejected 和 maxXCPairs 又各自
+					// 封住了回报），**但防线要留着，而且要出声**——不可达是一个
+					// 会被下一次改动悄悄推翻的结论。
+					slog.Error("the SUBACK for a subscription that already took effect is too large to send",
+						"session", sess.ID, "cid", sess.CID, "bytes", len(out),
+						"limit", control.MaxFrame, "error", err)
+					return errAckUndeliverable
 				}
+				return err
 			}
 		case *control.Ping:
 			if out, err := control.Encode(&control.Pong{T: v.T, ServerT: time.Now().UnixMilli()}); err == nil {
@@ -403,6 +567,16 @@ func sendUnknownNotice(st quic.Stream, frame []byte) error {
 // 单独一个哨兵而不是把 os.ErrDeadlineExceeded 一路传上去：调用方要判的是
 // "这是不是一次协议违规"，而截止时间超时在别的地方也可能冒出来，含义并不相同。
 var errControlWriteStalled = errors.New("the peer stopped reading the control stream")
+
+// errControlReadStalled 是"对端开了一帧然后不发完了"（见 controlReadTimeout）。
+var errControlReadStalled = errors.New("the peer started a control frame and stopped sending it")
+
+// errAckUndeliverable 是"这条 SUB 已经生效，但它的 SUBACK 发不出去"。
+//
+// 必须是一条**单独**的死因，不能悄悄走正常收尾：客户端的订阅状态和服务端的
+// 已经对不上了，而它不知道。以 CloseNormal（"你可以重连"）收场的话，它会重连、
+// 重放同一份声明，再一次得到同样的静默——一个两端都没有日志的死循环。
+var errAckUndeliverable = errors.New("the SUBACK for an applied subscription cannot be sent")
 
 // writeControl 写一帧控制面消息，带写截止时间。
 //

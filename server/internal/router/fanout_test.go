@@ -1085,13 +1085,26 @@ func TestAMaximalSubStillProducesASendableAck(t *testing.T) {
 		t.Fatalf("Rejected = %d entries, want at most %d", len(ack.Rejected), maxRejected)
 	}
 	if len(ack.Rejected) == 0 {
-		t.Fatal("12760 frequencies were refused and the client must be told something about it")
+		t.Fatal("thousands of frequencies were refused and the client must be told something about it")
 	}
-	// 截断发生在排序**之后**，所以留下的是数值最小的那一批。声明是降序的
-	// （12767…0），MaxTX 收下最先声明的 8 个（12767…12760），所以被拒的是
-	// 0…12759，排序截断后应当从 0 开始。先截断再排序的话这里是 12504。
-	if ack.Rejected[0] != 0 {
-		t.Fatalf("Rejected[0] = %d, want 0 — the truncation keeps the numerically smallest entries, which only holds if it happens after the sort", ack.Rejected[0])
+	// ack.Rejected 自己的截断发生在排序**之后**，所以留下的是服务端**看过的**
+	// 那些里数值最小的一批。
+	//
+	// "看过的"这个限定来自声明上界：整份声明先被截到 declarationLimit，所以
+	// 12767…0 里只有开头的 limit 个进了闸门，外加 truncateDeclaration 回报的那
+	// 一截超出部分。声明是降序的，这是故意的——升序输入下"先排序再截断"和
+	// "先截断再排序"给出同一个答案，那条断言就废了。
+	const maxTX = 8
+	limit := declaredSlack * 64 // max(MaxTX=8, MaxRX=64) × slack
+	excess := sub.TX[limit:min(len(sub.TX), limit+maxRejected)]
+	want := excess[len(excess)-1] // 降序声明，所以最后一个是最小的那个
+	// 先截断后排序的话，留下的是**最先 append 进去的** maxRejected 个：先是被
+	// MaxTX 逐条拒掉的 limit-maxTX 个，剩下的名额才轮到被上界截掉的那一截。
+	// 这个数算出来才有意义——写死一个字面值的话，上界一改它就默默变成谎话。
+	mutated := excess[maxRejected-(limit-maxTX)-1]
+	if ack.Rejected[0] != want {
+		t.Fatalf("Rejected[0] = %d, want %d — the ACK's own truncation keeps the numerically smallest of everything the server examined, and that only holds if it happens after the sort; before it, the first %d appended survive and this would be %d",
+			ack.Rejected[0], want, maxRejected, mutated)
 	}
 	out, err := control.Encode(&ack)
 	if err != nil {
@@ -1238,5 +1251,63 @@ func TestQualityForPassesEverythingItCannotLocate(t *testing.T) {
 				t.Fatalf("qualityFor = (%d, %v), want (%d, %v)", qual, deliver, tc.wantQual, tc.wantDeliver)
 			}
 		})
+	}
+}
+
+// TestAPairIsRefusedWhenOnlyItsSecondFrequencyIsGranted 钉住 normaliseXC 里
+// **第一个**频率的授权检查。
+//
+// 它的来历是一次空过审计：把 `if _, has := tx[p[0]]; !has` 整段删掉，全套测试
+// 照绿。原因是四条交叉耦合测试无一例外把未授权的那个频率放在 p[1]——
+// TestAnUngrantedCrossCoupleIsRefused 的 {121800, 123450} 两个都没授权，
+// TestAnRxOnlyCrossCoupleDeclarationIsRefused 同样两个都没有，
+// TestACrossCoupleRejectedByMaxTXDoesNotTakeEffect 的第二个被 MaxTX 拒掉。
+// 三种情况里 p[1] 那道检查都先把对拒掉了，于是**没有任何一组输入能分辨
+// p[0] 那道检查在不在**。
+//
+// 这里的输入是**降序声明**的一对：p[0]=123450 没授权，p[1]=121800 授权了。
+// 只有 p[0] 那道检查会拒它。
+func TestAPairIsRefusedWhenOnlyItsSecondFrequencyIsGranted(t *testing.T) {
+	r := New()
+	rogue := newRecorder(t, r, "1000")
+	speaker := newRecorder(t, r, "1001")
+	victim := newRecorder(t, r, "1002")
+
+	ack := r.Subscribe(rogue.sess.ID, control.Sub{
+		TX: []uint32{121800},
+		XC: [][2]uint32{{123450, 121800}},
+	})
+	if len(ack.RejectedXC) != 1 {
+		t.Fatalf("RejectedXC = %v, want the pair refused — only the second frequency is granted, and a session must not be able to couple a frequency it does not transmit on just by declaring it first", ack.RejectedXC)
+	}
+	if got := r.coupledWith(121800); len(got) != 0 {
+		t.Fatalf("coupledWith(121800) = %v, want empty", got)
+	}
+	if got := r.coupledWith(123450); len(got) != 0 {
+		t.Fatalf("coupledWith(123450) = %v, want empty", got)
+	}
+
+	// 而且要真的没接通：第三方在 121800 上发言不能到达 123450 的听众。
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(victim.sess.ID, control.Sub{RX: []uint32{123450}})
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(victim.got) != 0 {
+		t.Fatal("a pair whose first frequency was never granted still bridged two frequencies network-wide")
+	}
+
+	// 对照，也是上面那几句否定断言的前提：**同一对**在两个频率都授权时确实
+	// 生效。没有这一段的话，"没接通"可能只是因为这个 router 从来就接不通。
+	grant := newRecorder(t, r, "1003")
+	ack = r.Subscribe(grant.sess.ID, control.Sub{
+		TX: []uint32{121800, 123450},
+		XC: [][2]uint32{{123450, 121800}},
+	})
+	if len(ack.RejectedXC) != 0 {
+		t.Fatalf("premise failed: RejectedXC = %v for a pair whose two frequencies are both granted; the assertions above would pass even with no coupling implemented at all", ack.RejectedXC)
+	}
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 123450 {
+		t.Fatalf("premise failed: coupledWith(121800) = %v, want [123450]", got)
 	}
 }

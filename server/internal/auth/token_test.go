@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,9 @@ func TestVerifyAcceptsAFreshToken(t *testing.T) {
 func TestVerifyRejectsAnExpiredToken(t *testing.T) {
 	pub, priv := keys(t)
 	now := time.Unix(1757000000, 0)
-	tok, _ := Sign(priv, Claims{CID: "1000", Exp: now.Add(-time.Second).Unix()})
+	// 过期得足够多，落在 clockSkew 容差之外——容差之内的那一段由
+	// TestVerifyToleratesASmallClockSkew 专门覆盖。
+	tok, _ := Sign(priv, Claims{CID: "1000", Exp: now.Add(-time.Minute).Unix()})
 	_, err := Verify(pub, tok, now)
 	if err == nil {
 		t.Fatal("Verify must reject an expired token")
@@ -53,18 +56,92 @@ func TestVerifyRejectsAnExpiredToken(t *testing.T) {
 	}
 }
 
-// exp 恰好等于 now 视为已过期（右开区间：token 在 [iat, exp) 内有效）。
+// 有效期是右开区间，右端是 exp + clockSkew：到点即过期，没有中间态。
 // 这是刻意选择而非疏漏——见 token.go 里 Verify 的注释。
-func TestVerifyRejectsATokenExpiringExactlyNow(t *testing.T) {
+//
+// 断言落在**加上容差之后**的那个边界上，而不是 exp 本身：容差存在之后，
+// `exp == now` 是合法的（时钟快了 0 秒还是快了 4 秒，我们都认），
+// 拿它当"必须被拒"的样例只会把容差自己判红。
+func TestVerifyRejectsATokenExpiringExactlyAtTheSkewBoundary(t *testing.T) {
 	pub, priv := keys(t)
 	now := time.Unix(1757000000, 0)
-	tok, _ := Sign(priv, Claims{CID: "1000", Exp: now.Unix()})
+	tok, _ := Sign(priv, Claims{CID: "1000", Exp: now.Add(-clockSkew).Unix()})
 	_, err := Verify(pub, tok, now)
 	if err == nil {
-		t.Fatal("Verify must reject a token whose exp equals now")
+		t.Fatal("Verify must reject a token whose exp is exactly clockSkew in the past; the validity window is half-open")
 	}
 	if !errors.Is(err, ErrExpired) {
 		t.Fatalf("err = %v, want errors.Is(err, ErrExpired)", err)
+	}
+}
+
+// TestVerifyToleratesASmallClockSkew 钉住容差本身。
+//
+// 它防的是一种全网同时发生的故障：服务端时钟比真实时间快，于是每一张刚签出来的
+// token 一到这里就已经"过期"，所有人被以 token_expired 拒掉，而客户端照着这个
+// 原因串去 can-api 换新的——换回来的还是过期的。
+//
+// 输入必须落在 exp 之后、exp+clockSkew 之前：exp 本身或更早的样例分辨不出
+// "有容差"和"没容差"（前者两种实现都接受，后者两种实现都拒绝）。
+func TestVerifyToleratesASmallClockSkew(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	tok, err := Sign(priv, Claims{CID: "1000", Rating: 1, Exp: now.Add(-clockSkew + time.Second).Unix()})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := Verify(pub, tok, now); err != nil {
+		t.Fatalf("Verify: %v — a token that expired less than clockSkew ago must still be accepted, or a server clock running a few seconds fast turns away the entire network", err)
+	}
+}
+
+// TestVerifyRejectsATokenThatLastsTooLong 钉住有效期的上界。
+//
+// 短有效期是这套设计里**唯一**的吊销机制（本包禁止任何网络调用），所以一张
+// exp 写在一千年后的 token 是一张永远吊销不掉的凭据。没有这道闸时
+// `exp = now + 1000 年` 和 `exp = 2^62` 都验得过。
+//
+// 而且它必须是 ErrInvalid 而不是 ErrExpired：两者给客户端的指示相反——
+// ErrExpired 的意思是"去换一张新的再来"，而对这种 token 来说换回来的是同样一张。
+func TestVerifyRejectsATokenThatLastsTooLong(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	for name, exp := range map[string]int64{
+		// 秒数直接算，不走 time.Duration：一千年是 3.15e19 纳秒，超出 int64。
+		"a thousand years":    now.Unix() + 1000*365*24*3600,
+		"2^62":                1 << 62,
+		"the largest int64":   math.MaxInt64,
+		"just past the bound": now.Add(maxTokenLifetime + clockSkew + time.Second).Unix(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok, err := Sign(priv, Claims{CID: "1000", Rating: 1, Exp: exp})
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			_, err = Verify(pub, tok, now)
+			if err == nil {
+				t.Fatalf("Verify accepted a token valid until %d; a short lifetime is the only revocation this design has", exp)
+			}
+			if !errors.Is(err, ErrInvalid) {
+				t.Fatalf("err = %v, want errors.Is(err, ErrInvalid) — telling the client it merely expired sends it back for a token that will be just as unacceptable", err)
+			}
+		})
+	}
+}
+
+// TestVerifyAcceptsATokenAtTheLifetimeBound 是上一条的对照。
+//
+// 一个把**所有** token 都判成"太长"的变异体，靠上面那张全是"应该失败"的表
+// 是抓不住的——它们全部还是会通过。
+func TestVerifyAcceptsATokenAtTheLifetimeBound(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	tok, err := Sign(priv, Claims{CID: "1000", Rating: 1, Exp: now.Add(maxTokenLifetime).Unix()})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := Verify(pub, tok, now); err != nil {
+		t.Fatalf("Verify: %v — a token exactly at the permitted lifetime must be accepted", err)
 	}
 }
 

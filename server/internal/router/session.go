@@ -47,9 +47,15 @@ type Session struct {
 	MaxTX int
 	// MaxRX 来自服务端配置：客户端最多能订阅几个纯 RX 频率。
 	//
-	// 真实上界不是 MaxRX 本身，而是 max(MaxTX, MaxRX)：TX 蕴含 RX
+	// 这一层的真实上界不是 MaxRX 本身，而是 max(MaxTX, MaxRX)：TX 蕴含 RX
 	// （spec 9.1 的耦合规则），且 TX 频率不受 RX 限额挤压——见
 	// TestTxIsNotSqueezedOutByTheRxLimit，这是有意的设计，不是漏洞。
+	//
+	// 但**它也正是一条绕过路径**，所以传输层在握手时就把 MaxTX 夹到了 MaxRX
+	// 以内（transport 的 grantedMaxTX）：不夹的话，一张 max_tx 很大的 token
+	// 能让 max(MaxTX, MaxRX) 变成它想要的任何数，而 MaxRX 这个服务端配置就
+	// 形同虚设。router 自己不夹——它是纯逻辑层，允许调用方构造任意组合，
+	// 这两个字段的含义不该在这里被悄悄改写。
 	//
 	// MaxRX 为 0 时，纯 RX 声明会全部被拒，而 TX 蕴含进来的那些照常通过；
 	// 这是配置校验的责任（Task 11 的 LoadConfig 拒绝非正的
