@@ -9,15 +9,19 @@ type SessionID uint32
 // subs 是一次 SUB 声明的产物。构造完成之后永不修改。
 //
 // 订阅状态做成"不可变值 + 原子整体替换"而不是"互斥锁保护的可变字段"，
-// 是因为 Listeners() 会把 *Session 指针交给扇出路径，而扇出在锁外读它们
-// （见 (*Session).crossCoupled）。可变字段在那里就是并发读写：读到撕裂的
-// 切片头会把音频转发到随机频率，或者直接越界 panic。
+// 是因为它会在 Router 的锁外被读到：MayTransmit 取完会话指针就放锁，然后才
+// Load()；Listeners() 更是把 *Session 直接交给扇出路径。可变字段在那里就是
+// 并发读写：读到撕裂的 map/切片头会把音频转发到随机频率，或者直接越界 panic。
 //
 // 这也正好是全量 SUB 的设计本身——订阅是一个整体声明，不是一串增量，
 // 所以数据结构把设计原则表达出来了。
 type subs struct {
 	rx map[uint32]struct{}
 	tx map[uint32]struct{}
+	// xc 是这条会话声明的、且通过了校验的交叉耦合对，每对内部升序、整体去重
+	// （见 normaliseXC）。扇出不读它——耦合是全服务端的，查的是 Router.xc 那张
+	// 引用计数索引。留着它是为了知道下一次 Subscribe 或 Remove 该从索引里
+	// 摘掉哪些对。
 	xc [][2]uint32
 }
 
@@ -76,21 +80,6 @@ func (s *Session) Send(b []byte) {
 	if s.send != nil {
 		s.send(b)
 	}
-}
-
-// crossCoupled 返回与 freq 交叉耦合的其它频率。
-// 无锁：读的是一个不可变声明的原子快照。
-func (s *Session) crossCoupled(freq uint32) []uint32 {
-	var out []uint32
-	for _, pair := range s.subs.Load().xc {
-		switch freq {
-		case pair[0]:
-			out = append(out, pair[1])
-		case pair[1]:
-			out = append(out, pair[0])
-		}
-	}
-	return out
 }
 
 var nextID atomic.Uint32

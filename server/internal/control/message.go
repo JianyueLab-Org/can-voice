@@ -44,6 +44,13 @@ type SubAck struct {
 	RX       []uint32 `json:"rx"`
 	TX       []uint32 `json:"tx"`
 	Rejected []uint32 `json:"rejected"`
+	// RejectedXC 是没有生效的交叉耦合对。
+	//
+	// 一对耦合只有在该会话的 TX 授权集合里同时包含两个频率时才生效——耦合是
+	// 全服务端生效的，不校验的话任何人都能把两个不相干的频率接通。被拒的对
+	// 必须回报：一个设好了交叉耦合却不生效、又不知道为什么的管制员，比一个
+	// 被明确拒绝的管制员糟糕得多。
+	RejectedXC [][2]uint32 `json:"rejected_xc"`
 }
 
 // Notice 是服务端的单向通知，Kind 取值见 KindTxDenied 等常量。

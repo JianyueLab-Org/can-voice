@@ -88,7 +88,7 @@ func TestEncodeDecodeRoundTripsEveryMessageType(t *testing.T) {
 		{"Hello", &Hello{Token: "tok-9f3a", Client: "can-controller/3.0.0", Proto: 2, Follow: "CCA1501"}},
 		{"Ready", &Ready{Session: 42, Server: "can-voice/1.0.0", MaxTX: 8, MaxRX: 32}},
 		{"Sub", &Sub{RX: []uint32{118000, 121800}, TX: []uint32{121800}, XC: [][2]uint32{{121800, 124550}}}},
-		{"SubAck", &SubAck{RX: []uint32{118000}, TX: []uint32{121800}, Rejected: []uint32{136975}}},
+		{"SubAck", &SubAck{RX: []uint32{118000}, TX: []uint32{121800}, Rejected: []uint32{136975}, RejectedXC: [][2]uint32{{121800, 123450}}}},
 		{"Notice", &Notice{Kind: KindTxDenied, Freq: 121800, Reason: "no active radio track"}},
 		{"Ping", &Ping{T: 1700000000}},
 		{"Pong", &Pong{T: 1700000000, ServerT: 1700000042}},

@@ -26,6 +26,13 @@ type Router struct {
 	// byCID 是成员号到当前会话的索引，只为顶号服务。
 	// 一个 CID 最多一条会话，所以是 SessionID 而不是集合。
 	byCID map[string]SessionID
+	// locator 是位置来源，扇出时查它。为 nil 等于永久降级：全部放行。
+	locator Locator
+	// xc 是频率到与之交叉耦合的频率的派生索引，值是引用计数。
+	//
+	// 计数而不是布尔：几个管制员可能各自声明同一对，其中一个撤销时这一对
+	// 必须还在。和 rx 倒排索引一样由 Subscribe 整体重建。
+	xc map[uint32]map[uint32]int
 }
 
 // New 建一个空的 Router。
@@ -34,6 +41,7 @@ func New() *Router {
 		sessions: map[SessionID]*Session{},
 		rx:       map[uint32]map[SessionID]struct{}{},
 		byCID:    map[string]SessionID{},
+		xc:       map[uint32]map[uint32]int{},
 	}
 }
 
@@ -123,9 +131,14 @@ func (r *Router) removeLocked(id SessionID) {
 	if !ok {
 		return
 	}
-	for f := range s.subs.Load().rx {
+	old := s.subs.Load()
+	for f := range old.rx {
 		r.unindex(f, id)
 	}
+	// 耦合索引也要摘，理由和 rx 一样：它是这条声明的派生物。漏掉的话，一个
+	// 管制员断线之后他声明的那一对永远留在索引里，两个频率从此被永久接通，
+	// 而声明它的人已经不在了。
+	r.bumpXC(old.xc, -1)
 	s.subs.Store(emptySubs())
 	// cid 索引也要清，否则留下一个指向已注销会话的条目，下一次同 cid 登录
 	// 会对着它调 Close，而那个闭包捕获的是一条已经关掉的连接。
@@ -153,16 +166,18 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	ack := control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}}
+	ack := control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}, RejectedXC: [][2]uint32{}}
 	s, ok := r.sessions[id]
 	if !ok {
 		return ack
 	}
 
 	// 先把旧的索引全部摘掉，再按新声明重建。
-	for f := range s.subs.Load().rx {
+	old := s.subs.Load()
+	for f := range old.rx {
 		r.unindex(f, id)
 	}
+	r.bumpXC(old.xc, -1)
 
 	next := emptySubs()
 	for _, f := range dedup(sub.TX) {
@@ -189,8 +204,11 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 		}
 		next.rx[f] = struct{}{}
 	}
-	// 复制而不是引用调用方的切片：控制面那边复用缓冲区就会改到路由状态。
-	next.xc = append([][2]uint32(nil), sub.XC...)
+	// 交叉耦合的校验与规范化。必须在 next.tx 建好之后做——normaliseXC 拿
+	// **授权后**的 TX 集合当权限依据。
+	var rejectedXC [][2]uint32
+	next.xc, rejectedXC = normaliseXC(sub.XC, next.tx)
+	ack.RejectedXC = append(ack.RejectedXC, rejectedXC...)
 
 	s.subs.Store(next)
 
@@ -198,6 +216,7 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 		r.index(f, id)
 		ack.RX = append(ack.RX, f)
 	}
+	r.bumpXC(next.xc, +1)
 	// Rejected 里可能有重复：同一个频率可以先被 TX 限额拒、又被 RX 限额拒
 	// （比如 max_tx=1 且 max_rx=1 时的第二个频率）。这里只去重 Rejected 自身——
 	// 一个频率同时出现在 RX 和 Rejected 里是有意义的（TX 被拒但 RX 给了），
@@ -262,6 +281,103 @@ func (r *Router) unindex(freq uint32, id SessionID) {
 		if len(m) == 0 {
 			delete(r.rx, freq)
 		}
+	}
+}
+
+// maxXCPairs 是一份声明里最多处理多少个耦合对。
+//
+// 超出的直接拒。上界本来就由 TX 授权集合隐含（两个频率都必须在里面，所以最多
+// C(MaxTX,2) 对），但那个隐含上界是**检查完之后**才成立的，而检查本身要遍历
+// 客户端给的整份列表并往 rejected 里抄。控制帧上限是 64 KiB（control.MaxFrame），
+// 一份塞满的 SUB 能带七千多个对，所以"反正最后都会被拒"不是不设界的理由。
+const maxXCPairs = 64
+
+// normaliseXC 校验并规范化客户端声明的交叉耦合对，返回生效的对和被拒的对。
+//
+// 三件事，顺序有讲究：
+//
+//  1. **两个频率都必须在该会话的 TX 授权集合里。** 这是权限检查，不是整理。
+//     耦合是全服务端生效的（见 coupledWith），所以不校验的话，任何一条会话都能
+//     声明 XC: [[121800, 123450]] 把两个不相干的频率接通——而它可能这两个频率
+//     一个都没有。这和无线电栈本来的耦合规则一致：打开 XC 会强制 RX 和 TX 都
+//     打开，也就是说你只能把自己正在发射的频率接起来。
+//     用**授权后**的 tx 集合而不是客户端声明的 sub.TX：被 MaxTX 拒掉的频率不算
+//     你的，否则限额就绕开了。
+//  2. 丢掉自耦合（{f,f}）。它没有意义，而且会让同一个听众在目标频率列表里
+//     出现两次。
+//  3. 每对内部升序，然后整体去重。**这两件事都是纵深防御，不是承重件，
+//     不要给它们编一个它们并不承担的理由。** 实测过：把升序去掉、把去重去掉，
+//     整套 router 测试各自仍然全绿。原因是 bumpXC 对每一对都同时动两个方向，
+//     所以对的朝向根本到不了索引里；而加走 next.xc、减走 old.xc，是同一份列表，
+//     写三遍就加三遍减三遍，照样归零。coupledWith 又是遍历 map 的，重复只会让
+//     某个键的计数变大，不会让它返回重复的频率。
+//     它们真正买到的是：索引里一个无向对只占一个键，计数的含义是"有几条会话
+//     声明了这一对"而不是"一共写了几个字"，于是 subs.xc 和计数都不会被一份
+//     写了 64 遍同一对的声明撑大。（"同一对写三遍会让计数加三、一次撤销只减一，
+//     于是永远撤不掉"是不成立的——撤销减的是存下来的那一整份列表。）
+//
+// 顺带这也完成了"复制而不是引用调用方的切片"：[2]uint32 是值类型，append 到一个
+// 新切片里就是按值拷贝，调用方之后改自己的缓冲区不会动到路由状态。
+func normaliseXC(pairs [][2]uint32, tx map[uint32]struct{}) (ok, rejected [][2]uint32) {
+	seen := make(map[[2]uint32]struct{}, min(len(pairs), maxXCPairs))
+	for i, p := range pairs {
+		if i >= maxXCPairs {
+			// 超出上界的一律拒，而且要**告诉**客户端——静默丢弃正是这条规则
+			// 要避免的失败。但回报本身也必须有界：SubAck 要经 control.WriteFrame
+			// 发出去，那里同样是 64 KiB 的上限，原样抄回七千个对会让 ACK 超限
+			// 而根本发不出去，于是客户端什么都收不到——比静默丢弃更糟。
+			// 最坏情况因此是 maxXCPairs（逐条判掉的）+ maxXCPairs（这里的）。
+			rejected = append(rejected, pairs[i:min(len(pairs), i+maxXCPairs)]...)
+			break
+		}
+		if p[0] == p[1] {
+			rejected = append(rejected, p)
+			continue
+		}
+		if _, has := tx[p[0]]; !has {
+			rejected = append(rejected, p)
+			continue
+		}
+		if _, has := tx[p[1]]; !has {
+			rejected = append(rejected, p)
+			continue
+		}
+		if p[0] > p[1] {
+			p[0], p[1] = p[1], p[0]
+		}
+		if _, dup := seen[p]; dup {
+			continue // 重复不算被拒，客户端声明的那一对确实生效了
+		}
+		seen[p] = struct{}{}
+		ok = append(ok, p)
+	}
+	return ok, rejected
+}
+
+// bumpXC 把一组耦合对加进索引（delta = +1）或摘出来（delta = -1）。
+// 对是双向的，所以两个方向都要动。
+func (r *Router) bumpXC(pairs [][2]uint32, delta int) {
+	for _, p := range pairs {
+		r.bumpOneXC(p[0], p[1], delta)
+		r.bumpOneXC(p[1], p[0], delta)
+	}
+}
+
+func (r *Router) bumpOneXC(from, to uint32, delta int) {
+	m := r.xc[from]
+	if m == nil {
+		if delta < 0 {
+			return
+		}
+		m = map[uint32]int{}
+		r.xc[from] = m
+	}
+	m[to] += delta
+	if m[to] <= 0 {
+		delete(m, to)
+	}
+	if len(m) == 0 {
+		delete(r.xc, from)
 	}
 }
 

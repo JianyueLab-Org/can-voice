@@ -306,12 +306,15 @@ func TestADuplicateNeverLandsInBothAcceptedAndRejected(t *testing.T) {
 
 // TestSubscribeIsRaceFreeAgainstConcurrentReaders 是这个包最重要的测试。
 //
-// Listeners() 把 *Session 指针交给调用方，而扇出路径（Task 8）会在锁外读这些
-// 会话的订阅状态——(*Session).crossCoupled 就是不持锁地遍历 s.xc。如果订阅状态
-// 是被互斥锁保护的普通字段，那就是切片头的并发读写：读到撕裂的 ptr/len 组合，
+// Listeners() 把 *Session 指针交给调用方，而扇出路径会在锁外读这些会话的订阅
+// 状态——MayTransmit 取完会话指针就放锁，然后才 Load()。如果订阅状态是被互斥锁
+// 保护的普通字段，那就是 map/切片头的并发读写：读到撕裂的 ptr/len 组合，
 // 结果是音频被转发到一个随机频率，或者直接越界 panic 把服务端带下去。
 // 订阅状态因此必须是"一次声明一个不可变值、整体原子替换"，这也正好就是
 // 全量 SUB 的设计本身——数据结构把设计原则表达出来了。
+//
+// 读者跑的是真正的扇出（Fanout），不是它的某个零件：耦合索引、rx 倒排索引和
+// 会话表在扇出的一次调用里被分四次加锁读到，写者同时在整体重建这三张表。
 //
 // 必须用 `go test -race` 跑才有意义。
 func TestSubscribeIsRaceFreeAgainstConcurrentReaders(t *testing.T) {
@@ -355,9 +358,11 @@ func TestSubscribeIsRaceFreeAgainstConcurrentReaders(t *testing.T) {
 				default:
 				}
 				for _, freq := range []uint32{118000, 121800, 124550, 127800} {
+					// 扇出：写者随时在换声明，所以这里常常拿到"不能在这个
+					// 频率上发送"的错误，那是预期的，丢掉即可。
+					_, _ = r.Fanout(s.ID, packet(freq, 1, 0xAA))
 					for _, sess := range r.Listeners(freq) {
-						// 这两个调用刻意在 Listeners 返回之后、不持任何锁。
-						_ = sess.crossCoupled(freq)
+						// 这个调用刻意在 Listeners 返回之后、不持任何锁。
 						_ = r.MayTransmit(sess.ID, freq)
 					}
 				}
@@ -397,18 +402,71 @@ func TestSubAckOrderingIsDeterministic(t *testing.T) {
 	}
 }
 
+// TestSubAckTxIsSortedToo 钉住 ack.TX 也按升序返回。
+//
+// 现有的顺序测试只查 ack.RX（它遍历 map，顺序天然随机，所以一眼就看得出要排）。
+// ack.TX 是按声明顺序 append 的，看起来"本来就稳定"，于是排序那一行没人守——
+// 但客户端拿 ACK 和自己的声明对账靠的是同一个契约，两个字段不该有两套规则。
+func TestSubAckTxIsSortedToo(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 64, Send: func([]byte) {}})
+	ack := r.Subscribe(s.ID, control.Sub{TX: []uint32{124550, 118000, 121800}})
+
+	want := []uint32{118000, 121800, 124550}
+	if !slices.Equal(ack.TX, want) {
+		t.Fatalf("SubAck.TX = %v, want %v — ACK fields are sorted so a client can reconcile against its own declaration", ack.TX, want)
+	}
+}
+
+// TestAFrequencyGrantedViaTxIsNotThenRejectedByTheRxLimit 钉住 RX 闸门里的
+// already 判断。
+//
+// TX ⊆ RX，所以 TX 的频率先进 next.rx；RX 循环再看到同一个频率时 len(next.rx)
+// 可能已经到顶。少了 already 判断，这个**已经授权**的频率会被追加进 Rejected，
+// 于是它同时出现在 ack.RX 和 ack.Rejected 里——客户端同时被告知"给你了"和"拒了"。
+func TestAFrequencyGrantedViaTxIsNotThenRejectedByTheRxLimit(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 1, Send: func([]byte) {}})
+	ack := r.Subscribe(s.ID, control.Sub{
+		TX: []uint32{118000, 121800},
+		RX: []uint32{118000},
+	})
+
+	for _, f := range ack.RX {
+		for _, g := range ack.Rejected {
+			if f == g {
+				t.Fatalf("%d is in both RX %v and Rejected %v; it was granted through TX and must not then be bounced by the RX limit", f, ack.RX, ack.Rejected)
+			}
+		}
+	}
+	if !r.MayTransmit(s.ID, 118000) {
+		t.Fatal("118000 was accepted for TX; MayTransmit must agree with the ACK")
+	}
+}
+
 // TestSubscribeCopiesTheCrossCoupleList 确认 router 不会把调用方的切片存下来。
 // 存下来的话，控制面那边复用或修改缓冲区就会改到服务端的路由状态。
+//
+// 存下来的具体后果在最后一段：会话保留 subs.xc 是为了下一次 Subscribe 知道该从
+// 引用计数索引里摘掉哪些对。存的是别名的话，撤销时去减的是调用方改成的**那一对**，
+// 121800↔124550 的计数永远减不掉——两个频率从此被永久接通。
 func TestSubscribeCopiesTheCrossCoupleList(t *testing.T) {
 	r := New()
 	s := newSession(t, r, "1000", 8)
 	xc := [][2]uint32{{121800, 124550}}
-	r.Subscribe(s.ID, control.Sub{TX: []uint32{121800}, XC: xc})
+	r.Subscribe(s.ID, control.Sub{TX: []uint32{121800, 124550}, XC: xc})
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 124550 {
+		t.Fatalf("coupledWith = %v, want [124550] — the coupling did not take effect at all", got)
+	}
 
 	xc[0] = [2]uint32{999000, 999001} // 调用方改自己的切片
 
-	if got := s.crossCoupled(121800); len(got) != 1 || got[0] != 124550 {
-		t.Fatalf("crossCoupled = %v, want [124550] — Subscribe aliased the caller's slice instead of copying it", got)
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 124550 {
+		t.Fatalf("coupledWith = %v, want [124550] — Subscribe aliased the caller's slice instead of copying it", got)
+	}
+	r.Subscribe(s.ID, control.Sub{TX: []uint32{121800, 124550}})
+	if got := r.coupledWith(121800); len(got) != 0 {
+		t.Fatalf("coupledWith = %v, want empty — the undo decremented whatever the caller's slice says now, not the pair actually indexed", got)
 	}
 }
 
@@ -460,8 +518,8 @@ func TestTxIsNotSqueezedOutByTheRxLimit(t *testing.T) {
 func TestASessionWithNoSubscriptionYetIsSafeToRead(t *testing.T) {
 	r := New()
 	s := newSession(t, r, "1000", 8)
-	if got := s.crossCoupled(118000); len(got) != 0 {
-		t.Fatalf("crossCoupled = %v, want empty", got)
+	if got := r.coupledWith(118000); len(got) != 0 {
+		t.Fatalf("coupledWith = %v, want empty", got)
 	}
 	if r.MayTransmit(s.ID, 118000) {
 		t.Fatal("a session that has not subscribed must not be able to transmit")
