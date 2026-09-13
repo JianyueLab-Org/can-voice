@@ -827,3 +827,283 @@ func TestControllerRadiusStillComesFromVisualRange(t *testing.T) {
 		t.Fatal("an ATC position must not carry a line-of-sight term")
 	}
 }
+
+// ---- Fix round 1（复审 0 Critical / 1 Major / 4 Minor）----
+
+// TestSustainedParseFailuresGoDegradedAndDropTheStream 钉住 Step 0d 的整个机制。
+//
+// 这是 Task 5 那个故障模式的看门人：收得到字节但一个都用不了，和收不到字节
+// 是同一件事，只是更隐蔽——按行计时的看门狗看到行就续期，所以它永远不响。
+// 没有这个测试，把计数器、degraded、Error 日志和 return 全部删掉，整个测试
+// 套件依然全绿。
+func TestSustainedParseFailuresGoDegradedAndDropTheStream(t *testing.T) {
+	// 先发一份能用的 snapshot 让它上线，然后持续发解析不了的 update。
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		for r.Context().Err() == nil {
+			fmt.Fprint(w, "event: update\ndata: {\"pilots\":[]}\n\n") // 数组，不是 feedDelta 的对象
+			fl.Flush()
+			time.Sleep(5 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	// 先确认它真的上线过——否则下面的 degraded 可能只是"还没连上"。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up; this test cannot say anything about parse failures")
+	}
+
+	// 然后确认持续的解析失败把它打回降级。
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			// 而且快照必须还在——坏事件不该让全网瞬间失去射程。
+			if _, ok := f.Snapshot().ByCallsign["CCA1"]; !ok {
+				cancel()
+				<-done
+				t.Fatal("the snapshot was wiped; a stream of bad events must degrade us, not blank us")
+			}
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("a stream delivering nothing but unparsable updates never made the feed degraded; receiving bytes you cannot use is the same as receiving nothing, only quieter")
+}
+
+// TestAGoodEventResetsTheFailureCounter 钉住计数器会归零，但走的是 httptest
+// 路径而不是简报字面给的"直接调 applyEvent"版本。
+//
+// consecutiveFailures 是 stream() 内部的局部变量：它在事件分发点递增/清零，
+// 而 applyEvent 本身从来摸不到它。直接调 f.applyEvent(...) 交替好坏事件的话，
+// 这个测试测的是"applyEvent 对连续调用没有奇怪的副作用"，和计数器会不会
+// 归零毫无关系——不归零的版本一样会通过，因为压根没有计数器可言。所以改成
+// 让假服务端交替发送好/坏事件，次数远超过 maxConsecutiveParseFailures：
+// 不归零的话，5 个坏事件之后 stream() 就会主动断线，触发一次重连。
+//
+// 第一版这样写完之后自己拿变了质的实现测过——把计数器不归零的坏版本接上，
+// 这个测试仍然是绿的：断线确实发生了，但 reconnectDelay 是 5 秒，而测试
+// 只观察了 500ms，重连从没来得及真的发生，served 全程停在 1，和"从未断线"
+// 长得一模一样。所以把 reconnectDelay 也调成测试可控的变量，观察窗口才能
+// 覆盖到真正的重连。
+func TestAGoodEventResetsTheFailureCounter(t *testing.T) {
+	origDelay := reconnectDelay
+	reconnectDelay = 20 * time.Millisecond
+	defer func() { reconnectDelay = origDelay }()
+
+	// 必须是单行 JSON：realUpdateEvent 里嵌了原始换行，直接塞进 "data: %s"
+	// 会把后续物理行发成没有 "data:" 前缀的续行，被规范正确地当成未知内容
+	// 丢弃，表现成"好事件"自己先解析失败——那是这段测试代码的 bug，不是
+	// 被测代码的。
+	const goodUpdate = `{"update":1,"pilots":{"changed":[{"callsign":"CCA1","cid":"1","latitude":30.5,"longitude":120.5,"altitude":11000}]}}`
+
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		served.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		for r.Context().Err() == nil {
+			// 坏、好交替，次数远超 maxConsecutiveParseFailures。计数器不归零
+			// 的话，累计到阈值就会主动断线重连，served 就会大于 1。
+			fmt.Fprint(w, "event: update\ndata: {\"pilots\":[]}\n\n") // 数组，解析失败
+			fl.Flush()
+			fmt.Fprintf(w, "event: update\ndata: %s\n\n", goodUpdate) // 好事件
+			fl.Flush()
+			time.Sleep(2 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up")
+	}
+	// 让交替事件多跑一阵——reconnectDelay 已经调到 20ms，如果计数器不归零，
+	// 这段时间里断线重连的循环足够转好几圈，served 会明显大于 1。
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := served.Load(); got != 1 {
+		t.Fatalf("the server accepted %d connections; alternating good and bad events tripped the failure counter, which means a good event was not resetting it", got)
+	}
+}
+
+// TestACallsignMovingBetweenCollectionsIsNotLost 钉住"先删后改"（Step 0a）。
+//
+// diffFeeds 的不相交只在**单个集合内**成立。一个呼号从 pilots 消失、同一 tick
+// 在 controllers 出现时，如果先应用 changed 再应用 removed，它会被直接删掉而
+// 不是移过去，并且一直缺到下次重连。
+func TestACallsignMovingBetweenCollectionsIsNotLost(t *testing.T) {
+	f := NewFeed("http://example.invalid")
+	if err := f.applyEvent("snapshot", []byte(realSnapshotEvent)); err != nil {
+		t.Fatalf("applyEvent snapshot: %v", err)
+	}
+	upd := []byte(`{"update":1,
+		"pilots":{"removed":["CCA1"]},
+		"controllers":{"changed":[{"callsign":"CCA1","cid":"1","latitude":"31.0","longitude":"121.0","visual_range":250}]}}`)
+	if err := f.applyEvent("update", upd); err != nil {
+		t.Fatalf("applyEvent update: %v", err)
+	}
+	p, ok := f.Snapshot().ByCallsign["CCA1"]
+	if !ok {
+		t.Fatal("CCA1 left pilots and appeared in controllers in the same tick, and was deleted instead of moved; it stays missing until the next reconnect")
+	}
+	if !p.IsATC || p.RadiusNM != 250 {
+		t.Fatalf("CCA1 = %+v, want the controller entry", p)
+	}
+}
+
+// TestSustainedOversizedEventsAlsoGoDegraded 钉住"超限丢弃"和"解析失败"共用
+// 同一个计数器和同一个后果（Fix 3）。
+//
+// 测量过：不共用的话，一个不停发短 data: 行、永远不发空行的对端会让进程
+// 在 6 秒内打印 1006 条 warn，而 degraded 停在 false、快照冻结在连接那一刻
+// ——这是 Task 5 的故障模式换了一张脸，而 ErrTooLong 分支三行之外早就对同
+// 一类问题做出了正确的选择。把 maxEventBytes 调小是为了不用真的传几 MB
+// 数据就能撑爆它；bufio.Scanner.Buffer 的文档保证有效上限是"max 和
+// cap(初始 buf) 里较大的那个"，初始 buf 固定 64<<10，所以短测试行不会被
+// scanner 自己的 ErrTooLong 抢先截胡。
+func TestSustainedOversizedEventsAlsoGoDegraded(t *testing.T) {
+	// 必须大于 realSnapshotEvent 本身的长度（239 字节的单行 JSON），否则连
+	// 上线用的快照都会被这条路径误判成超限——那是测试设置错了，不是在测
+	// 被测代码。512 留够余量，同时几十行 10 字节的 data: 就能撑爆它。
+	origMax := maxEventBytes
+	maxEventBytes = 512
+	defer func() { maxEventBytes = origMax }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		for r.Context().Err() == nil {
+			// 永远不发空行：事件从不分发，只在累积路径里被反复判定超限。
+			io.WriteString(w, "data: xxxxxxxxxx\n")
+			fl.Flush()
+			time.Sleep(time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up; this test cannot say anything about the oversized-event path")
+	}
+
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("a stream delivering nothing but oversized events never made the feed degraded")
+}
+
+// TestNonFiniteCoordinatesAreUnknown 和 TestNonFiniteAltitudeGivesAFiniteLOSTerm
+// 钉住 Fix 4：strconv.ParseFloat 干净地接受 "NaN"/"Inf"/"-Inf"/"+Inf"/"Infinity"，
+// 而它们会整个绕开距离过滤——NaN 让每一次比较都为假，所以上游的范围检查
+// 放它过去，而 Quality(d, NaN) 判定"在射程内"；Inf 的高度给出无限射程，
+// 全球满格。这不是假设的输入：can-fsd 的 ParseLatLon 对 NaN 的边界检查
+// 全部失败（比较里带 NaN 恒假），formatCoord 会把它原样吐回来。
+func TestNonFiniteCoordinatesAreUnknown(t *testing.T) {
+	for _, v := range []string{"NaN", "Inf", "-Inf", "+Inf", "Infinity"} {
+		doc := []byte(fmt.Sprintf(
+			`{"pilots":[],"controllers":[{"callsign":"ZSHA_CTR","cid":"1000","latitude":%q,"longitude":"121.0","visual_range":600}],"atis":[]}`,
+			v))
+		s, err := ParseDatafeed(doc)
+		if err != nil {
+			t.Fatalf("ParseDatafeed(latitude=%q): %v", v, err)
+		}
+		p := s.ByCallsign["ZSHA_CTR"]
+		if p.Known {
+			t.Fatalf("latitude=%q gave Known=true; NaN/Inf must be treated as unset, not as a valid coordinate", v)
+		}
+	}
+}
+
+func TestNonFiniteAltitudeGivesAFiniteLOSTerm(t *testing.T) {
+	for _, v := range []string{"NaN", "Inf", "-Inf"} {
+		doc := []byte(fmt.Sprintf(
+			`{"pilots":[{"callsign":"CCA1","cid":"1","latitude":30.0,"longitude":120.0,"altitude":%q}],"controllers":[],"atis":[]}`,
+			v))
+		s, err := ParseDatafeed(doc)
+		if err != nil {
+			t.Fatalf("ParseDatafeed(altitude=%q): %v", v, err)
+		}
+		p := s.ByCallsign["CCA1"]
+		if math.IsNaN(p.LOSTermNM) || math.IsInf(p.LOSTermNM, 0) {
+			t.Fatalf("altitude=%q gave LOSTermNM=%v, want a finite floored value", v, p.LOSTermNM)
+		}
+		if !p.Known {
+			t.Fatalf("altitude=%q made the whole position unknown, but lat/lon were fine — Known must track lat/lon only", v)
+		}
+	}
+}
+
+// TestAltFtIsTheRawAltitudeNotTheFlooredOne 钉住下限只作用于派生的半项。
+// AltFt 会被后面的代码当作真实高度读取（比如显示或判断是否在地面），
+// 把下限写进它会让一架停在海平面的飞机报告自己在 20 英尺。
+func TestAltFtIsTheRawAltitudeNotTheFlooredOne(t *testing.T) {
+	doc := []byte(`{"pilots":[{"callsign":"CCA1","cid":"1","latitude":30,"longitude":120,"altitude":0}],"controllers":[],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	p := s.ByCallsign["CCA1"]
+	if p.AltFt != 0 {
+		t.Fatalf("AltFt = %v, want the raw 0 — minAntennaFt must only floor the derived LOS term", p.AltFt)
+	}
+	if p.LOSTermNM <= 0 {
+		t.Fatalf("LOSTermNM = %v, want the floored value", p.LOSTermNM)
+	}
+}

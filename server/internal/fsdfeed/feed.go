@@ -23,11 +23,19 @@ import (
 )
 
 // reconnectDelay 是 SSE 连接断开或建立失败后，重试前的等待时间。
-const reconnectDelay = 5 * time.Second
+//
+// 是变量而不是常量，只为了测试能把它调小——生产代码不要改它。没有这个
+// 开关，任何要观察"断线之后是否真的重连"的测试都得真的等 5 秒。
+var reconnectDelay = 5 * time.Second
 
 // maxEventBytes 是单个 SSE 事件的上限。超过这个尺寸的 datafeed 意味着
 // 上游出了问题，而不是网络大了一点。
-const maxEventBytes = 8 << 20
+//
+// 是变量而不是常量，只为了测试能把它调小去驱动"持续超限"这条路径，不用
+// 真的传几十 MB 数据——生产代码不要改它。传给 sc.Buffer 的初始缓冲区固定
+// 是 64<<10，bufio.Scanner 的文档保证有效上限是"max 和 cap(buf) 里较大的
+// 那个"，所以调小这个变量不会意外让单行日常大小的事件触发 ErrTooLong。
+var maxEventBytes = 8 << 20
 
 // feedIdleTimeout 是流静默多久算作已经死掉。can-fsd 每秒推一次
 // （它的 feedPushInterval = 1s），所以 30 秒的静默只可能是连接被黑洞化了
@@ -39,11 +47,17 @@ const maxEventBytes = 8 << 20
 // 是变量而不是常量，只为了测试能把它调小——生产代码不要改它。
 var feedIdleTimeout = 30 * time.Second
 
-// maxConsecutiveParseFailures 是连续多少个事件解析不了就认定这条流没用。
+// maxConsecutiveParseFailures 是连续多少个事件解析不了（或者超限被丢弃）
+// 就认定这条流没用。
 //
 // 收得到字节但一个都用不了，和收不到字节是同一件事，只是更隐蔽：看门狗看到行
 // 就续期，于是它永远不响。Task 5 把 update 的线格式认错时正是这个样子——
 // 每秒一条 warn，快照冻结在连接那一刻，degraded 停在 false。
+//
+// 超限丢弃（见 stream() 里 len(data) > maxEventBytes 那条分支）算的是同一个
+// 计数器：一个不停发短 data: 行、永远不发空行的对端如果单独用一条自转的
+// 丢弃逻辑处理，会打印成千上万条 warn 却从不触发这里——那是同一个故障模式
+// 换了张脸，而不是一种新问题。
 //
 // 触发后主动断开而不是原地继续：只有重连才会带来一份新的 snapshot 事件，
 // 而流里是不会再自己发一份的。
@@ -63,6 +77,12 @@ type Position struct {
 	// 为 false 时 Lat/Lon 没有意义——它们是零值，而 (0,0) 是几内亚湾。
 	// 射程过滤必须在这种时候**放行**而不是屏蔽：刚连上还没发位置包的
 	// 那架飞机，正是停机坪上准备呼叫放行的那架。见 EffectiveRangeNM。
+	//
+	// 判定只看 e.Lat.Set && e.Lon.Set，不看 Altitude.Set：can-fsd 把这三个
+	// 键放在同一个 HasPosition() 闸门后面一起写，出现纬度的时候海拔必然
+	// 也在，缺席的时候三个键一起缺席（见 pilotPosition/atcPosition）。这个
+	// 假设是有承重的——can-fsd 哪天把海拔拆到另一个闸门后面单独发，这里
+	// 就要跟着改，而不是顺手也去查 Altitude.Set 蒙混过去。
 	Known bool
 	// RadiusNM 是管制席位声明的权威半径（visual_range，或它为 0 时的
 	// 后缀兜底表）。只有 IsATC 为 true 时有意义，飞行员这里是 0。
@@ -125,6 +145,15 @@ func (f *flexFloat) UnmarshalJSON(b []byte) error {
 	v, err := strconv.ParseFloat(strings.Trim(s, `"`), 64)
 	if err != nil {
 		return fmt.Errorf("coordinate %q is neither a JSON number nor a numeric string: %w", b, err)
+	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		// NaN 和 Inf 都能被 ParseFloat 干净地接受，而它们会整个绕开距离过滤：
+		// NaN 让每一次比较都为假，所以上游的范围检查放它过去，而
+		// Quality(d, NaN) 判定"在射程内"；Inf 的高度给出无限射程，全球满格。
+		// 当成"不知道"而不是报错——报错会让一条坏记录作废整份文档，那是
+		// 更糟的失败（一个字段坏掉就让全网瞬间失去位置）。
+		*f = flexFloat{}
+		return nil
 	}
 	*f = flexFloat{V: v, Set: true}
 	return nil
@@ -534,6 +563,24 @@ func (f *Feed) stream(parent context.Context) error {
 	event := "message"
 	var data []byte
 	var consecutiveFailures int
+
+	// recordFailure 记一次"收到的字节没法用"——解析失败和超限丢弃是同一类
+	// 问题的两副面孔，所以共用这一个计数器和这一个后果，而不是各转各的圈子。
+	// 达到阈值时返回非 nil，调用方必须原样把它当 stream() 的返回值——
+	// 只有断线重连才会带来一份新的 snapshot，流里不会自己再发一份。
+	recordFailure := func(reason string) error {
+		consecutiveFailures++
+		if consecutiveFailures < maxConsecutiveParseFailures {
+			return nil
+		}
+		f.mu.Lock()
+		f.degraded = true
+		f.mu.Unlock()
+		slog.Error("too many consecutive unusable feed events, dropping the connection",
+			"count", consecutiveFailures, "url", f.url, "last_reason", reason)
+		return fmt.Errorf("%d consecutive feed events were unusable, last: %s", consecutiveFailures, reason)
+	}
+
 	for sc.Scan() {
 		watchdog.Reset(feedIdleTimeout)
 		line := sc.Text()
@@ -543,14 +590,8 @@ func (f *Feed) stream(parent context.Context) error {
 			if len(data) > 0 {
 				if err := f.applyEvent(event, data); err != nil {
 					slog.Warn("skipping an unparsable feed event", "event", event, "error", err)
-					consecutiveFailures++
-					if consecutiveFailures >= maxConsecutiveParseFailures {
-						f.mu.Lock()
-						f.degraded = true
-						f.mu.Unlock()
-						slog.Error("too many consecutive unparsable feed events, dropping the connection",
-							"count", consecutiveFailures, "url", f.url)
-						return fmt.Errorf("%d consecutive events failed to parse, last error: %w", consecutiveFailures, err)
+					if tripErr := recordFailure(err.Error()); tripErr != nil {
+						return tripErr
 					}
 				} else {
 					consecutiveFailures = 0
@@ -571,11 +612,17 @@ func (f *Feed) stream(parent context.Context) error {
 			data = append(data, v...)
 			if len(data) > maxEventBytes {
 				// 单行有 sc.Buffer 的上限兜底，但累积的 data 没有——一个不停发
-				// 短 data: 行、永远不发空行的对端会把这个切片撑到内存耗尽，
-				// 而且每一行都在喂看门狗，所以它永远不会触发。
-				slog.Warn("a multi-line feed event exceeded the size limit, discarding it",
+				// 短 data: 行、永远不发空行的对端会把这个切片撑到内存耗尽。
+				// 单次丢弃降到 Debug：真正要紧的是达到阈值时 recordFailure
+				// 打的那条 Error，这里每次都 Warn 只会把日志刷成千上万行
+				// （测量过：6 秒 1006 条）而 degraded 从不置位——Task 5 的
+				// 故障模式换了张脸，所以必须和解析失败共用同一套后果。
+				slog.Debug("a multi-line feed event exceeded the size limit, discarding it",
 					"event", event, "limit", maxEventBytes)
 				event, data = "message", nil
+				if tripErr := recordFailure("event exceeded the size limit"); tripErr != nil {
+					return tripErr
+				}
 			}
 		}
 	}
