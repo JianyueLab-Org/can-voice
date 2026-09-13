@@ -14,9 +14,22 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+)
+
+var (
+	// ErrExpired 表示 token 本身没问题，只是过期了。
+	// 客户端应当去换一张新的再试；这是唯一值得重试的失败。
+	ErrExpired = errors.New("token expired")
+	// ErrInvalid 表示 token 形状、签名或内容不对。
+	//
+	// 对外只区分到这个粒度：告诉一个**尚未鉴权**的对端"是签名长度不对
+	// 还是 payload 不是合法 JSON"，只会帮他调试伪造，对正当客户端毫无用处。
+	// 详细原因仍然留在错误链里，进服务端日志。
+	ErrInvalid = errors.New("token invalid")
 )
 
 // Claims 是 token 的载荷。MaxTX 是这个会话允许同时发送的频率数上限，
@@ -51,51 +64,54 @@ func Sign(priv ed25519.PrivateKey, c Claims) (string, error) {
 // 判断是否过期，都是在信任未经验证的数据。
 func Verify(pub ed25519.PublicKey, token string, now time.Time) (Claims, error) {
 	if len(pub) != ed25519.PublicKeySize {
+		// 刻意不包 ErrInvalid：这一条说的是**服务端自己配错了公钥**，
+		// 不是对端的 token 有问题。包上去的话，一个配置事故会对每一个
+		// 正当客户端回报 "token_invalid"，把所有人送去重新取 token。
 		return Claims{}, fmt.Errorf("public key has wrong length: %d", len(pub))
 	}
 
 	body, sigPart, ok := strings.Cut(token, ".")
 	if !ok || body == "" || sigPart == "" {
-		return Claims{}, fmt.Errorf("token is not in the <payload>.<signature> form")
+		return Claims{}, fmt.Errorf("%w: token is not in the <payload>.<signature> form", ErrInvalid)
 	}
 	if strings.Contains(sigPart, ".") {
-		return Claims{}, fmt.Errorf("token has more than two parts")
+		return Claims{}, fmt.Errorf("%w: token has more than two parts", ErrInvalid)
 	}
 
 	sig, err := enc.DecodeString(sigPart)
 	if err != nil {
-		return Claims{}, fmt.Errorf("token signature is not base64url: %w", err)
+		return Claims{}, fmt.Errorf("%w: token signature is not base64url: %w", ErrInvalid, err)
 	}
 	// ed25519.Verify 要求签名恰好 64 字节，否则 panic；这里提前挡掉任何
 	// 长度不对的输入，让畸形 token 变成一个普通的错误返回而不是崩溃。
 	if len(sig) != ed25519.SignatureSize {
-		return Claims{}, fmt.Errorf("token signature has wrong length: %d", len(sig))
+		return Claims{}, fmt.Errorf("%w: token signature has wrong length: %d", ErrInvalid, len(sig))
 	}
 
 	// 先验签，再信任 body 里的任何字节。
 	if !ed25519.Verify(pub, []byte(body), sig) {
-		return Claims{}, fmt.Errorf("token signature does not verify")
+		return Claims{}, fmt.Errorf("%w: token signature does not verify", ErrInvalid)
 	}
 
 	payload, err := enc.DecodeString(body)
 	if err != nil {
 		// 签名验过了但 payload 解不出来——不应该发生（body 参与了签名),
 		// 但仍然按错误处理而不是 panic。
-		return Claims{}, fmt.Errorf("token payload is not base64url: %w", err)
+		return Claims{}, fmt.Errorf("%w: token payload is not base64url: %w", ErrInvalid, err)
 	}
 	var c Claims
 	if err := json.Unmarshal(payload, &c); err != nil {
-		return Claims{}, fmt.Errorf("token payload is not valid JSON: %w", err)
+		return Claims{}, fmt.Errorf("%w: token payload is not valid JSON: %w", ErrInvalid, err)
 	}
 
 	// exp 是右开区间的上界：now == exp 视为已过期。这样"有效期 60 秒"的
 	// token 不会在恰好第 60 秒这个瞬间产生"到底算不算过期"的歧义——
 	// 一个 token 要么在窗口内（now < exp），要么不在，没有中间态。
 	if !now.Before(time.Unix(c.Exp, 0)) {
-		return Claims{}, fmt.Errorf("token expired at %d, now is %d", c.Exp, now.Unix())
+		return Claims{}, fmt.Errorf("%w: token expired at %d, now is %d", ErrExpired, c.Exp, now.Unix())
 	}
 	if c.CID == "" {
-		return Claims{}, fmt.Errorf("token carries no cid")
+		return Claims{}, fmt.Errorf("%w: token carries no cid", ErrInvalid)
 	}
 	return c, nil
 }
