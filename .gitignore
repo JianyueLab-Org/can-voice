@@ -1,5 +1,4 @@
 /probe/dist/
 /probe/reports/
-/server
 *.pem
 can-voice-probe-*.json
