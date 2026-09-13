@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -898,35 +899,30 @@ func TestSustainedParseFailuresGoDegradedAndDropTheStream(t *testing.T) {
 // 而 applyEvent 本身从来摸不到它。直接调 f.applyEvent(...) 交替好坏事件的话，
 // 这个测试测的是"applyEvent 对连续调用没有奇怪的副作用"，和计数器会不会
 // 归零毫无关系——不归零的版本一样会通过，因为压根没有计数器可言。所以改成
-// 让假服务端交替发送好/坏事件，次数远超过 maxConsecutiveParseFailures：
-// 不归零的话，5 个坏事件之后 stream() 就会主动断线，触发一次重连。
+// 让假服务端交替发送好/坏事件，次数远超过 maxConsecutiveParseFailures，
+// 直接盯 Degraded()：计数器不归零的话，5 个坏事件之后 recordFailure 会把
+// degraded 置 true——这一步不需要等重连，Run() 在 stream() 一返回、还没
+// 睡 reconnectDelay 之前就已经置位了，所以不用碰 reconnectDelay 这个生产
+// 常量，也不用数连接次数。
 //
-// 第一版这样写完之后自己拿变了质的实现测过——把计数器不归零的坏版本接上，
-// 这个测试仍然是绿的：断线确实发生了，但 reconnectDelay 是 5 秒，而测试
-// 只观察了 500ms，重连从没来得及真的发生，served 全程停在 1，和"从未断线"
-// 长得一模一样。所以把 reconnectDelay 也调成测试可控的变量，观察窗口才能
-// 覆盖到真正的重连。
+// 复审第二轮验证过：拿 served（连接计数）当观察对象的第一版反而要靠
+// reconnectDelay 才能看见断线——那是唯一真的卡在这个延迟后面的东西；
+// degraded 本身在 stream() 返回的那一刻就变了，不用等。
 func TestAGoodEventResetsTheFailureCounter(t *testing.T) {
-	origDelay := reconnectDelay
-	reconnectDelay = 20 * time.Millisecond
-	defer func() { reconnectDelay = origDelay }()
-
 	// 必须是单行 JSON：realUpdateEvent 里嵌了原始换行，直接塞进 "data: %s"
 	// 会把后续物理行发成没有 "data:" 前缀的续行，被规范正确地当成未知内容
 	// 丢弃，表现成"好事件"自己先解析失败——那是这段测试代码的 bug，不是
 	// 被测代码的。
 	const goodUpdate = `{"update":1,"pilots":{"changed":[{"callsign":"CCA1","cid":"1","latitude":30.5,"longitude":120.5,"altitude":11000}]}}`
 
-	var served atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		served.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		fl := w.(http.Flusher)
 		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
 		fl.Flush()
 		for r.Context().Err() == nil {
 			// 坏、好交替，次数远超 maxConsecutiveParseFailures。计数器不归零
-			// 的话，累计到阈值就会主动断线重连，served 就会大于 1。
+			// 的话，degraded 很快就会变 true。
 			fmt.Fprint(w, "event: update\ndata: {\"pilots\":[]}\n\n") // 数组，解析失败
 			fl.Flush()
 			fmt.Fprintf(w, "event: update\ndata: %s\n\n", goodUpdate) // 好事件
@@ -951,15 +947,20 @@ func TestAGoodEventResetsTheFailureCounter(t *testing.T) {
 		<-done
 		t.Fatal("the feed never came up")
 	}
-	// 让交替事件多跑一阵——reconnectDelay 已经调到 20ms，如果计数器不归零，
-	// 这段时间里断线重连的循环足够转好几圈，served 会明显大于 1。
-	time.Sleep(500 * time.Millisecond)
+
+	// 交替事件持续跑，次数远超 maxConsecutiveParseFailures。计数器不归零的
+	// 话，degraded 会在这段窗口内变 true——直接盯它，不用等重连。
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			cancel()
+			<-done
+			t.Fatal("the feed went degraded while good and bad events were alternating; a good event was not resetting the failure counter")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 	cancel()
 	<-done
-
-	if got := served.Load(); got != 1 {
-		t.Fatalf("the server accepted %d connections; alternating good and bad events tripped the failure counter, which means a good event was not resetting it", got)
-	}
 }
 
 // TestACallsignMovingBetweenCollectionsIsNotLost 钉住"先删后改"（Step 0a）。
@@ -993,17 +994,15 @@ func TestACallsignMovingBetweenCollectionsIsNotLost(t *testing.T) {
 // 测量过：不共用的话，一个不停发短 data: 行、永远不发空行的对端会让进程
 // 在 6 秒内打印 1006 条 warn，而 degraded 停在 false、快照冻结在连接那一刻
 // ——这是 Task 5 的故障模式换了一张脸，而 ErrTooLong 分支三行之外早就对同
-// 一类问题做出了正确的选择。把 maxEventBytes 调小是为了不用真的传几 MB
-// 数据就能撑爆它；bufio.Scanner.Buffer 的文档保证有效上限是"max 和
-// cap(初始 buf) 里较大的那个"，初始 buf 固定 64<<10，所以短测试行不会被
-// scanner 自己的 ErrTooLong 抢先截胡。
+// 一类问题做出了正确的选择。
+//
+// 对着生产环境真实的 8 MB maxEventBytes 跑，不缩小它：60 KB 一行的
+// data:，约 140 行就能撑爆 8 MB，复审量过在回环网络上 25ms 就能触发——
+// 比缩小常量更贴近真实生产路径,也不必操心"缩小的旋钮会不会漏进生产
+// 代码"。60 KB 仍然远小于 sc.Buffer 的 64<<10 初始容量之上 bufio.Scanner
+// 自己愿意扩到的上限,所以不会被 ErrTooLong 抢先截胡。
 func TestSustainedOversizedEventsAlsoGoDegraded(t *testing.T) {
-	// 必须大于 realSnapshotEvent 本身的长度（239 字节的单行 JSON），否则连
-	// 上线用的快照都会被这条路径误判成超限——那是测试设置错了，不是在测
-	// 被测代码。512 留够余量，同时几十行 10 字节的 data: 就能撑爆它。
-	origMax := maxEventBytes
-	maxEventBytes = 512
-	defer func() { maxEventBytes = origMax }()
+	oversizedLine := strings.Repeat("x", 60<<10)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1012,9 +1011,8 @@ func TestSustainedOversizedEventsAlsoGoDegraded(t *testing.T) {
 		fl.Flush()
 		for r.Context().Err() == nil {
 			// 永远不发空行：事件从不分发，只在累积路径里被反复判定超限。
-			io.WriteString(w, "data: xxxxxxxxxx\n")
+			fmt.Fprintf(w, "data: %s\n", oversizedLine)
 			fl.Flush()
-			time.Sleep(time.Millisecond)
 		}
 	}))
 	defer srv.Close()
@@ -1106,4 +1104,245 @@ func TestAltFtIsTheRawAltitudeNotTheFlooredOne(t *testing.T) {
 	if p.LOSTermNM <= 0 {
 		t.Fatalf("LOSTermNM = %v, want the floored value", p.LOSTermNM)
 	}
+}
+
+// ---- Fix round 2（复审第二轮：5 个新变异，加一处 Part 1 的测试改法）----
+
+// TestWatchdogIsResetByEachLineNotJustAtConnect 钉住"每读到一行就续期"这半句
+// （Mutant A）。
+//
+// TestASilentStreamEventuallyGoesDegraded 已经钉住了"完全沉默会触发看门狗"，
+// 但那对着"看门狗只在 stream() 开始时设一次、之后再也不 Reset"的阉割版本
+// 同样是绿的——沉默确实会触发，只是原因换了。持续有数据到达但从不续期，
+// 同样会在 feedIdleTimeout 之后掉线，这正是 watchdog.Reset 存在的全部
+// 理由，却没有任何测试盯着它。
+func TestWatchdogIsResetByEachLineNotJustAtConnect(t *testing.T) {
+	orig := feedIdleTimeout
+	feedIdleTimeout = 100 * time.Millisecond
+	defer func() { feedIdleTimeout = orig }()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		for r.Context().Err() == nil {
+			// 注释行也会喂看门狗——不必是合法事件，只要是一行。
+			io.WriteString(w, ": keepalive\n")
+			fl.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up")
+	}
+
+	// feedIdleTimeout 调到 100ms，喂养间隔是 10ms——如果 watchdog.Reset 没有
+	// 被每一行调用，第一次设的计时器会在 100ms 后无视持续的流量照样触发。
+	// 500ms 的窗口对这个差异绰绰有余。
+	deadline = time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			cancel()
+			<-done
+			t.Fatal("the feed went degraded while data kept arriving well inside feedIdleTimeout; the watchdog is not being reset per line")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
+// TestAHalfCoordinateEntryIsUnknown 钉住 Known 用的是 && 而不是 ||（Mutant C）。
+//
+// 只有纬度或只有经度，和完全没有坐标是同一类错误：缺的那一半落到零值，
+// 也就是错误的经度或纬度——这正是本任务想避免的"当成 0"失败，只是发生在
+// 单个轴上而不是整个坐标。同时覆盖飞行员（pilotPosition）和管制/ATIS
+// （atcPosition）两条路径，复审指的两处都在这一个测试里。
+func TestAHalfCoordinateEntryIsUnknown(t *testing.T) {
+	doc := []byte(`{"pilots":[
+		{"callsign":"CCA1","cid":"1","latitude":31.0}
+	],"controllers":[
+		{"callsign":"ZSHA_CTR","cid":"1000","longitude":"121.0","visual_range":600}
+	],"atis":[]}`)
+	s, err := ParseDatafeed(doc)
+	if err != nil {
+		t.Fatalf("ParseDatafeed: %v", err)
+	}
+	if s.ByCallsign["CCA1"].Known {
+		t.Fatal("pilot: latitude present but longitude entirely missing; Known must require BOTH, not either")
+	}
+	if s.ByCallsign["ZSHA_CTR"].Known {
+		t.Fatal("controller: longitude present but latitude entirely missing; Known must require BOTH, not either")
+	}
+}
+
+// TestALargeButValidSnapshotLineIsNotTruncated 钉住 sc.Buffer(...) 那一行
+// （Mutant D）。
+//
+// bufio.Scanner 不设置这个的话，默认单行上限是 64KB（bufio.MaxScanTokenSize）；
+// can-fsd 一个繁忙 FIR 的全量快照很容易超过这个数字，同时远小于
+// maxEventBytes 的 8MB。删掉这一行之后，第一份快照本身就会在每次连接时
+// 触发 bufio.ErrTooLong，永远连不上——而症状只是"一直连不上"，不会指向
+// "缓冲区"这个真正原因。
+func TestALargeButValidSnapshotLineIsNotTruncated(t *testing.T) {
+	// 造一份 100KB 出头、结构仍然合法的快照：填充进一个未知字段不影响解析
+	// （json.Unmarshal 默认忽略不认识的键），只影响它的字节数。
+	pad := strings.Repeat("A", 100<<10)
+	big := fmt.Sprintf(
+		`{"pilots":[{"callsign":"CCA1","cid":"1","latitude":30.0,"longitude":120.0,"altitude":10000,"padding":%q}],"controllers":[],"atis":[]}`,
+		pad)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", big)
+		fl.Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("a snapshot line just over 64KB (bufio's default max) but far under the 8MB limit never came up — the scanner's buffer cap is missing or too small")
+	}
+	cancel()
+	<-done
+}
+
+// TestKeepAlivesDoNotResetTheFailureCounter 钉住"空行只有真带了事件才该
+// 分发"（Mutant F）。
+//
+// can-fsd 每 15 秒发一次 ": keepalive\n\n"——一条注释行，跟着一个空行
+// （已核对 can-fsd/internal/api/events.go 的 fmt.Fprint(w, ": keepalive\n\n")）。
+// 空行是事件边界，只有 len(data) > 0 时才该分发；把这个判断错改成"总是
+// 分发"，每个 keepalive 自己的空行都会走进 applyEvent("message", nil)，
+// 命中 default 分支返回 nil（"忽略未知事件"），而这个 nil 被 stream() 当成
+// "这一轮成功"去清零 consecutiveFailures——于是一串解不开的 update 只要
+// 中间夹着 keepalive 就永远凑不满 5 次连续失败。这是 Task 5 的故障模式从
+// 侧门走了回来，所以给它复审要求的"最锋利"的测试：交替发送解不开的
+// update 和 keepalive，断言最终仍然降级。
+func TestKeepAlivesDoNotResetTheFailureCounter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		for r.Context().Err() == nil {
+			io.WriteString(w, ": keepalive\n\n")
+			fl.Flush()
+			fmt.Fprint(w, "event: update\ndata: {\"pilots\":[]}\n\n") // 数组，解析失败
+			fl.Flush()
+			time.Sleep(2 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		cancel()
+		<-done
+		t.Fatal("the feed never came up")
+	}
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			cancel()
+			<-done
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("a stream of unparsable updates interleaved with keepalives never made the feed degraded; a keepalive's blank line must not reset the failure counter")
+}
+
+// TestABadStatusFailsFastNotViaTheWatchdog 钉住"状态码检查必须在开始读 body
+// 之前生效"（Mutant G）。
+//
+// 一个 404（写错的 feed 地址）或 401（吊销的凭证）应该在连接建立的那一刻
+// 就失败——can-fsd 永远不会用非 200 状态码开始推流。把状态检查放宽到
+// ">= 500" 的话，4xx 会被当成"打开了一条正常的流"继续往下读；如果那具
+// body 什么都不发，失败就只能靠 feedIdleTimeout 兜底——一个写错的 URL
+// 或者吊销的凭证，报错会晚上 30 秒，而且报的是"流静默"而不是"状态码不对"。
+//
+// 用服务端自己观察到"客户端断开连接"花了多久来当信号：正确实现应该在
+// 状态检查那一行就 return，defer resp.Body.Close() 几乎立刻断开连接；
+// 阉割版本要撑到 feedIdleTimeout（这里调小到 2 秒，仍然明显大于状态检查
+// 该花的时间）才会断。
+func TestABadStatusFailsFastNotViaTheWatchdog(t *testing.T) {
+	orig := feedIdleTimeout
+	feedIdleTimeout = 2 * time.Second
+	defer func() { feedIdleTimeout = orig }()
+
+	serverSawDone := make(chan time.Duration, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		w.WriteHeader(http.StatusNotFound)
+		// 必须显式 Flush：不这样做，状态行留在服务端的缓冲区里，客户端的
+		// http.DefaultClient.Do(req) 根本不会返回——连状态码检查都走不到，
+		// 这不是在测状态码分支，是在测连接建立本身。
+		w.(http.Flusher).Flush()
+		// 故意什么都不发——如果客户端把这当成一条正常的流，唯一能让它
+		// 结束的就是看门狗。
+		<-r.Context().Done()
+		select {
+		case serverSawDone <- time.Since(start):
+		default:
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+
+	select {
+	case elapsed := <-serverSawDone:
+		if elapsed > 500*time.Millisecond {
+			t.Fatalf("the client gave up after %v; a 404 must fail immediately on the status check, not wait for the %v idle watchdog", elapsed, feedIdleTimeout)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the server never saw the client disconnect within 3s — the status check for a 404 is not failing fast")
+	}
+	cancel()
+	<-done
 }

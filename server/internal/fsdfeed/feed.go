@@ -23,19 +23,11 @@ import (
 )
 
 // reconnectDelay 是 SSE 连接断开或建立失败后，重试前的等待时间。
-//
-// 是变量而不是常量，只为了测试能把它调小——生产代码不要改它。没有这个
-// 开关，任何要观察"断线之后是否真的重连"的测试都得真的等 5 秒。
-var reconnectDelay = 5 * time.Second
+const reconnectDelay = 5 * time.Second
 
 // maxEventBytes 是单个 SSE 事件的上限。超过这个尺寸的 datafeed 意味着
 // 上游出了问题，而不是网络大了一点。
-//
-// 是变量而不是常量，只为了测试能把它调小去驱动"持续超限"这条路径，不用
-// 真的传几十 MB 数据——生产代码不要改它。传给 sc.Buffer 的初始缓冲区固定
-// 是 64<<10，bufio.Scanner 的文档保证有效上限是"max 和 cap(buf) 里较大的
-// 那个"，所以调小这个变量不会意外让单行日常大小的事件触发 ErrTooLong。
-var maxEventBytes = 8 << 20
+const maxEventBytes = 8 << 20
 
 // feedIdleTimeout 是流静默多久算作已经死掉。can-fsd 每秒推一次
 // （它的 feedPushInterval = 1s），所以 30 秒的静默只可能是连接被黑洞化了
