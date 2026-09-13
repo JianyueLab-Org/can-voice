@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -568,17 +569,34 @@ func TestPingIsAnsweredWithPong(t *testing.T) {
 // 断开会话是错的答案：一个发错一帧的客户端会被踢下线，而它的语音链路本来
 // 好端端的。这里同时证明这条断言的前提——会话在那之后**确实还活着**，
 // 靠的是紧接着一个正常 SUB 仍然拿得到 SUBACK。
+//
+// 连 JSON 都不是的帧走的是和未知类型同一条路径，所以它同样换来一条 NOTICE。
+// 那条 NOTICE 的 Reason 里**不能**出现对端发来的字节：报文可以有几十 KB，
+// 原样回显既没必要也没好处。
 func TestAnUndecodableControlFrameDoesNotKillTheSession(t *testing.T) {
 	addr, priv, _ := testServer(t)
 	c := connect(t, addr, "1000", 8, priv)
 
-	if err := control.WriteFrame(c.st, []byte("this is not json")); err != nil {
+	garbage := "this is not json"
+	if err := control.WriteFrame(c.st, []byte(garbage)); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
 	b, _ := control.Encode(&control.Sub{RX: []uint32{118000}})
 	if err := control.WriteFrame(c.st, b); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
+
+	n := readNotice(t, c, "an undecodable frame must be answered too")
+	if n.Kind != control.KindUnknownMessage {
+		t.Fatalf("NOTICE.Kind = %q, want %q", n.Kind, control.KindUnknownMessage)
+	}
+	if n.Reason == "" {
+		t.Fatal("NOTICE.Reason is empty; a server that cannot say what it disliked is as hard to debug as silence")
+	}
+	if strings.Contains(n.Reason, garbage) {
+		t.Fatalf("NOTICE.Reason = %q echoes the frame back; it must carry the type string, not the client's bytes", n.Reason)
+	}
+
 	resp, err := control.ReadFrame(c.st)
 	if err != nil {
 		t.Fatalf("the session died on an undecodable frame: %v", err)
@@ -878,35 +896,126 @@ func TestAcceptReportsAListenerFailureRatherThanReturningNil(t *testing.T) {
 	}
 }
 
-// TestAnUnknownMessageTypeDoesNotDisconnectTheClient 记录的是**当前行为**，
-// 不是一个已经定下来的协议决定。
+// TestAnUnknownMessageTypeGetsANoticeAndKeepsTheSession 钉住这条协议决定的两半。
+// 它们互为对方的前提，所以在同一条测试里（这条是原来那个只钉"不断开"的加强版）。
 //
-// control.Decode 对未知的 type 刻意报错（而不是静默忽略），readControl 收到这个
-// 错误之后记一条 Debug 然后 continue——**不断开**。于是一个比服务端新一个协议版本
-// 的客户端是降级，不是掉线。
+// **不断开**：一个比服务端新一个协议版本的客户端应该降级，不该掉线——而且断开是
+// 不对称的，服务端没法解释为什么，客户端看到的只是掉线，于是它重连、重发。
 //
-// 控制方还没有裁决这是不是最终行为（见 task-9 报告 Fix round 1 第 7 条），所以
-// 这条测试只是把现状钉下来，免得它在没人注意的时候漂走。
-func TestAnUnknownMessageTypeDoesNotDisconnectTheClient(t *testing.T) {
+// **但也不静默**：客户端发了一条消息、什么都没发生、又不知道为什么，是这个项目
+// 在别处明确拒绝的失败形态（SubAck.RejectedXC 就是为这条原则存在的）。所以回一条
+// NOTICE，Kind 是 unknown_message，Reason 是那个**类型字符串**而不是原始报文。
+func TestAnUnknownMessageTypeGetsANoticeAndKeepsTheSession(t *testing.T) {
 	addr, priv, _ := testServer(t)
 	c := connect(t, addr, "1000", 8, priv)
 
-	if err := control.WriteFrame(c.st, []byte(`{"type":"SOMETHING_FROM_THE_FUTURE"}`)); err != nil {
+	if err := control.WriteFrame(c.st, []byte(`{"type":"NOPE"}`)); err != nil {
 		t.Fatalf("WriteFrame: %v", err)
 	}
-	b, _ := control.Encode(&control.Sub{RX: []uint32{118000}})
-	if err := control.WriteFrame(c.st, b); err != nil {
-		t.Fatalf("WriteFrame: %v", err)
+
+	n := readNotice(t, c, "an unknown message type must be answered")
+	if n.Kind != control.KindUnknownMessage {
+		t.Fatalf("NOTICE.Kind = %q, want %q", n.Kind, control.KindUnknownMessage)
 	}
-	resp, err := control.ReadFrame(c.st)
+	// Reason 是类型字符串，不是原始报文——报文可能有几十 KB，回显它没有用处。
+	if n.Reason != "NOPE" {
+		t.Fatalf("NOTICE.Reason = %q, want the type string %q", n.Reason, "NOPE")
+	}
+
+	// 另一半：会话还活着。PING/PONG 证明的是"服务端还在读这条流"，
+	// 比"连接还没关"强。
+	if pong := ping(t, c); pong.T != 42 {
+		t.Fatalf("PONG.T = %d, want the 42 we sent — the session died on an unknown message type", pong.T)
+	}
+}
+
+// TestTheNoticeBudgetForUndecodableFramesIsBounded 钉住那条 NOTICE 不是无限的。
+//
+// 回 NOTICE 走的是控制流，而 readControl 在同一个 goroutine 里读和写：一个只发
+// 不读的对端能让 QUIC 的流级流控把写顶住，那条会话就此不再读任何东西，从外面看
+// 却完全正常。上限把这条路堵死。
+//
+// 这是一条否定式断言（"第 9 条不来"），所以它自带前提的证明：预算之内的
+// noticeBudget 条必须一条不少地收到，否则"没有更多了"可能只是因为一条都没有。
+func TestTheNoticeBudgetForUndecodableFramesIsBounded(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+
+	const extra = 2
+	for i := 0; i < noticeBudget+extra; i++ {
+		if err := control.WriteFrame(c.st, []byte(`{"type":"NOPE"}`)); err != nil {
+			t.Fatalf("WriteFrame %d: %v", i, err)
+		}
+	}
+
+	for i := 0; i < noticeBudget; i++ {
+		n := readNotice(t, c, fmt.Sprintf("notice %d of %d is inside the budget", i+1, noticeBudget))
+		if n.Kind != control.KindUnknownMessage {
+			t.Fatalf("notice %d: Kind = %q, want %q", i+1, n.Kind, control.KindUnknownMessage)
+		}
+	}
+
+	// 超出预算的那两条必须换来静默：紧接着的 PING 的应答必须**就是** PONG，
+	// 中间不能再夹着 NOTICE。
+	if pong := ping(t, c); pong.T != 42 {
+		t.Fatalf("PONG.T = %d, want 42", pong.T)
+	}
+}
+
+// replyWait 是等一条应答的上限。
+//
+// 必须有：这几条测试断言的正是"服务端会回点什么"，而一个不回的服务端会让
+// ReadFrame 永远阻塞——红是红了，红出来的却是整包超时后的 goroutine dump，
+// 而不是那一句说明错在哪的话。实测过：把回 NOTICE 那一步删掉，没有这个截止
+// 时间就是 `panic: test timed out after 1m0s`。
+const replyWait = 3 * time.Second
+
+// readNotice 读下一帧并要求它是 NOTICE。
+func readNotice(t *testing.T, c *client, why string) *control.Notice {
+	t.Helper()
+	_ = c.st.SetReadDeadline(time.Now().Add(replyWait))
+	defer func() { _ = c.st.SetReadDeadline(time.Time{}) }()
+	raw, err := control.ReadFrame(c.st)
 	if err != nil {
-		t.Fatalf("the session died on an unknown message type: %v — a client one protocol version ahead would be dropped rather than degraded", err)
+		t.Fatalf("%s, but the read failed: %v — the session may have been dropped instead", why, err)
 	}
-	m, err := control.Decode(resp)
+	m, err := control.Decode(raw)
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if _, ok := m.(*control.SubAck); !ok {
-		t.Fatalf("got %T, want *control.SubAck", m)
+	n, ok := m.(*control.Notice)
+	if !ok {
+		t.Fatalf("%s: got %T, want *control.Notice", why, m)
 	}
+	return n
+}
+
+// ping 发一个 PING 并要求**下一帧**就是它的 PONG。
+//
+// 拿它做"会话还活着"的证明，比再发一个 SUB 强一点：它同时证明中间没有夹别的帧，
+// 而那正是预算那条测试要的。
+func ping(t *testing.T, c *client) *control.Pong {
+	t.Helper()
+	b, err := control.Encode(&control.Ping{T: 42})
+	if err != nil {
+		t.Fatalf("Encode PING: %v", err)
+	}
+	if err := control.WriteFrame(c.st, b); err != nil {
+		t.Fatalf("WriteFrame PING: %v", err)
+	}
+	_ = c.st.SetReadDeadline(time.Now().Add(replyWait))
+	defer func() { _ = c.st.SetReadDeadline(time.Time{}) }()
+	raw, err := control.ReadFrame(c.st)
+	if err != nil {
+		t.Fatalf("the session did not answer a PING: %v", err)
+	}
+	m, err := control.Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	pong, ok := m.(*control.Pong)
+	if !ok {
+		t.Fatalf("after PING got %T, want *control.Pong", m)
+	}
+	return pong
 }

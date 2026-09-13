@@ -92,8 +92,17 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	// Write 永远阻塞在流控上——和一言不发是同一种 slowloris，只是换了一步。
 	_ = st.SetWriteDeadline(deadline)
 
-	sess, err := handshake(st, conn, cfg, r)
+	// 每条会话一个有界发送队列。把 SessionOpts.Send 直接接到 conn.SendDatagram 上
+	// 是不行的：那个函数在 quic-go 自己的 32 帧队列满时**阻塞**，而 router.Fanout
+	// 串行遍历听众——一个上行拥塞的客户端会卡住整条频率的扇出。见 outbound.go。
+	//
+	// 建在这里而不是 handshake 里面，是因为收尾要用到它：握手失败和正常结束两条
+	// 退出路径都必须停掉排空 goroutine，否则每条连接漏一个。
+	out := newOutbound(conn.SendDatagram)
+
+	sess, err := handshake(st, conn, cfg, r, out.enqueue)
 	if err != nil {
+		out.stop()
 		// 详细错误只进服务端日志。发给对端的是粗粒度的稳定代码——
 		// 这个对端还没有通过鉴权，告诉他"是签名错还是 base64 错"
 		// 只会帮他调试伪造，对正当客户端没有任何用处。
@@ -117,8 +126,21 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	_ = st.SetWriteDeadline(time.Time{})
 	slog.Info("session opened", "session", sess.ID, "cid", sess.CID, "peer", conn.RemoteAddr().String())
 	defer func() {
+		// 顺序要紧，两头都有理由：
+		//
+		// 先 Remove 再 stop——反过来的话，摘除之前最后被扇进来的那几帧会静静地
+		// 留在一条已经没人排空的队列里，而它们很可能正是带 FlagLast 的尾帧，
+		// 对端的 RX 指示灯就此一直亮着。
+		//
+		// stop 之后**不等** exited：排空 goroutine 这时可能正卡在 SendDatagram 里，
+		// 而把它叫醒的是外层那条 `defer conn.CloseWithError`——它排在这条 defer
+		// 后面。等在这里就是死锁。
 		r.Remove(sess.ID)
-		slog.Info("session closed", "session", sess.ID, "cid", sess.CID)
+		out.stop()
+		// 丢帧总数跟着会话一起收口：一次拥塞在过程中只按 dropReportEvery 汇报，
+		// 这一行是那条会话的结论。
+		slog.Info("session closed", "session", sess.ID, "cid", sess.CID,
+			"dropped", out.dropped())
 	}()
 
 	go readDatagrams(ctx, conn, r, sess.ID)
@@ -126,7 +148,11 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 }
 
 // handshake 要求第一条消息必须是 HELLO，验签通过后登记会话。
-func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Router) (*router.Session, error) {
+//
+// send 是下行数据面的入口，由调用方给（生产路径上是 outbound 队列的 enqueue）。
+// 刻意不在这里自己去接 conn.SendDatagram：那样队列就只有 handshake 拿得到，
+// 而停掉它是 handleConn 的收尾职责。
+func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Router, send func([]byte)) (*router.Session, error) {
 	b, err := control.ReadFrame(st)
 	if err != nil {
 		return nil, err
@@ -154,11 +180,9 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 		// 全网扇出排队等它。
 		MaxTX: claims.MaxTX,
 		MaxRX: cfg.MaxRX,
-		Send: func(p []byte) {
-			// datagram 发送失败不是错误：它本来就是不可靠的，
-			// 丢了就丢了，下一帧 20 毫秒后就到。
-			_ = conn.SendDatagram(p)
-		},
+		// 入队，不是直接发。所有权在这里移交：Fanout 已经给每个听众 append 出
+		// 一份新缓冲，队列不再拷贝一次，调用方交出去之后不得再碰它。
+		Send: send,
 		Close: func() {
 			// 同一个 CID 再次登录时，router 用这个回调把旧连接断开。
 			// 不断的话，那位成员会在最长一个 MaxIdleTimeout 里有两条会话
@@ -223,8 +247,22 @@ func reasonFor(err error) string {
 	}
 }
 
+// noticeBudget 是每条会话为"解不开的帧"回 NOTICE 的条数上限，之后转为静默。
+//
+// 有上限的理由不是日志噪音，是**写会阻塞读**：回 NOTICE 走的是控制流，而这条流
+// 上没有写截止时间（握手过了就清掉了）。一个只管发、从不读的对端会让 QUIC 的流
+// 级流控把 WriteFrame 顶住，而 WriteFrame 和 ReadFrame 在同一个 goroutine 里——
+// 这条会话会不再读任何东西，从外面看却完全正常。8 条 NOTICE 每条不到一百字节，
+// 离任何一个流控窗口都远得很，所以有了这个上限它就永远不可能是卡住的那一方。
+//
+// （SUBACK/PONG 有同样的形状且没有上限——那是既有问题，不在本任务范围内，
+// 但至少这里不要再开一条更便宜的路：一帧 `{"type":"x"}` 换一条 NOTICE。）
+const noticeBudget = 8
+
 // readControl 处理握手之后的控制面消息。
 func readControl(st quic.Stream, r *router.Router, sess *router.Session) {
+	// 每条会话一份预算，随连接一起消失。
+	notices := noticeBudget
 	for {
 		b, err := control.ReadFrame(st)
 		if err != nil {
@@ -235,6 +273,17 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) {
 			// Debug 而不是 Warn：对端可以无限发垃圾帧，Warn 会把日志刷满，
 			// 而这既不是服务端的问题、也不需要运维介入。
 			slog.Debug("undecodable control frame", "session", sess.ID, "error", err)
+			// 但要告诉对端一声。不断开（见 control.KindUnknownMessage），也不静默：
+			// 发出去了、什么都没发生、还不知道为什么，是这个项目在别处明确拒绝的
+			// 失败形态。
+			if notices > 0 {
+				notices--
+				sendUnknownNotice(st, b)
+				if notices == 0 {
+					slog.Info("this session has spent its notice budget for undecodable frames, going quiet",
+						"session", sess.ID, "budget", noticeBudget)
+				}
+			}
 			continue
 		}
 		switch v := m.(type) {
@@ -275,6 +324,27 @@ func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, 
 			// 会刷满日志，而它并不是服务端的问题。
 			slog.Debug("dropped an inbound packet", "session", id, "error", err)
 		}
+	}
+}
+
+// sendUnknownNotice 回一条"这一帧我解不开"。
+//
+// Reason 里放的是**类型字符串**，不是原始报文：报文可能有几十 KB，而且把对端
+// 发来的字节原样回显没有任何用处。连 JSON 都不是的帧没有类型可回，用一个固定的
+// 记号代替——那个位置绝不能留空，"服务端说不出是哪里不对"和静默一样难查。
+//
+// 这不是放大攻击面：QUIC 面向连接且验证过地址，NOTICE 只回到同一条**已鉴权**的
+// 连接上，到不了第三方那里。
+func sendUnknownNotice(st quic.Stream, frame []byte) {
+	reason := control.TypeOf(frame)
+	if reason == "" {
+		reason = "unparseable"
+	}
+	if out, err := control.Encode(&control.Notice{
+		Kind:   control.KindUnknownMessage,
+		Reason: reason,
+	}); err == nil {
+		_ = control.WriteFrame(st, out)
 	}
 }
 

@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestDecodeDispatchesOnTypeField(t *testing.T) {
@@ -206,5 +208,57 @@ func TestDecodeDistinguishesMalformedJSONFromUnknownType(t *testing.T) {
 
 	if malformedErr.Error() == unknownErr.Error() {
 		t.Fatalf("the two error messages must not read identically: %q", malformedErr.Error())
+	}
+}
+
+// TestTypeOfCapsWhatComesBackFromThePeer 钉住那个长度上限。
+//
+// TypeOf 的返回值会被原样回给对端（NOTICE 的 Reason）并写进日志，而它的内容
+// 完全由对端决定，长度上限是 MaxFrame（64 KB）。没有这个上限，一帧
+// `{"type":"<64 KB>"}` 就换来一条 64 KB 的 NOTICE 和一行 64 KB 的日志——
+// 一个一字节换几万字节的放大器。
+//
+// 顺带钉住截断落在 rune 边界上：切在多字节字符中间会留下非法 UTF-8，
+// json.Marshal 把它换成 U+FFFD，读日志的人只会更糊涂。
+func TestTypeOfCapsWhatComesBackFromThePeer(t *testing.T) {
+	// 前提：正常长度的类型名原样返回。没有这一句，下面那条"被截短了"
+	// 在一个永远返回空串的实现下也会通过。
+	if got := TypeOf([]byte(`{"type":"NOPE"}`)); got != "NOPE" {
+		t.Fatalf("TypeOf = %q, want %q", got, "NOPE")
+	}
+
+	long := strings.Repeat("A", MaxFrame/2)
+	b, err := json.Marshal(map[string]string{"type": long})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got := TypeOf(b)
+	if len(got) > MaxTypeLen {
+		t.Fatalf("TypeOf returned %d bytes for a %d byte type field; it must cap at %d", len(got), len(long), MaxTypeLen)
+	}
+	if got == "" {
+		t.Fatal("TypeOf returned nothing at all; the point is to name the type, just not at any length")
+	}
+
+	// 多字节：每个字符 3 字节，所以 MaxTypeLen=32 不是字符边界的整数倍。
+	wide := strings.Repeat("界", MaxFrame/8)
+	b, err = json.Marshal(map[string]string{"type": wide})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got = TypeOf(b)
+	if len(got) > MaxTypeLen {
+		t.Fatalf("TypeOf returned %d bytes, want at most %d", len(got), MaxTypeLen)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("TypeOf cut a multi-byte rune in half: %q", got)
+	}
+
+	// 不是 JSON、或者没有 type 字段：返回空串，由调用方决定那时候说什么。
+	if got := TypeOf([]byte("this is not json")); got != "" {
+		t.Fatalf("TypeOf on a non-JSON frame = %q, want an empty string", got)
+	}
+	if got := TypeOf([]byte(`{"t":"NOPE"}`)); got != "" {
+		t.Fatalf("TypeOf on a frame with no type field = %q, want an empty string", got)
 	}
 }

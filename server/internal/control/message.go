@@ -3,6 +3,7 @@ package control
 import (
 	"encoding/json"
 	"fmt"
+	"unicode/utf8"
 )
 
 // Hello 是客户端的第一条消息。Follow 只有观察员模式用——
@@ -66,7 +67,48 @@ const (
 	KindTxDenied         = "tx_denied"
 	KindRangeUnavailable = "range_unavailable"
 	KindSubRejected      = "sub_rejected"
+	// KindUnknownMessage 是"你发来的这一帧我解不开"。
+	//
+	// 服务端**不**因此断开——一个比它新一个协议版本的客户端应该降级，不该掉线，
+	// 而且断开是不对称的：服务端没法解释为什么，在客户端看来就是掉线，于是它重连、
+	// 重发，形成无限循环。但也不能就这么静默：客户端发了一条消息、什么都没发生、
+	// 又不知道为什么，正是 Decode 对未知类型报错而不是静默忽略要躲开的那种失败
+	// 形态，只是从服务端内部挪到了线上。先例就在本协议里——SubAck.RejectedXC 存在
+	// 的全部理由就是"一个设好了交叉耦合却不生效、又不知道为什么的管制员，比一个
+	// 被明确拒绝的管制员糟糕得多"。同一条原则。
+	KindUnknownMessage = "unknown_message"
 )
+
+// MaxTypeLen 是 TypeOf 返回的类型字符串上限。
+//
+// 有上限，是因为这个字符串会被原样回给对端（放进 NOTICE 的 Reason）并写进日志，
+// 而它的内容完全由对端决定：一个 64 KB 的 type 字段（MaxFrame 允许）不设限就会
+// 变成一条 64 KB 的 NOTICE 和一行 64 KB 的日志。真实的类型名都是十来个字符。
+const MaxTypeLen = 32
+
+// TypeOf 只取出一个控制帧的 type 判别字段，不解码其余部分。
+//
+// 给"解不开的帧"那条路径用：要告诉对端**是哪一个类型**没被认出来，而不是把它
+// 发来的原始报文原样回显——报文可能很长，回显它既没必要也没好处。帧根本不是
+// JSON、或者没有 type 字段时返回空串，调用方自己决定那时候说什么。
+func TypeOf(b []byte) string {
+	var probe struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return ""
+	}
+	if len(probe.Type) <= MaxTypeLen {
+		return probe.Type
+	}
+	// 按 rune 边界截断：从中间切断一个多字节字符会留下非法 UTF-8，
+	// json.Marshal 会把它换成 U+FFFD，读日志的人只会更糊涂。
+	cut := MaxTypeLen
+	for cut > 0 && !utf8.RuneStart(probe.Type[cut]) {
+		cut--
+	}
+	return probe.Type[:cut]
+}
 
 // Ping/Pong 只用来测 RTT；保活由 QUIC 自己做。
 type Ping struct {

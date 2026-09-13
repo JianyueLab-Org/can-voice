@@ -115,12 +115,12 @@ func TestAFailedReadyWriteDoesNotLeakTheSession(t *testing.T) {
 	cfg := Config{PublicKey: pub, MaxRX: 32}
 
 	victim := &stubConn{}
-	if _, err := handshake(helloStream(t, priv, "1000", true), victim, cfg, r); err == nil {
+	if _, err := handshake(helloStream(t, priv, "1000", true), victim, cfg, r, func([]byte) {}); err == nil {
 		t.Fatal("handshake must fail when READY cannot be written")
 	}
 
 	// 同一个 CID 再登录一次。
-	if _, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r); err != nil {
+	if _, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r, func([]byte) {}); err != nil {
 		t.Fatalf("the second handshake failed: %v", err)
 	}
 
@@ -140,10 +140,10 @@ func TestTheEvictionProbeUsedByTheLeakTestActuallyFires(t *testing.T) {
 	cfg := Config{PublicKey: pub, MaxRX: 32}
 
 	victim := &stubConn{}
-	if _, err := handshake(helloStream(t, priv, "1000", false), victim, cfg, r); err != nil {
+	if _, err := handshake(helloStream(t, priv, "1000", false), victim, cfg, r, func([]byte) {}); err != nil {
 		t.Fatalf("first handshake: %v", err)
 	}
-	if _, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r); err != nil {
+	if _, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r, func([]byte) {}); err != nil {
 		t.Fatalf("second handshake: %v", err)
 	}
 	if !waitClosed(victim, 3*time.Second) {
@@ -169,13 +169,13 @@ func TestTheEvictionCloseDoesNotBlockTheNewHandshake(t *testing.T) {
 	defer close(release) // 收尾时放掉那个卡住的 goroutine
 
 	victim := &stubConn{block: release}
-	if _, err := handshake(helloStream(t, priv, "1000", false), victim, cfg, r); err != nil {
+	if _, err := handshake(helloStream(t, priv, "1000", false), victim, cfg, r, func([]byte) {}); err != nil {
 		t.Fatalf("first handshake: %v", err)
 	}
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r)
+		_, err := handshake(helloStream(t, priv, "1000", false), &stubConn{}, cfg, r, func([]byte) {})
 		done <- err
 	}()
 
