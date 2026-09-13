@@ -1,0 +1,18 @@
+[Unit]
+Description=can-voice P1 connectivity probe server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/can-voice-probe-server \
+  -addr :64739 \
+  -cert /etc/letsencrypt/live/probe.ceruleanavi.net/fullchain.pem \
+  -key /etc/letsencrypt/live/probe.ceruleanavi.net/privkey.pem
+Restart=always
+RestartSec=5
+DynamicUser=yes
+# 证书由 certbot 拥有；DynamicUser 读不到，所以给读权限组。
+SupplementaryGroups=ssl-cert
+
+[Install]
+WantedBy=multi-user.target
