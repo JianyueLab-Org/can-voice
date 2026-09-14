@@ -87,6 +87,36 @@ func TestQualityTreatsAZeroRangeAsOutOfRange(t *testing.T) {
 	}
 }
 
+// TestQualityNeverReportsZeroWhileStillInRange 钉住衰减带最外侧那道夹紧。
+//
+// 比值落在 (1.09941, 1.1) 这一段时，`frac × 255` 四舍五入就是 0——而
+// `(0, true)` 是一个自相矛盾的答案："这一包要投递，信号质量为零"。
+// 下游把它当真的话，wire 包那条写给接收端的承诺（下行 qual 恒在 1–255，
+// 0 不可能来自服务端）当场作废，而接收端那条"最弱信号"分支本来就不该存在。
+//
+// 这一段此前**一个用例都没有**：0.95 在中间，1.1 和 1.11 在外面，
+// 整个夹紧分支删掉整套测试照绿。上界取 1.09999 而不是无限贴近 1.1，
+// 是因为再往上浮点就分辨不出来了；下界那一档（raw 恰好在 0.5 附近）
+// 交给上面的线性测试。
+func TestQualityNeverReportsZeroWhileStillInRange(t *testing.T) {
+	// 1.09941 是 `round(frac×255)` 由 1 掉到 0 的那个点：
+	// frac = (1.1-ratio)/0.3，255×frac < 0.5 ⟺ ratio > 1.1 - 0.3/510 = 1.0994117…
+	for _, ratio := range []float64{1.09942, 1.0997, 1.09999} {
+		q, in := Quality(ratio*100, 100)
+		if !in {
+			t.Fatalf("d/range=%.5f must still be in range — the cutoff is %.2f", ratio, CutoffRatio)
+		}
+		// 前提：这组输入真的落在"不夹就会是 0"的那一段里。少了这一句，
+		// 把 ratio 写成 1.05 也能让下面那句绿，而那时夹紧删掉照样绿。
+		if raw := (CutoffRatio - ratio) / (CutoffRatio - FullRatio) * 255; raw >= 0.5 {
+			t.Fatalf("premise: d/range=%.5f gives an unclamped quality of %.4f, which already rounds to 1 or more — this input cannot tell the clamp from its absence", ratio, raw)
+		}
+		if q != 1 {
+			t.Fatalf("Quality at d/range=%.5f = %d, want 1 — inside the cutoff the answer may not be 0: (0, true) says \"deliver this packet, signal strength zero\", and it breaks the wire-level promise that a downlink qual is never 0", ratio, q)
+		}
+	}
+}
+
 func TestDistanceBetweenKnownAirports(t *testing.T) {
 	// ZSSS (31.198, 121.336) 到 ZBAA (40.080, 116.585) 约 581 海里。
 	got := DistanceNM(31.198, 121.336, 40.080, 116.585)

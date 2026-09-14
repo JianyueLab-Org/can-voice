@@ -979,6 +979,77 @@ func TestAGoodEventResetsTheFailureCounter(t *testing.T) {
 	<-done
 }
 
+// TestFiveConsecutiveUnusableEventsAreEnoughToDropTheStream 钉住那个**数字**。
+//
+// 上面两条钉的是"连续解不开会降级"和"好事件会清零"，两条都没钉住阈值：把
+// maxConsecutiveParseFailures 从 5 改成 400，它们**照样全绿**——一条是不停地发
+// 坏事件发满三秒（400 个也够），另一条是坏好交替（400 也不会触发）。于是
+// "五次就放弃"悄悄退化成"早晚会放弃"，而那两者对运维是完全不同的东西：
+// 前者几百毫秒内就重连并取回一份新快照，后者能让快照冻在几分钟前的样子。
+//
+// 所以这里的 5 是**写死的字面值，不是那个常量**。用常量写这个循环的话，
+// 改常量会连同测试一起变大，正好把要抓的东西抓不到。它钉的是策略的上界：
+// 五条不能用的事件必须足够。下界由上面那条交替测试守着（阈值若是 1，
+// 那条会在第一个坏事件上降级，好事件永远到不了，它就红了）。
+//
+// 手法是有前提、无计时的：握手之后先等它真的上线（degraded 清掉），
+// 由测试 close(proceed) 放行，服务端这才发**恰好五条**坏事件然后握住连接不放。
+// 重连之后的那条连接什么都不发，所以 degraded 一旦置上就不会再被新快照清掉，
+// 观察不存在竞态。窗口 5 秒，远小于 30 秒的空闲看门狗——看门狗要是先响，
+// 它也会把 degraded 置上，那会让阈值变大的实现假绿。
+func TestFiveConsecutiveUnusableEventsAreEnoughToDropTheStream(t *testing.T) {
+	proceed := make(chan struct{})
+	var served atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if served.Add(1) > 1 {
+			// 重连之后一个字节都不发：没有新快照，degraded 就留在那里。
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", realSnapshotEvent)
+		fl.Flush()
+		select {
+		case <-proceed:
+		case <-r.Context().Done():
+			return
+		}
+		for i := 0; i < 5; i++ {
+			fmt.Fprint(w, "event: update\ndata: {\"pilots\":[]}\n\n") // 数组，不是 feedDelta 的对象
+			fl.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := NewFeed(srv.URL)
+	done := make(chan struct{})
+	go func() { defer close(done); f.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+
+	// 前提：它真的上线过。少了这一句，下面的 degraded 可能只是"还没连上"。
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) && f.Degraded() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if f.Degraded() {
+		t.Fatal("the feed never came up; this test cannot say anything about the failure threshold")
+	}
+	close(proceed)
+
+	deadline = time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.Degraded() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("five consecutive unusable events did not drop the stream: the threshold has grown, and \"give up after five\" has quietly become \"give up eventually\" — a feed that keeps the connection while every event is unusable serves a frozen snapshot for as long as the threshold lasts")
+}
+
 // TestACallsignMovingBetweenCollectionsIsNotLost 钉住"先删后改"（Step 0a）。
 //
 // diffFeeds 的不相交只在**单个集合内**成立。一个呼号从 pilots 消失、同一 tick

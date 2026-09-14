@@ -323,3 +323,40 @@ func TestAnUnverifiedPayloadIsNeverParsed(t *testing.T) {
 		t.Fatalf("Verify failed with %q, want the signature check to be what rejected it — this token's payload was fed to encoding/json before anything proved the bytes came from can-api", err)
 	}
 }
+
+// TestVerifyRejectsATokenWithNoCid 钉住空 cid 那道闸。
+//
+// 它此前**零覆盖**：整段 `if c.CID == "" { … }` 删掉，全套测试照绿。而
+// router.Add 明确依赖它——那里有一段
+// `if o.CID != "" { … 顶号 … }`，注释写着"空 CID 不参与顶号。它不该出现
+// （鉴权拒绝空 CID）"。也就是说这道闸一旦没了，router 不会报错，它会**按设计
+// 放行**：每一条空 cid 的会话都登记成功、互不顶替，而顶号正是这套设计里
+// 防"一个人两条会话听见自己回声"的那一条。一张 `{"cid":""}` 的 token
+// （签发方少填一个字段就是）于是能开任意多条并存的会话。
+//
+// 落在 ErrInvalid 而不是 ErrExpired：换一张新票不会让它长出 cid 来。
+func TestVerifyRejectsATokenWithNoCid(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	tok, err := Sign(priv, Claims{Rating: 5, MaxTX: 8, Exp: now.Add(60 * time.Second).Unix()})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	// 前提：除了 cid 以外这张票完全合格——所以红的时候只可能是这道闸没了。
+	if _, err := Verify(pub, mustSign(t, priv, Claims{CID: "1000", Rating: 5, MaxTX: 8, Exp: now.Add(60 * time.Second).Unix()}), now); err != nil {
+		t.Fatalf("premise: the same token with a cid does not verify either: %v", err)
+	}
+	_, err = Verify(pub, tok, now)
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Verify with an empty cid = %v, want ErrInvalid — router.Add deliberately skips eviction for an empty cid (\"it must not happen, auth refuses it\"), so without this gate every such session is admitted and none can evict another", err)
+	}
+}
+
+func mustSign(t *testing.T, priv ed25519.PrivateKey, c Claims) string {
+	t.Helper()
+	tok, err := Sign(priv, c)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return tok
+}
