@@ -52,6 +52,22 @@ type SubAck struct {
 	// 必须回报：一个设好了交叉耦合却不生效、又不知道为什么的管制员，比一个
 	// 被明确拒绝的管制员糟糕得多。
 	RejectedXC [][2]uint32 `json:"rejected_xc"`
+
+	// RejectedTruncated 说的是"Rejected 这张单子本身不全"。
+	//
+	// Rejected 有上界（maxRejected），声明本身也有上界（router 的
+	// declarationLimit），两道上界都是必要的——不设界的 ACK 会超过 64 KiB 的
+	// 帧上限而根本发不出去，那比截断糟得多。但**截断了却不说**是这套协议在
+	// 别处反复拒绝的那种失败：实测声明 1000 个频率、MaxRX=32 时，有 712 条
+	// 拒绝无标记、无日志地消失，而客户端拿到的 ACK 看起来完全正常。
+	//
+	// 客户端该怎么用它：为 true 时不要拿 Rejected 当权威记录，改用差集
+	// `声明 − (ack.RX ∪ ack.TX)` 自己算——那个式子任何时候都成立，Rejected
+	// 只是"拒了三两个"这种常见情况下的便利字段。
+	//
+	// omitempty 是有意的：它只在真发生时出现在线上，所以常规 SUBACK 的字节数
+	// 一个都没变（maxRejected 那段 64 KiB 的算术依赖 ACK 的尺寸）。
+	RejectedTruncated bool `json:"rejected_truncated,omitempty"`
 }
 
 // Notice 是服务端的单向通知，Kind 取值见 KindTxDenied 等常量。

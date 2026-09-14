@@ -15,8 +15,7 @@ type stubLocator struct {
 	degraded bool
 }
 
-func (s stubLocator) Snapshot() fsdfeed.Snapshot { return s.snap }
-func (s stubLocator) Degraded() bool             { return s.degraded }
+func (s stubLocator) Positions() (fsdfeed.Snapshot, bool) { return s.snap, s.degraded }
 
 // recorder 是一个记录收到了什么的会话。
 type recorder struct {

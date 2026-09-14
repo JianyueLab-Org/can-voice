@@ -185,16 +185,38 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	// 去重和排序都在截断**之后**做：反过来的话，为了截断先得把整份列表过一遍，
 	// 那正是要避免的工作量。
 	var excessTX, excessRX []uint32
-	sub.TX, excessTX = truncateDeclaration(sub.TX, limit)
-	sub.RX, excessRX = truncateDeclaration(sub.RX, limit)
+	var unreportedTX, unreportedRX int
+	sub.TX, excessTX, unreportedTX = truncateDeclaration(sub.TX, limit)
+	sub.RX, excessRX, unreportedRX = truncateDeclaration(sub.RX, limit)
 
+	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX)
+	unreported += unreportedTX + unreportedRX
+	ack.RejectedTruncated = unreported > 0
+
+	// 日志在**锁外**。这条路径持的是全服务端那一把写锁，而 stderr 是会卡的
+	// （docker 的 json-file 驱动、journald 背压），在锁里记日志等于让全网的
+	// 扇出排队等一次写日志。Add 的顶号日志出于同一个理由也在锁外。
+	if unreported > 0 {
+		slog.Info("a subscription's rejection list did not fit and was truncated",
+			"session", id, "reported", len(ack.Rejected), "unreported", unreported)
+	}
+	return ack
+}
+
+// subscribeLocked 是 Subscribe 持锁的那一段，返回 ACK 和**没能回报出去的**
+// 被拒频率个数。
+//
+// 拆出来不是为了好看：调用方要在锁外记一条日志，而 `defer r.mu.Unlock()` 会
+// 让函数体里任何一句日志都落在锁内。把锁的范围变成一个函数，是这里唯一一种
+// 不依赖"defer 是 LIFO、所以这两条的注册顺序有讲究"这类细节的写法。
+func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32) (control.SubAck, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	ack := control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}, RejectedXC: [][2]uint32{}}
 	s, ok := r.sessions[id]
 	if !ok {
-		return ack
+		return ack, 0
 	}
 
 	// 先把旧的索引全部摘掉，再按新声明重建。
@@ -265,10 +287,12 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	slices.Sort(ack.Rejected)
 	// 截断在排序之后，所以留下的是确定的那一批（数值最小的 maxRejected 个），
 	// 而不是"碰巧先算出来的"。
+	unreported := 0
 	if len(ack.Rejected) > maxRejected {
+		unreported = len(ack.Rejected) - maxRejected
 		ack.Rejected = ack.Rejected[:maxRejected]
 	}
-	return ack
+	return ack, unreported
 }
 
 // Listeners 返回订阅了该频率的会话。
@@ -369,18 +393,25 @@ func (r *Router) declarationLimit(id SessionID) (int, bool) {
 	return n * declaredSlack, true
 }
 
-// truncateDeclaration 把一份声明截到 limit，并返回**有界的**超出部分。
+// truncateDeclaration 把一份声明截到 limit，返回**有界的**超出部分，以及
+// 连那一截都装不下、因此谁也不会知道的个数。
 //
 // 超出部分只回报最多 maxRejected 个，理由和 normaliseXC 的上界分支一字不差：
 // SubAck 要经 control.WriteFrame 发出去，那里是 64 KiB 的上限，原样抄回九千个
 // 频率会让 ACK 超限而根本发不出去——客户端于是什么都收不到，比截断更糟。
 // 多抄的部分反正也会被末尾的 maxRejected 砍掉，抄它只是白干一趟 O(n) 的活，
 // 而这个函数存在的全部理由就是不干那趟活。
-func truncateDeclaration(xs []uint32, limit int) (kept, excess []uint32) {
+//
+// 第三个返回值是那趟活的**账**。截断本身是对的，"截断了却不说"不是：实测声明
+// 1000 个频率、MaxRX=32 时有 712 条拒绝无标记、无日志地消失，而客户端拿到的
+// ACK 看起来完全正常。数出来交给调用方，它负责在 ACK 上立一个标记、在日志里
+// 写一行。
+func truncateDeclaration(xs []uint32, limit int) (kept, excess []uint32, unreported int) {
 	if len(xs) <= limit {
-		return xs, nil
+		return xs, nil, 0
 	}
-	return xs[:limit], xs[limit:min(len(xs), limit+maxRejected)]
+	end := min(len(xs), limit+maxRejected)
+	return xs[:limit], xs[limit:end], len(xs) - end
 }
 
 // maxXCPairs 是一份声明里最多处理多少个耦合对。

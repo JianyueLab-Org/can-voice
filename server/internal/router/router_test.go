@@ -752,7 +752,7 @@ func TestTruncateDeclarationBoundsWhatItKeepsAndWhatItReports(t *testing.T) {
 		xs = append(xs, uint32(i))
 	}
 
-	kept, excess := truncateDeclaration(xs, 128)
+	kept, excess, unreported := truncateDeclaration(xs, 128)
 	if len(kept) != 128 {
 		t.Fatalf("kept %d, want the first 128", len(kept))
 	}
@@ -767,13 +767,18 @@ func TestTruncateDeclarationBoundsWhatItKeepsAndWhatItReports(t *testing.T) {
 	if excess[0] != 128 {
 		t.Fatalf("excess starts at %d, want the first entry past the limit (128)", excess[0])
 	}
+	// 装不下的那一截要**数出来**。截断是对的，"截断了却不说"不是——那正是
+	// 客户端拿着一份看起来完全正常的 ACK、却少了几百条拒绝的那种失败。
+	if want := len(xs) - 128 - maxRejected; unreported != want {
+		t.Fatalf("unreported = %d, want %d — the entries that fit in neither the kept list nor the excess list are exactly the ones nothing else will ever mention", unreported, want)
+	}
 
 	// 对照：没超界的声明必须原样通过，而且**不报**任何超出。一个无条件截断的
 	// 实现光靠上面那半是抓不住的。
 	short := xs[:10]
-	kept, excess = truncateDeclaration(short, 128)
-	if len(kept) != 10 || len(excess) != 0 {
-		t.Fatalf("a declaration inside the limit came back as %d kept / %d excess, want 10 / 0", len(kept), len(excess))
+	kept, excess, unreported = truncateDeclaration(short, 128)
+	if len(kept) != 10 || len(excess) != 0 || unreported != 0 {
+		t.Fatalf("a declaration inside the limit came back as %d kept / %d excess / %d unreported, want 10 / 0 / 0", len(kept), len(excess), unreported)
 	}
 }
 
@@ -854,5 +859,70 @@ func TestAnOverlongDeclarationDoesNotAllocateInProportionToIt(t *testing.T) {
 	}
 	if len(ack.Rejected) > maxRejected {
 		t.Fatalf("Rejected = %d entries, want at most %d", len(ack.Rejected), maxRejected)
+	}
+}
+
+// TestATruncatedRejectionListSaysSoOnTheWire 钉住 SubAck.RejectedTruncated。
+//
+// 实测的形状：MaxRX=32 的会话声明 1000 个频率。两道上界依次动手——
+// declarationLimit 把 1000 截到 128（并且只把其中 256 个的超出部分抄进回报，
+// 剩下 616 个连抄都没抄），maxRejected 又把最终的 352 条拒绝砍到 256。
+// 于是 **712 条拒绝无标记、无日志地消失**，而客户端拿到的 ACK 看起来完全正常：
+// 它没有任何办法知道这份清单是不全的。
+//
+// 截断本身是对的（不设界的 ACK 超过 64 KiB 就根本发不出去，客户端什么都收不到，
+// 那更糟）。要改的是"不说"。
+func TestATruncatedRejectionListSaysSoOnTheWire(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 8, MaxRX: 32, Send: func([]byte) {}})
+
+	rx := make([]uint32, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		rx = append(rx, uint32(118000+i))
+	}
+	ack := r.Subscribe(s.ID, control.Sub{RX: rx})
+
+	if len(ack.Rejected) != maxRejected {
+		t.Fatalf("Rejected has %d entries, want it capped at maxRejected (%d) — the premise of this test is that the list really did overflow", len(ack.Rejected), maxRejected)
+	}
+	if !ack.RejectedTruncated {
+		lost := len(rx) - len(ack.RX) - len(ack.Rejected)
+		t.Fatalf("RejectedTruncated is false while %d of the %d declared frequencies are in neither ack.RX nor ack.Rejected; the client has no way to tell this list is incomplete", lost, len(rx))
+	}
+
+	// 客户端拿到这个标记之后该走的那条路：差集。它任何时候都成立，而 Rejected
+	// 只是"拒了三两个"这种常见情况下的便利字段。这里顺带证明差集确实补得回来。
+	accepted := map[uint32]struct{}{}
+	for _, f := range ack.RX {
+		accepted[f] = struct{}{}
+	}
+	for _, f := range ack.TX {
+		accepted[f] = struct{}{}
+	}
+	missing := 0
+	for _, f := range rx {
+		if _, ok := accepted[f]; !ok {
+			missing++
+		}
+	}
+	if want := len(rx) - len(ack.RX); missing != want {
+		t.Fatalf("the difference set recovers %d rejected frequencies, want %d", missing, want)
+	}
+}
+
+// TestAnOrdinaryPartialRejectionIsNotMarkedTruncated 是上一条的反例。
+//
+// 没有它，一个无条件把 RejectedTruncated 设成 true 的实现照样全绿——而那样
+// 客户端每收到一份 ACK 都要去算差集，等于把这个标记变回噪音。
+func TestAnOrdinaryPartialRejectionIsNotMarkedTruncated(t *testing.T) {
+	r := New()
+	s := r.Add(SessionOpts{CID: "1000", MaxTX: 2, MaxRX: 4, Send: func([]byte) {}})
+
+	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{118000, 118100, 118200, 118300, 118400, 118500}})
+	if len(ack.Rejected) != 2 {
+		t.Fatalf("Rejected = %v, want the two frequencies past MaxRX=4 — the premise is that something really was rejected", ack.Rejected)
+	}
+	if ack.RejectedTruncated {
+		t.Fatal("RejectedTruncated is true for an ACK that lists every rejected frequency; the flag means \"this list is incomplete\", and a client that sees it on every ACK will stop reading it")
 	}
 }

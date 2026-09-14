@@ -286,3 +286,40 @@ func TestTheDetailedReasonSurvivesTheWrapping(t *testing.T) {
 		t.Fatalf("err = %q no longer names the clock; the detail is what the server log needs", err)
 	}
 }
+
+// TestAnUnverifiedPayloadIsNeverParsed 钉住 Verify 里那个顺序：**先验签名，
+// 再解析载荷**。
+//
+// 这条性质是本包最被称道的那个，而在此之前没有任何东西守着它：把
+// json.Unmarshal 那三行提到 ed25519.Verify 前面，整套测试照绿——别的测试要么
+// 用签名合法的 token（两种顺序结果相同），要么用畸形到根本走不到那一步的输入。
+//
+// 探针必须**同时**满足两件事，一件都不能少：签名验不过，而载荷是解析器会拒绝
+// 的东西。于是两种顺序给出不同的答案，而答案是唯一看得见的区别——
+//
+//	正确顺序：token signature does not verify   （压根没碰过那些字节）
+//	颠倒顺序：token payload is not valid JSON   （先把攻击者可控的字节喂给了解析器）
+//
+// 为什么值得钉：验签之前 token 里的每个字节都是攻击者随手可写的输入，而
+// encoding/json 是一大片解析代码。今天它很稳，但"在验证之前不要解析不可信
+// 输入"是一条一旦丢掉就再也没人会注意到的纪律——因为两种写法在所有正常输入上
+// 的行为完全一致。
+func TestAnUnverifiedPayloadIsNeverParsed(t *testing.T) {
+	pub, _ := keys(t)
+
+	// 载荷是合法 base64url，但解出来不是 JSON；签名长度合法，但是一串零，
+	// 对任何公钥都验不过。
+	body := enc.EncodeToString([]byte("this is not JSON at all"))
+	tok := body + "." + enc.EncodeToString(make([]byte, ed25519.SignatureSize))
+
+	_, err := Verify(pub, tok, time.Unix(1757000000, 0))
+	if err == nil {
+		t.Fatal("Verify accepted a token with an all-zero signature")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("Verify returned %v, want it wrapped in ErrInvalid", err)
+	}
+	if !strings.Contains(err.Error(), "signature does not verify") {
+		t.Fatalf("Verify failed with %q, want the signature check to be what rejected it — this token's payload was fed to encoding/json before anything proved the bytes came from can-api", err)
+	}
+}

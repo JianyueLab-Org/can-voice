@@ -16,9 +16,18 @@ import (
 )
 
 // Locator 提供位置快照。抽成接口是为了让扇出的测试不必碰网络。
+//
+// **一次调用同时给出两个值，不是两个方法。** 分成 Snapshot() 和 Degraded()
+// 的话，扇出要分两次拿锁，中间可以插进一次整体替换：拿到的会是"新的快照配
+// 旧的降级位"或者反过来。最难看的那一半是后者——feed 刚刚断线，Degraded()
+// 已经是 true 了，而上一次调用拿到的还是那份完整快照，于是这一轮扇出既不
+// 全放行、又按一份马上就要作废的位置做了射程过滤。
+//
+// 这正是 Fanout 自己"快照只取一次"那段注释里的同一条理由（见下面），只是那
+// 一段说的是跨频率、这一段说的是跨字段。同一个不变量落实在两个地方，不能只
+// 落实一处。
 type Locator interface {
-	Snapshot() fsdfeed.Snapshot
-	Degraded() bool
+	Positions() (fsdfeed.Snapshot, bool)
 }
 
 // SetLocator 装上位置来源。不装等于永久降级：全部扇出。
@@ -165,7 +174,7 @@ func (r *Router) positions() (fsdfeed.Snapshot, bool) {
 		// 可能先于 SetLocator。
 		return fsdfeed.Snapshot{}, true
 	}
-	return l.Snapshot(), l.Degraded()
+	return l.Positions()
 }
 
 // lookup 找一个会话的位置。观察员模式下 Follow 指向它跟随的飞机，

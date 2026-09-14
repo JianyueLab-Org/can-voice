@@ -458,6 +458,22 @@ func (f *Feed) Snapshot() Snapshot {
 	return f.snap
 }
 
+// Positions 一次取回快照和降级标记，**共用同一次加锁**。
+//
+// 这是 router.Locator 要求的那一个方法，而它之所以是一个方法而不是两个：分开
+// 调 Snapshot() 和 Degraded() 的话，两次 RLock 之间可以插进 applyEvent 的一次
+// 整体替换，调用方于是拿到"新快照配旧降级位"或者反过来。后者更难看——feed 刚
+// 断线，degraded 已经是 true，而快照还是断线前那份完整的，于是那一轮扇出既没
+// 全放行，又按一份马上作废的位置做了射程过滤。
+//
+// Snapshot 和 Degraded 留着不动：它们是 fsdfeed 自己的公开接口，测试和别的
+// 调用方还在用，而且各自单独读一个值本来就没有撕裂问题。
+func (f *Feed) Positions() (Snapshot, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.snap, f.degraded
+}
+
 // Degraded 报告位置信息当前是否不可用（尚未连上，或连接已经断开）。
 // 为 true 时调用方必须跳过射程过滤而全部扇出——退化成 Mumble 时代的
 // 全球互通行为，而不是把所有人都屏蔽掉；宁可放得太宽也不要谁都听不见。
