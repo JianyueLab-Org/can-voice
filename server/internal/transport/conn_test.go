@@ -655,6 +655,7 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 		{"ReasonTokenExpired", ReasonTokenExpired, "token_expired"},
 		{"ReasonTokenInvalid", ReasonTokenInvalid, "token_invalid"},
 		{"ReasonRefused", ReasonRefused, "refused"},
+		{"ReasonProtoUnsupported", ReasonProtoUnsupported, "proto_unsupported"},
 		{"ReasonEvicted", ReasonEvicted, "evicted"},
 		{"ReasonControlWriteStalled", ReasonControlWriteStalled, "control_write_stalled"},
 		{"ReasonControlReadStalled", ReasonControlReadStalled, "control_read_stalled"},

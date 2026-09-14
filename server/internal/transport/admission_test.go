@@ -273,9 +273,15 @@ func TestAHelloDeclaringAnotherProtocolVersionIsRefused(t *testing.T) {
 	if !ok {
 		t.Fatalf("a HELLO declaring proto 99999 got %T, want *control.Bye — the field is documented as a cause of close code 1 and must actually be read", m)
 	}
-	// refused 而不是 token_*：换一张票不会让客户端变成另一个版本。
-	if bye.Reason != ReasonRefused {
-		t.Fatalf("Reason = %q, want %q — telling a client of the wrong version to fetch a new token sends it into a loop that cannot succeed", bye.Reason, ReasonRefused)
+	// proto_unsupported，既不是 token_*，也不是笼统的 refused。
+	//
+	// 不是 token_*：换一张票不会让客户端变成另一个版本，那条路走不通。
+	// 也不是 refused：**动作**确实一样（都别原样重试），但这个网络的客户端是
+	// 装在成员机器上的桌面程序，这一条要让它说得出"请更新客户端"。
+	// "被拒绝"会把用户送去查密码、去换票、去怀疑自己的账号——三件事一件都
+	// 帮不上忙，他目录里那个旧 exe 才是原因。
+	if bye.Reason != ReasonProtoUnsupported {
+		t.Fatalf("Reason = %q, want %q — %q sends the user off to check their password; only this string lets the client say \"update me\"", bye.Reason, ReasonProtoUnsupported, ReasonRefused)
 	}
 	if got := r.SessionCount(); got != before {
 		t.Fatalf("sessions = %d, want %d — a refused handshake must not leave a session behind", got, before)

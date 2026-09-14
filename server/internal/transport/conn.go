@@ -391,9 +391,10 @@ const errFirstMessageMustBeHello = helloError("the first control message must be
 
 // errProtoUnsupported 是"HELLO 里的 proto 不是本服务端讲的那个版本"。
 //
-// 走 reasonFor 的 default 分支（ReasonRefused），这是对的：那个代码的意思是
-// "别原样重试"，而一个版本对不上的客户端换多少张票都一样——它要做的是升级。
-// README 的关闭码表里，"协议版本不合"本来就列在码 1 底下。
+// 它有自己的原因串（ReasonProtoUnsupported），不走 default 那个 ReasonRefused。
+// 两者的**动作**一样——都别原样重试，换多少张票都一样——但对人说的话不一样：
+// 这个网络的客户端是装在成员机器上的桌面程序，版本太旧的用户该看到"请更新
+// 客户端"，而"被拒绝"会把他送去查密码。详见 codes.go。
 const errProtoUnsupported = helloError("the client declared a control-plane protocol version this server does not speak")
 
 // errFollowNotACallsign 是"观察员跟随的那个呼号不是一个呼号"。
@@ -476,7 +477,11 @@ const errRatingTooLow = helloError("the member's rating is below the minimum for
 //
 // 但也不能一律"refused"：正当客户端需要知道"去换一张新 token 再试"
 // 和"别试了"的区别，否则它只能盲目重试，而重试会撞上限速。
-// 所以恰好两级，都是稳定字符串，客户端可以拿去做判断。
+//
+// 恰好三级，都是稳定字符串，客户端可以拿去做判断：**去换票**（token_expired）、
+// **去更新客户端**（proto_unsupported）、**别试了**（token_invalid / refused）。
+// 第二级的粒度不违反上面那条保密理由：proto 是客户端**自己声明**的字段，
+// 把它说回去没有泄露任何东西，而它对应的人类动作和另外两级都不一样。
 //
 // 返回值同时是 BYE 的 reason 和 CONNECTION_CLOSE 的 reason phrase，取值见
 // codes.go 的 Reason* 常量——那里也写了为什么必须以后者为准。
@@ -486,6 +491,10 @@ func reasonFor(err error) string {
 		return ReasonTokenExpired
 	case errors.Is(err, auth.ErrInvalid):
 		return ReasonTokenInvalid
+	case errors.Is(err, errProtoUnsupported):
+		// 第三级，不是粗粒度的例外：动作和 refused 一样，但这一条要让客户端
+		// 说得出"请更新"。见 ReasonProtoUnsupported。
+		return ReasonProtoUnsupported
 	default:
 		return ReasonRefused
 	}

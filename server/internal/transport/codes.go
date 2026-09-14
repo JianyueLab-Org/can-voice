@@ -81,6 +81,25 @@ const (
 	// 合法 JSON"只对伪造 token 的人有用。详细原因留在服务端日志里。
 	ReasonRefused = "refused"
 
+	// ReasonProtoUnsupported：HELLO 里的 proto 不是本服务端讲的控制面版本。
+	// 配 CloseHandshakeRefused。
+	//
+	// 动作和 ReasonRefused 一样（都别原样重试），**但对人说的话不一样**，
+	// 这就是它值得单独占一个串的全部理由：这个网络的客户端是装在成员机器上的
+	// 桌面程序，一个版本太旧的用户该看到"请更新客户端"。告诉他"被拒绝"会把他
+	// 送去查密码、去 can-api 换票、去问自己的账号是不是出了问题——那三件事
+	// 一件都帮不上忙，他客户端目录里那个旧 exe 才是原因。
+	//
+	// 上一轮把它映射到 ReasonRefused，那与当时的文档一致因而不算错；但那份
+	// 文档写的是"两级粗粒度代码"，而那两级分的是"去换票"和"别试了"——
+	// 版本太旧属于第三种：**去更新**。粗粒度的理由（对端尚未鉴权，细节只帮
+	// 伪造者）在这里不成立：proto 是客户端自己声明的，告诉他他自己说了什么
+	// 不合用，没有泄露任何东西。
+	//
+	// 它和 ALPN 是同一件事的两层：ALPN 对不上时 TLS 握手就失败了，根本走不到
+	// 这里；这一条挡的是"ALPN 抄对了、控制面却按旧版编"的客户端。
+	ReasonProtoUnsupported = "proto_unsupported"
+
 	// ReasonEvicted：同一个 CID 在别处登录，这一条被顶掉了。配 CloseEvicted。
 	//
 	// 它此前是一句内联的英文句子（"another session signed in with this account"）
