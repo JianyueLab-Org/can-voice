@@ -22,7 +22,6 @@ impl Drop for Server {
 /// can-voice     服务端二进制  go build -o target/e2e/can-voice ./server/cmd/can-voice
 /// cert.pem key.pem           由 ca.der 签出的叶证书与私钥（服务端用）
 /// ca.der                     一次性的根证书（客户端当额外根证书用）
-/// ca.der                   同一张证书的 DER（客户端当额外根证书用）
 /// api.pub  token.txt         Ed25519 公钥与一张签好的 token
 /// ```
 ///
@@ -61,6 +60,29 @@ fn start_server(port: u16) -> Option<(Server, String)> {
     Some((Server(child), format!("127.0.0.1:{port}")))
 }
 
+/// 连接，并且在"夹具过期了"这个情况下把话说清楚。
+///
+/// 夹具签的 token 有效期是 5 分钟（`auth.maxTokenLifetime` 是 10 分钟，
+/// 短有效期是这套设计里唯一的吊销机制）。所以在本机隔一会儿再跑，
+/// 拿到的是一条 `token_expired`——而它看起来像密钥不配对，会把人送去查
+/// `api.pub`。CI 里不会遇到：夹具是紧挨着测试生成的。
+async fn connect_or_explain(cfg: can_voice_client::Config) -> can_voice_client::VoiceClient {
+    match can_voice_client::VoiceClient::connect(cfg).await {
+        Ok(c) => c,
+        Err(e) => {
+            let text = format!("{e}");
+            if text.contains("TokenExpired") || text.contains("token_expired") {
+                panic!(
+                    "the fixture token has expired (they are minted for 5 minutes) — \
+                     regenerate it with\n  go run ./server/cmd/can-voice-e2e-fixture\n\
+                     underlying error: {text}"
+                );
+            }
+            panic!("connect: {text}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_client_can_hand_shake_subscribe_and_receive() {
     let Some((_srv, addr)) = start_server(64738) else {
@@ -82,9 +104,7 @@ async fn a_client_can_hand_shake_subscribe_and_receive() {
         output_device: None,
         extra_roots: vec![root],
     };
-    let client = can_voice_client::VoiceClient::connect(cfg)
-        .await
-        .expect("connect");
+    let client = connect_or_explain(cfg).await;
     let mut events = client.events();
 
     client.set_subscription(can_voice_proto::control::Sub {
@@ -167,9 +187,7 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
         output_device: None,
         extra_roots: vec![root],
     };
-    let client = can_voice_client::VoiceClient::connect(cfg)
-        .await
-        .expect("connect");
+    let client = connect_or_explain(cfg).await;
     let mut events = client.events();
 
     // MaxTX 是 8，这里声明 10 个。
