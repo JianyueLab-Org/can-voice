@@ -18,3 +18,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
 tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

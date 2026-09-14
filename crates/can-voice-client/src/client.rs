@@ -28,6 +28,26 @@ pub struct Config {
     pub follow: String,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// 额外信任的根证书，DER 编码。**生产留空。**
+    ///
+    /// 这**不是**"跳过校验"的开关，而且这里永远不会有那样一个开关：一个
+    /// `insecure` 标志一旦存在就会有人在生产里打开它，而这条链路上跑的是成员的
+    /// 网络密码。传进来的证书仍然要过完整的链校验，只是多了一个根。
+    /// 端到端测试用它信任自签的服务端证书——在测试里和"不校验"一样方便，
+    /// 在生产里天差地别。
+    pub extra_roots: Vec<Vec<u8>>,
+}
+
+impl Config {
+    pub(crate) fn trust_roots(&self) -> crate::conn::TrustRoots {
+        if self.extra_roots.is_empty() {
+            crate::conn::TrustRoots::Platform
+        } else {
+            crate::conn::TrustRoots::Extra(
+                self.extra_roots.iter().cloned().map(Into::into).collect(),
+            )
+        }
+    }
 }
 
 /// 库向上层报告的事件。
@@ -123,7 +143,7 @@ impl VoiceClient {
             &cfg.token,
             &cfg.client_id,
             &cfg.follow,
-            conn::TrustRoots::Platform,
+            cfg.trust_roots(),
         )
         .await?;
 
@@ -316,6 +336,7 @@ mod tests {
             follow: String::new(),
             input_device: None,
             output_device: None,
+            extra_roots: Vec::new(),
         };
         let err = VoiceClient::connect(cfg).await.expect_err("must not pretend to succeed");
         assert!(matches!(err, Error::BadAddress(_)), "got {err:?}");
@@ -333,6 +354,7 @@ mod tests {
             follow: "bad callsign".into(),
             input_device: None,
             output_device: None,
+            extra_roots: Vec::new(),
         };
         let err = VoiceClient::connect(cfg).await.expect_err("must reject the callsign");
         assert!(

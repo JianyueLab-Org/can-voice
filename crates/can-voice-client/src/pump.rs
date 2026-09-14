@@ -1,23 +1,388 @@
-//! 后台任务：把控制面、订阅状态机与事件流接起来。Task 11 填完整。
+//! 后台任务：把控制面、订阅状态机、数据面与事件流接起来。
+//!
+//! # 掉线之后做什么，不是由重连策略一个人说了算
+//!
+//! [`crate::conn::ReconnectPolicy`] 只数连续失败，而**被顶号之后的重连是成功的**，
+//! 一成功计数器就清零。所以每一次掉线都要先经 [`crate::conn::classify`] 读 QUIC 的
+//! 应用层关闭码：码 2（顶号）和码 3（协议违规）是终态，重连只会把同一件事
+//! 无限重演，而且每一轮都"成功"。
 
 use crate::client::{Command, Config, Event};
-use crate::conn::Link;
+use crate::conn::{self, Disposition, Link, LinkState, ReconnectPolicy};
+use crate::session::{Limits, SubscriptionState};
+use can_voice_proto::control::{self, Message};
+use can_voice_proto::wire::Header;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
-/// 后台任务的骨架。完整的收发与重连在 Task 11。
+/// 主循环的节拍。它负责三件定时的事：让发言超时、发 PING、报 Health。
+const TICK: Duration = Duration::from_millis(200);
+
+/// 多久没有新帧就认为这次发言结束了。
+///
+/// **`FLAG_LAST` 是尽力而为的优化，不是熄灯的机制**：它走不可靠数据报会丢，
+/// 而且服务端在听众飞出射程时**不打招呼就停发**——那种情况下它保证到不了。
+/// 只认尾帧的实现会让 RX 指示灯亮一整条会话。
+const RX_SILENCE: Duration = Duration::from_millis(600);
+
+/// PING 的间隔。
+const PING_EVERY: Duration = Duration::from_secs(5);
+
+/// 一次正在进行的发言。`frames` 与起始时刻都要**实算**——
+/// "每次通话一行、自带时长和帧数"这条日志约定，唯一的生产者填 0 的话就只剩一句空话。
+struct Talkspurt {
+    frames: u32,
+    started: Instant,
+    last_seen: Instant,
+}
+
+/// 这一条连接是怎么结束的。
+enum Outcome {
+    /// 上层要求关闭。
+    Shutdown,
+    /// 掉线，附带该怎么办。
+    Dropped(Disposition),
+}
+
 pub(crate) async fn run(
-    _cfg: Config,
-    _link: Link,
-    _events: tokio::sync::broadcast::Sender<Event>,
+    cfg: Config,
+    first: Link,
+    events: tokio::sync::broadcast::Sender<Event>,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<Command>,
 ) {
-    while let Some(cmd) = cmds.recv().await {
-        match cmd {
-            Command::Declare(sub) => {
-                tracing::debug!(rx = sub.rx.len(), tx = sub.tx.len(), xc = sub.xc.len(), "declaration queued")
+    let mut policy = ReconnectPolicy::new();
+    // 第一次拨号已经由 `VoiceClient::connect` 做掉了，而且它真的拿到了 READY。
+    policy.may_attempt();
+    policy.on_session_established();
+
+    let mut subs = SubscriptionState::new();
+    let mut state = LinkState::Connecting;
+    let mut link = Some(first);
+
+    loop {
+        let l = match link.take() {
+            Some(l) => l,
+            None => {
+                if !policy.may_attempt() {
+                    emit_state(&events, &mut state, policy.state());
+                    tracing::warn!("giving up on the voice link");
+                    return;
+                }
+                emit_state(&events, &mut state, policy.state());
+                match dial(&cfg).await {
+                    Ok(l) => {
+                        // **只有真的收到 READY 才重置计数。** 拨号返回成功不等于
+                        // 连上了——`conn::connect` 会等到 READY，所以走到这里是安全的。
+                        policy.on_session_established();
+                        l
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "voice connect failed");
+                        continue;
+                    }
+                }
             }
-            Command::Transmit(on) => tracing::debug!(on, "ptt"),
-            Command::Volume { freq_khz, gain } => tracing::debug!(freq_khz, gain, "volume"),
-            Command::Shutdown => return,
+        };
+
+        subs.on_connected(Limits { max_tx: l.max_tx, max_rx: l.max_rx });
+        emit_state(&events, &mut state, LinkState::Online);
+
+        let outcome = pump(l, &mut subs, &events, &mut cmds).await;
+        subs.on_disconnected();
+
+        match outcome {
+            Outcome::Shutdown => {
+                emit_state(&events, &mut state, LinkState::Offline);
+                return;
+            }
+            Outcome::Dropped(Disposition::Reconnect) => {
+                emit_state(&events, &mut state, LinkState::Reconnecting);
+            }
+            Outcome::Dropped(Disposition::Evicted) => {
+                // **终态。** 自动重连会顶掉刚刚顶掉自己的那条会话，对方再重连再
+                // 顶回来，两个客户端无限互顶——而每一轮都"成功"，所以有界重连的
+                // 计数器一次都不会累加。
+                policy.on_evicted();
+                tracing::warn!("this account signed in elsewhere; not reconnecting");
+                emit_state(&events, &mut state, LinkState::Evicted);
+                return;
+            }
+            Outcome::Dropped(Disposition::ProtocolViolation(v)) => {
+                // 终态，理由同上：重连会立刻把同一个 bug 再演一遍。
+                tracing::error!(violation = ?v, "the server says this client broke the protocol");
+                emit_state(&events, &mut state, LinkState::Offline);
+                return;
+            }
+            Outcome::Dropped(Disposition::Refused(reason)) => {
+                // 服务端专门为客户端造了这些串，所以它们要到得了上层，
+                // 而不是死在一行日志里。
+                let _ = events.send(Event::Refused { reason: reason.clone() });
+                tracing::warn!(?reason, "handshake refused");
+                // `token_expired` 是唯一可恢复的一条，但**换票不是这个库能做的事**
+                // ——它拿不到新 token。所以进 Offline，由上层换一张再 connect 一次。
+                emit_state(&events, &mut state, LinkState::Offline);
+                return;
+            }
         }
     }
+}
+
+/// 只在状态真的变了的时候发事件。
+///
+/// 每轮都发一遍会把事件流灌满，而上层没法从中分辨"状态变了"和"心跳到了"。
+fn emit_state(
+    events: &tokio::sync::broadcast::Sender<Event>,
+    current: &mut LinkState,
+    next: LinkState,
+) {
+    if *current != next {
+        *current = next;
+        let _ = events.send(Event::State(next));
+    }
+}
+
+async fn dial(cfg: &Config) -> Result<Link, conn::Error> {
+    let addr = tokio::net::lookup_host(&cfg.server)
+        .await
+        .ok()
+        .and_then(|mut a| a.next())
+        .ok_or_else(|| conn::Error::Io(std::io::Error::other("address could not be resolved")))?;
+    conn::connect(
+        addr,
+        &cfg.server_name,
+        &cfg.token,
+        &cfg.client_id,
+        &cfg.follow,
+        cfg.trust_roots(),
+    )
+    .await
+}
+
+/// 一条连接活着期间的主循环。
+async fn pump(
+    link: Link,
+    subs: &mut SubscriptionState,
+    events: &tokio::sync::broadcast::Sender<Event>,
+    cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+) -> Outcome {
+    let Link { conn: quic, mut control_send, control_recv, .. } = link;
+    // **控制流的读取活在它自己的 task 里**，这里只 `recv()`。直接在 `select!` 里
+    // 调用一个"读长度前缀再读包体"的 future 不是取消安全的：别的分支赢了的时候
+    // 它会在两次读之间被丢掉，已经消费掉的字节回不来，控制流从此错位。
+    let mut control = conn::spawn_control_reader(control_recv);
+
+    let mut talk: HashMap<(u32, u32), Talkspurt> = HashMap::new();
+    let mut ticker = tokio::time::interval(TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    let epoch = Instant::now();
+    let mut last_ping = Instant::now();
+    let mut rtt_ms = 0u32;
+    let mut received = 0u64;
+    let mut unparsable = 0u64;
+
+    loop {
+        // 有待发的声明就先推出去。`SubscriptionState` 保证这是幂等的全量声明，
+        // 而且一连串 UI 操作只会剩下最后那一条。
+        if let Some(sub) = subs.take_pending() {
+            if let Err(e) = conn::write_msg(&mut control_send, &Message::Sub(sub)).await {
+                tracing::warn!(error = %e, "could not push the subscription");
+                return Outcome::Dropped(drop_reason(&quic));
+            }
+        }
+
+        tokio::select! {
+            cmd = cmds.recv() => match cmd {
+                Some(Command::Declare(sub)) => subs.declare(sub),
+                // 采集与播放接的是音频设备，属于 P4 的四个应用。
+                Some(Command::Transmit(on)) => tracing::debug!(on, "ptt"),
+                Some(Command::Volume { freq_khz, gain }) => tracing::debug!(freq_khz, gain, "volume"),
+                Some(Command::Shutdown) | None => {
+                    quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
+                    return Outcome::Shutdown;
+                }
+            },
+
+            msg = control.recv() => match msg {
+                Some(Ok(Message::SubAck(ack))) => {
+                    on_ack(subs, events, ack);
+                }
+                Some(Ok(Message::Pong(p))) => {
+                    let now = epoch.elapsed().as_millis() as i64;
+                    rtt_ms = now.saturating_sub(p.t).clamp(0, u32::MAX as i64) as u32;
+                }
+                Some(Ok(Message::Notice(n))) => {
+                    on_notice(events, n);
+                }
+                Some(Ok(Message::Bye(b))) => {
+                    // BYE **会丢**——真正丢不掉的是关闭码与原因串，它们和关闭
+                    // 原子地一起送达。所以这里只记日志，处置交给 `drop_reason`。
+                    tracing::warn!(reason = %b.reason, "server closed the session");
+                    return Outcome::Dropped(drop_reason(&quic));
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "control stream failed");
+                    return Outcome::Dropped(drop_reason(&quic));
+                }
+                None => {
+                    tracing::warn!("control stream ended");
+                    return Outcome::Dropped(drop_reason(&quic));
+                }
+            },
+
+            dg = quic.read_datagram() => match dg {
+                Ok(bytes) => {
+                    match Header::parse(&bytes) {
+                        Ok((h, _opus)) => {
+                            received += 1;
+                            on_datagram(&mut talk, events, &h);
+                        }
+                        Err(e) => {
+                            unparsable += 1;
+                            tracing::debug!(error = %e, "dropping an unparsable datagram");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "datagram stream ended");
+                    return Outcome::Dropped(conn::classify(&e));
+                }
+            },
+
+            _ = ticker.tick() => {
+                expire_talkspurts(&mut talk, events);
+                if last_ping.elapsed() >= PING_EVERY {
+                    last_ping = Instant::now();
+                    let t = epoch.elapsed().as_millis() as i64;
+                    if conn::write_msg(&mut control_send, &Message::Ping(control::Ping { t })).await.is_err() {
+                        return Outcome::Dropped(drop_reason(&quic));
+                    }
+                    // **掉线必须自己解释。** RTT 和收发计数正是区分"上行真的扛不住"
+                    // 和"抖了一下"的东西，而那两者的处置完全不同。
+                    let _ = events.send(Event::Health {
+                        rtt_ms,
+                        sent: 0,
+                        received,
+                        lost: unparsable,
+                    });
+                }
+            },
+        }
+    }
+}
+
+/// 连接已经没了时，从 quinn 那里读出应用层关闭码。
+fn drop_reason(quic: &quinn::Connection) -> Disposition {
+    match quic.close_reason() {
+        Some(e) => conn::classify(&e),
+        None => Disposition::Reconnect,
+    }
+}
+
+fn on_ack(
+    subs: &mut SubscriptionState,
+    events: &tokio::sync::broadcast::Sender<Event>,
+    ack: control::SubAck,
+) {
+    tracing::debug!(
+        rx = ack.rx.len(),
+        tx = ack.tx.len(),
+        rejected = ack.rejected.len(),
+        truncated = ack.rejected_truncated,
+        "subscription acknowledged"
+    );
+    // 交叉耦合被拒是**另一张单子**：耦合对不在 rx/tx 里，差集公式管不到它。
+    for pair in &ack.rejected_xc {
+        let _ = events.send(Event::XcDenied {
+            a_khz: pair[0],
+            b_khz: pair[1],
+            reason: "not granted".into(),
+        });
+    }
+    subs.on_ack(ack);
+
+    // **按差集分派，不要把 `rejected` 里的每一项都当成 TxDenied。** 一个频率同时
+    // 出现在 `ack.rx` 和 `rejected` 里是正常的（TX 被限额拒了、RX 给了），
+    // 照 `rejected` 派会让一个能听的频率显示成失败；而 `rejected` 本身有上界，
+    // 截断之后基于它的推断全部失效。
+    for f in subs.denied_tx() {
+        let _ = events.send(Event::TxDenied { freq_khz: f, reason: String::new() });
+    }
+    for f in subs.denied_rx() {
+        let _ = events.send(Event::RxDenied { freq_khz: f });
+    }
+}
+
+fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice) {
+    use can_voice_proto::control::notice_kind;
+    if n.kind == notice_kind::TX_DENIED {
+        let _ = events.send(Event::TxDenied { freq_khz: n.freq, reason: n.reason });
+    } else {
+        let _ = events.send(Event::Notice {
+            kind: n.kind,
+            freq_khz: n.freq,
+            reason: n.reason,
+        });
+    }
+}
+
+/// 收到一个数据面包头。
+///
+/// **起播/点灯的判据是"这个 (speaker, freq) 上来了第一个包"，不是 `FLAG_FIRST`。**
+/// `SUB` 是全量声明、立即整体替换，所以管制员在别人说到一半时把一个频率加进台面，
+/// 下一帧就投给他，而那一帧没有首帧位；飞机飞进射程同理。等首帧的实现会让他
+/// 一声不响，直到对方下一次按下 PTT，而服务端日志完全正常。
+fn on_datagram(
+    talk: &mut HashMap<(u32, u32), Talkspurt>,
+    events: &tokio::sync::broadcast::Sender<Event>,
+    h: &Header,
+) {
+    let key = (h.speaker, h.freq_khz);
+    let now = Instant::now();
+    match talk.get_mut(&key) {
+        Some(t) => {
+            t.frames += 1;
+            t.last_seen = now;
+        }
+        None => {
+            talk.insert(key, Talkspurt { frames: 1, started: now, last_seen: now });
+            let _ = events.send(Event::RxStart { freq_khz: h.freq_khz, speaker: h.speaker });
+        }
+    }
+    if h.is_last() {
+        if let Some(t) = talk.remove(&key) {
+            emit_rx_end(events, key, &t);
+        }
+    }
+}
+
+/// 静音超时：尾帧丢了、或者服务端悄悄停发时唯一的出路。
+fn expire_talkspurts(
+    talk: &mut HashMap<(u32, u32), Talkspurt>,
+    events: &tokio::sync::broadcast::Sender<Event>,
+) {
+    let stale: Vec<(u32, u32)> = talk
+        .iter()
+        .filter(|(_, t)| t.last_seen.elapsed() >= RX_SILENCE)
+        .map(|(k, _)| *k)
+        .collect();
+    for key in stale {
+        if let Some(t) = talk.remove(&key) {
+            emit_rx_end(events, key, &t);
+        }
+    }
+}
+
+fn emit_rx_end(
+    events: &tokio::sync::broadcast::Sender<Event>,
+    (speaker, freq_khz): (u32, u32),
+    t: &Talkspurt,
+) {
+    let _ = events.send(Event::RxEnd {
+        freq_khz,
+        speaker,
+        frames: t.frames,
+        secs: t.started.elapsed().as_secs_f32(),
+    });
 }
