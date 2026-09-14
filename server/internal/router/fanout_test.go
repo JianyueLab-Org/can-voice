@@ -747,6 +747,171 @@ func TestCrossCoupleDeliversOneCopyToSomeoneOnBothFrequencies(t *testing.T) {
 	}
 }
 
+// heard 把一个 recorder 收到的包按 (speaker, freq_khz) 分流，值是按到达顺序
+// 排的 seq。这正是契约要求抖动缓冲区建的那张表（wire.Header.Seq），所以下面
+// 几条断言直接对着它写，而不是对着"一共收到几个包"——键是哪一个、以及键里面
+// 是不是一串连号，是两件不同的事，而 H-1 那个缺陷恰好只在后者上露出来。
+func heard(t *testing.T, rec *recorder) map[[2]uint32][]uint16 {
+	t.Helper()
+	out := map[[2]uint32][]uint16{}
+	for _, b := range rec.got {
+		h, _, err := wire.Parse(b)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		k := [2]uint32{h.Speaker, h.FreqKHz}
+		out[k] = append(out[k], h.Seq)
+	}
+	return out
+}
+
+// TestACoupledCopySkipsAFrequencyTheSpeakerAlsoTransmitsOn 钉住耦合扇出的那道扣除。
+//
+// normaliseXC 要求一对耦合的两个频率都在该会话授权后的 TX 集合里，所以声明了
+// XC(A,B) 的人必然在 A 和 B 上都能发；而无线电栈形状的客户端一次 PTT 会给每个
+// TX 频率各发一份上行。不扣的话，只订阅 B 的听众每个音频帧收到两份同号的包。
+func TestACoupledCopySkipsAFrequencyTheSpeakerAlsoTransmitsOn(t *testing.T) {
+	r := New()
+	ctl := newRecorder(t, r, "1000")   // 两个频率都能发，并把它们耦合起来
+	pilot := newRecorder(t, r, "1001") // 只在 121800 上能发
+	onB := newRecorder(t, r, "1002")   // 只听 124550
+
+	r.Subscribe(ctl.sess.ID, control.Sub{
+		RX: []uint32{121800, 124550},
+		TX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	r.Subscribe(pilot.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(onB.sess.ID, control.Sub{RX: []uint32{124550}})
+
+	// 前提一：耦合真的生效了。被拒的话下面的"没收到"平凡为真。
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 124550 {
+		t.Fatalf("premise: coupledWith(121800) = %v, want [124550] — without the coupling nothing below is being tested", got)
+	}
+	// 前提二，也是这组输入唯一能区分两种实现的地方：同一个频率、同一对耦合，
+	// 换一个在 124550 上**没有**发射权的发言者，那份耦合拷贝必须照送。
+	// 少了这一半，"扣掉自己也在发的那个频率"和"耦合整个坏掉"在下面那条断言上
+	// 无法区分。
+	if _, err := r.Fanout(pilot.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(onB.got) != 1 {
+		t.Fatalf("premise: a speaker with no TX on 124550 delivered %d copies there, want 1 — that is the coupled copy the skip rule is an exception to, and without it this test cannot tell the two implementations apart", len(onB.got))
+	}
+	onB.got = nil
+
+	// 前提三：判据是 **TX** 集合，不是 RX 集合。TX ⊆ RX，所以 rx 是个超集，
+	// 写成查 rx 的实现在上面两条断言上和正确实现完全一致。区分它们要一个
+	// "在 124550 上只收不发"的发言者：B 上的听众只有耦合拷贝这一条路拿到他的
+	// 话，他自己不会往 124550 发任何东西。
+	rxOnly := newRecorder(t, r, "1003")
+	r.Subscribe(rxOnly.sess.ID, control.Sub{RX: []uint32{121800, 124550}, TX: []uint32{121800}})
+	if _, err := r.Fanout(rxOnly.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(onB.got) != 1 {
+		t.Fatalf("premise: a speaker who only listens on 124550 delivered %d coupled copies there, want 1 — the gate is the sender's TX set, not their RX set, or everyone monitoring the coupled frequency without transmit rights goes silent on it", len(onB.got))
+	}
+	onB.got = nil
+
+	// 本体：ctl 自己在 121800 上发。它在 124550 上也有发射权，所以按客户端契约
+	// 它会另发一份上行到 124550，耦合拷贝按构造是多余的。
+	if _, err := r.Fanout(ctl.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(onB.got) != 0 {
+		t.Fatalf("a listener on 124550 got %d coupled copies from a speaker who also transmits on 124550, want 0 — that copy plus the speaker's own datagram on 124550 is two packets carrying one seq, which makes the contract's consecutive run per (speaker, freq_khz) false", len(onB.got))
+	}
+}
+
+// TestASinglePTTOnCoupledFrequenciesLeavesAConsecutiveSeqRunOnEachOne 是 H-1
+// 的本体断言，按终审门禁量它的那个办法写：不推理，直接把投出去的包按契约规定的
+// 键分流，看序号是不是一串连号。
+//
+// 坏掉的实现给出的是 7, 7, 8, 8, 9, 9：按到达顺序入队的缓冲区会播两遍（回声），
+// 按 seq 索引的缓冲区会静默丢掉一半（碰巧对了，但契约没规定过）。两个 Rust
+// 实现者会写出不同的东西，而两边都能说自己照契约做了。
+func TestASinglePTTOnCoupledFrequenciesLeavesAConsecutiveSeqRunOnEachOne(t *testing.T) {
+	r := New()
+	ctl := newRecorder(t, r, "1000")
+	onB := newRecorder(t, r, "1001") // 只订阅耦合的那一边
+
+	r.Subscribe(ctl.sess.ID, control.Sub{
+		RX: []uint32{121800, 124550},
+		TX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	r.Subscribe(onB.sess.ID, control.Sub{RX: []uint32{124550}})
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 124550 {
+		t.Fatalf("premise: coupledWith(121800) = %v, want [124550]", got)
+	}
+
+	// 一次 PTT，三个 20 毫秒音频帧。每一帧照无线电栈的做法给**每个** TX 频率
+	// 各发一份上行，两份带同一个 seq（can-audio 的 PTT 独占 VoiceTarget id 1，
+	// 那个 target 装着全部 TX 频道）。三帧而不是一帧：一帧分不出"一串连号"和
+	// "只收到一个号"。
+	for seq := uint16(7); seq <= 9; seq++ {
+		for _, f := range []uint32{121800, 124550} {
+			if _, err := r.Fanout(ctl.sess.ID, packet(f, seq, 0xAA)); err != nil {
+				t.Fatalf("Fanout on %d: %v", f, err)
+			}
+		}
+	}
+
+	got := heard(t, onB)
+	key := [2]uint32{uint32(ctl.sess.ID), 124550}
+	if len(got) != 1 {
+		t.Fatalf("the listener saw %d (speaker, freq_khz) keys, want exactly 1: %v", len(got), got)
+	}
+	want := []uint16{7, 8, 9}
+	if !slices.Equal(got[key], want) {
+		t.Fatalf("seq under %v = %v, want %v — the contract promises a consecutive run per (speaker, freq_khz), and a coupled copy arriving alongside the speaker's own datagram makes it 7, 7, 8, 8, 9, 9", key, got[key], want)
+	}
+}
+
+// TestAListenerOnBothCoupledFrequenciesHearsItOnBothRows 钉住扣除之后**剩下的**
+// 那一份重复，因为它是有意的。
+//
+// 一个 RX 开在两个耦合频率上的无线电栈，本来就该在两行上都听到那次耦合发言。
+// 两份落在两个不同的 (speaker, freq_khz) 键上，是两条独立的流、两个独立的缓冲区，
+// 各自都是连号。写下来是为了让第二个实现者不要把它当成 H-1 的残留去"修"掉——
+// 跨频率去重会让其中一行永远是哑的。
+func TestAListenerOnBothCoupledFrequenciesHearsItOnBothRows(t *testing.T) {
+	r := New()
+	ctl := newRecorder(t, r, "1000")
+	onBoth := newRecorder(t, r, "1001")
+
+	r.Subscribe(ctl.sess.ID, control.Sub{
+		RX: []uint32{121800, 124550},
+		TX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	r.Subscribe(onBoth.sess.ID, control.Sub{RX: []uint32{121800, 124550}})
+	if got := r.coupledWith(121800); len(got) != 1 || got[0] != 124550 {
+		t.Fatalf("premise: coupledWith(121800) = %v, want [124550]", got)
+	}
+
+	for _, f := range []uint32{121800, 124550} {
+		if _, err := r.Fanout(ctl.sess.ID, packet(f, 7, 0xAA)); err != nil {
+			t.Fatalf("Fanout on %d: %v", f, err)
+		}
+	}
+
+	got := heard(t, onBoth)
+	want := map[[2]uint32][]uint16{
+		{uint32(ctl.sess.ID), 121800}: {7},
+		{uint32(ctl.sess.ID), 124550}: {7},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("keys = %v, want %v — one copy per subscribed frequency; deduplicating across frequencies would leave one row of the radio stack permanently silent", got, want)
+	}
+	for k, w := range want {
+		if !slices.Equal(got[k], w) {
+			t.Fatalf("seq under %v = %v, want %v — each subscribed frequency is its own stream with its own jitter buffer, and both carry the same seq because it is one audio frame", k, got[k], w)
+		}
+	}
+}
+
 // TestCoupledTargetsAreVisitedInAscendingOrder 钉住目标频率的顺序。
 //
 // 目标是"主频率在前，耦合频率升序在后"，而这个顺序是客户端可见的：同时订阅了
@@ -1238,6 +1403,112 @@ func TestAMaximalSubStillProducesASendableAck(t *testing.T) {
 	t.Logf("SUBACK is %d bytes (limit %d)", len(out), control.MaxFrame)
 	if len(out) > control.MaxFrame {
 		t.Fatalf("the SUBACK is %d bytes, over the %d byte frame limit — a SUB that was applied would get no ACK at all", len(out), control.MaxFrame)
+	}
+}
+
+// --- 中途加入的听众 ---
+
+// frame 和 packet 一样，只是 flags 由调用方给。发言中间那些帧既没有 FlagFirst
+// 也没有 FlagLast，而下面两条测试要的正是那种帧。
+func frame(freq uint32, seq uint16, flags uint8, opus ...byte) []byte {
+	return append(wire.Header{
+		Ver: wire.Version, Flags: flags, Seq: seq, FreqKHz: freq,
+	}.AppendTo(nil), opus...)
+}
+
+// TestAFrequencyAddedMidTransmissionStartsReceivingOnTheNextFrame 钉住 H-2 的
+// 服务端那一半：SUB 是全量声明、立即整体替换，所以管制员在别人说到一半时把一个
+// 频率加进台面，**下一帧**就投给他——而那一帧没有 FlagFirst。
+//
+// 契约那一侧因此必须写成"从收到的第一个包起算"而不是"从第一个首帧起算"：
+// 照后者实现的客户端会在这里一声不响，直到飞行员下一次按下 PTT，而服务端日志
+// 完全正常。
+func TestAFrequencyAddedMidTransmissionStartsReceivingOnTheNextFrame(t *testing.T) {
+	r := New()
+	pilot := newRecorder(t, r, "1000")
+	ctl := newRecorder(t, r, "1001")
+	r.Subscribe(pilot.sess.ID, control.Sub{TX: []uint32{121800}})
+
+	// 第 1 帧，首帧。管制员还没订阅，所以他没收到——这也是前提：
+	// 他后面收到的那一份必须是加频率之后才来的，不是一直都在的。
+	if _, err := r.Fanout(pilot.sess.ID, frame(121800, 7, wire.FlagFirst, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(ctl.got) != 0 {
+		t.Fatalf("premise: the controller got %d packets before subscribing, want 0", len(ctl.got))
+	}
+
+	// 说到一半，把 121800 加进台面。
+	r.Subscribe(ctl.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 第 2 帧，发言正中间：既没有 FlagFirst 也没有 FlagLast。
+	if _, err := r.Fanout(pilot.sess.ID, frame(121800, 8, 0, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(ctl.got) != 1 {
+		t.Fatalf("the controller got %d packets on the frame after subscribing, want 1 — SUB replaces wholesale and takes effect on the next frame, which is what makes \"wait for FlagFirst\" a bug on the receiving side", len(ctl.got))
+	}
+	h, _, err := wire.Parse(ctl.got[0])
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	// 这一句是这组输入能区分两种实现的那一半：投出去的必须真的是一个**中间帧**。
+	// 少了它，把第 2 帧也标成首帧的实现照样绿，而那正是契约要否定的东西。
+	if h.Flags&wire.FlagFirst != 0 {
+		t.Fatalf("Flags = %#x, want FlagFirst clear — the server relays flags untouched, and a frame delivered to a listener who joined mid-transmission genuinely has no first-frame marker", h.Flags)
+	}
+	if h.Seq != 8 {
+		t.Fatalf("Seq = %d, want 8 — the counter does not restart for a listener who joined late", h.Seq)
+	}
+}
+
+// TestAListenerComingIntoRangeMidTransmissionStartsReceivingThere 是同一件事的
+// 另一半：飞**进**射程。投递在距离跌破 cutoff 的那一帧就开始，同样没有 FlagFirst。
+//
+// 契约点名了飞**出**射程那一侧（Seq 那段的最后一条），两个逆向情形一个都没写，
+// 而两个都是日常。
+func TestAListenerComingIntoRangeMidTransmissionStartsReceivingThere(t *testing.T) {
+	r := New()
+	a := newRecorder(t, r, "1000")
+	b := newRecorder(t, r, "1001")
+	r.Subscribe(a.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(b.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 第 1 帧：相距约 480 海里，射程合计 40 海里，射程外。
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
+		"1000": airborne("CCA1", "1000", 30.0, 120.0, 20),
+		"1001": airborne("CCA2", "1001", 38.0, 120.0, 20),
+	}}})
+	if _, err := r.Fanout(a.sess.ID, frame(121800, 7, wire.FlagFirst, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(b.got) != 0 {
+		t.Fatalf("premise: the listener got %d packets while 480 NM away with 40 NM of range, want 0", len(b.got))
+	}
+
+	// 飞进来：约 30 海里，射程合计 40 海里，满格。快照整体替换，和 feed 真实的
+	// 更新方式一样。
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
+		"1000": airborne("CCA1", "1000", 30.0, 120.0, 20),
+		"1001": airborne("CCA2", "1001", 30.5, 120.0, 20),
+	}}})
+
+	// 第 2 帧，发言正中间。
+	if _, err := r.Fanout(a.sess.ID, frame(121800, 8, 0, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(b.got) != 1 {
+		t.Fatalf("the listener got %d packets on the frame after coming into range, want 1 — delivery starts on the frame the distance drops below cutoff, and that frame carries no FlagFirst", len(b.got))
+	}
+	h, _, err := wire.Parse(b.got[0])
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if h.Flags&wire.FlagFirst != 0 {
+		t.Fatalf("Flags = %#x, want FlagFirst clear — without this the test would pass on an implementation that re-marks the frame as a first frame, which is exactly the thing the contract refuses to promise", h.Flags)
+	}
+	if h.Seq != 8 {
+		t.Fatalf("Seq = %d, want 8", h.Seq)
 	}
 }
 

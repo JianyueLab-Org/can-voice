@@ -3,7 +3,9 @@
 // 三条贯穿全文的规则：
 //   - 载荷全程不解码。服务端没有 Opus 依赖，音频对它是不透明字节。
 //   - 所有"不知道"的分支一律放行。在语音系统里"听不见"比"听得太远"糟糕得多。
-//   - 一个听众在一次扇出里最多收到一份。两份就是回声。
+//   - 一个听众在**一个频率上**最多收到一份。同一个频率上的两份就是回声。
+//     跨频率不是：同时订阅一对耦合频率两边的人会在两边各收到一份，那是无线电栈
+//     上的两行，见下面 targets 那一段和 wire.Header.Seq 的契约。
 package router
 
 import (
@@ -68,7 +70,32 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 
 	// 目标频率：主频率在前，耦合频率升序在后。顺序是确定的，因为它决定了
 	// 同时订阅多个目标频率的听众收到的包头上写哪个频率。
-	targets := append([]uint32{h.FreqKHz}, r.coupledWith(h.FreqKHz)...)
+	//
+	// **耦合频率里要扣掉发言者自己也在发射的那几个。** normaliseXC 要求一对
+	// 耦合的两个频率都在该会话**授权后**的 TX 集合里，所以"声明了 XC(A,B)"蕴含
+	// "在 A 和 B 上都有发射权"——那不是一种可能的配置，是唯一能让耦合成立的配置。
+	// 而无线电栈形状的客户端（TrackAudio、can-audio）一次 PTT 会给每个 TX 频率
+	// 各发一份上行：can-audio 的 voice.py 里 PTT 独占 VoiceTarget id 1，那个
+	// target 装着全部 TX 频道。两份上行各走一次 Fanout，而下面那个 seen 去重
+	// 只在**单次调用之内**有效，两次调用互相不知道对方存在。于是只订阅 B 的
+	// 听众会收到两份同号的包——一份是 B 上的直投，一份是从 A 耦合过来的——
+	// 而契约里"按 (Speaker, FreqKHz) 分流之后是一串连号"就变成了假话：
+	// 实际收到的是 8, 8, 9, 9, 10, 10。
+	//
+	// 扣掉那一份是纯本地判断，不需要任何跨调用的状态：发言者自己就在那个频率上
+	// 直发，耦合拷贝按构造是多余的。协议一个字节都不用改。
+	//
+	// 代价是客户端那一半从此是承重的：**声明了 XC 就必须真的每个 TX 频率各发
+	// 一份**，服务端不会替它把音频搬到它自己也在发射的那个频率上去。这条写在
+	// wire.Header.Seq 的契约里，Rust 侧照那段实现。
+	senderTX := sender.subs.Load().tx
+	targets := []uint32{h.FreqKHz}
+	for _, f := range r.coupledWith(h.FreqKHz) {
+		if _, own := senderTX[f]; own {
+			continue
+		}
+		targets = append(targets, f)
+	}
 
 	// 发言者一开始就算"已投递"，这样他既不会收到自己的声音（TX 蕴含 RX，
 	// 他是自己的订阅者），也不会在耦合频率上被再考虑一次。
@@ -83,7 +110,9 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 			}
 			// 在判定之前就登记：射程只取决于双方的位置，和这个包走哪个
 			// 频率无关，所以一个听众只判一次。同时订阅了主频率和耦合频率
-			// 的管制员因此只收到一份——两份就是回声。
+			// 的管制员因此**在这一个上行包上**只收到一份——同一个频率上的
+			// 两份就是回声。跨上行包的那一半由上面扣掉自己 TX 频率的那段
+			// 管，seen 到不了那里。
 			seen[l.ID] = struct{}{}
 
 			lp, listenerKnown := lookup(snap, l)
