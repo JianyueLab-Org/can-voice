@@ -34,11 +34,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 `sh autogen.sh && sh configure && make`：
 
 ```bash
-brew install autoconf automake libtool     # macOS
-apt install autoconf automake libtool      # Debian/Ubuntu
+brew install autoconf automake libtool                      # macOS
+apt install autoconf automake libtool libasound2-dev        # Debian/Ubuntu
 ```
 
 缺了的话报的是一条看不出所以然的 `Failed to autogen Opus`。
+
+**Linux 还要 `libasound2-dev`**：cpal 在那边走 ALSA，缺了报的是
+`failed to run custom build command for \`alsa-sys\``。macOS 上 cpal 走 CoreAudio，
+所以这一条**在 mac 开发机上永远不会露头**——CI 的 Linux runner 第一次跑就抓到了它。
 
 **静态链接不是可选的，也不要"先用系统的 libopus 顶一下"。** 它消灭的是 Python 版
 那一整类故障：`opus.dll` 没跟着打包，程序照常启动，语音静默失效。验证方法：

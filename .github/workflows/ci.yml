@@ -115,11 +115,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # **构建前置：autotools。** audiopus_sys 从源码构建 libopus 并静态链接，
-      # 它的 build.rs 走的是 `sh autogen.sh && sh configure && make`。缺了的话
-      # 报的是一条看不出所以然的 "Failed to autogen Opus"——写在这里，
-      # 是为了让下一个人看 CI 就知道本机要装什么。
-      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool
+      # **两样构建前置，缺哪个报的错都指不到原因。**
+      #
+      # autotools：audiopus_sys 从源码构建 libopus 并静态链接，build.rs 走的是
+      # `sh autogen.sh && sh configure && make`。缺了报 "Failed to autogen Opus"。
+      #
+      # libasound2-dev：cpal 在 Linux 上走 ALSA，缺了报的是
+      # "failed to run custom build command for `alsa-sys`"——而 macOS 上 cpal 走
+      # CoreAudio，所以这一条**在开发机上永远不会露头**，只有 Linux 才会。
+      # 这正是这个 job 第一次跑就抓到的东西。
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -138,7 +143,7 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool
+      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool libasound2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # **这是唯一能发现各层拼接错误的测试**，而两半都在这个仓库里，所以它是
