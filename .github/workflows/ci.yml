@@ -1,8 +1,12 @@
 # can-voice 的 CI。这个仓库此前**没有任何 CI 配置**，所以 `-race` 跑不跑纯属惯例
 # ——而本分支已经出过一次"在单核 runner 上 5/5 必红"的测试，那是靠人手跑发现的。
 #
-# 四个 job 各自的理由写在各自底下。把它们拆开而不是串成一条，是为了让失败信息
-# 直接说出是哪一类问题：格式、静态检查、并发、还是单核调度。
+# 五个 job 各自的理由写在各自底下。把它们拆开而不是串成一条，是为了让失败信息
+# 直接说出是哪一类问题：格式、静态检查、并发、单核调度，还是那个搁置着的探针。
+#
+# actions/* 钉在大版本上（checkout@v7 / setup-go@v7）。v4/v5 跑在 Node 20 上，
+# GitHub 每次运行都会打一条弃用警告——那种每次都出现、每次都无害的警告，会把
+# 真正要看的那条淹掉。
 
 name: CI
 
@@ -24,8 +28,8 @@ jobs:
     name: go vet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # 整个仓库，不只是 server/：probe/ 也要编得过。
@@ -35,8 +39,8 @@ jobs:
     name: gofmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # gofmt -l 对格式不对的文件**只是把文件名打出来，退出码仍然是 0**，
@@ -54,8 +58,8 @@ jobs:
     name: go test -race -count=2
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # -race 不是可选项。这套代码里有整整一类只在竞态检测器下才会响的钉子
@@ -72,8 +76,8 @@ jobs:
     name: go test -race (GOMAXPROCS=1)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       # **这个 job 不是多余的。** 本分支出过一条在 GOMAXPROCS=1 下 5/5 必红的
@@ -85,3 +89,23 @@ jobs:
       # 单独一个 job 而不是在上面那个里多跑一遍：红的时候要一眼看出是**调度**
       # 问题而不是普通的失败。
       - run: GOMAXPROCS=1 go test ./server/... -race
+
+  probe:
+    name: probe (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # **probe/ 此前没有任何 job 看着它**，上面两个 test job 都只跑 ./server/...。
+      # go vet ./... 会把它的测试文件一起类型检查，所以编译失败抓得住；逻辑回归
+      # 抓不住，而那里有 6 个测试文件、约 700 行。终审里仓库唯一一处违反"注释用
+      # 中文"的地方就在 probe/server/serve.go，能活到那时候正是因为这个目录没人看。
+      #
+      # probe 是 P1 的连通性探针，目前搁置、没有部署，所以这里给的是**便宜**的
+      # 一份：编得过 + 测试过，跑完不到十秒。不并进上面两个 job，是为了让红的时候
+      # 一眼看出是探针而不是服务端——那两个 job 的理由（-race 专属的钉子、单核
+      # 调度）说的都是服务端的事。
+      - run: go build ./probe/...
+      - run: go test ./probe/... -race

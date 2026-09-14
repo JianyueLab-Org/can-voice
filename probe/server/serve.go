@@ -79,7 +79,7 @@ func echoStreams(conn quic.Connection, connID int) {
 				}
 				if err := writeFrame(s, b); err != nil {
 					if errors.Is(err, io.EOF) {
-						// Stream closed, no need to log
+						// 对端已经把流关了，不值得为此记一行日志。
 						return
 					}
 					var appErr *quic.ApplicationError
