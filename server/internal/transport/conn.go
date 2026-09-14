@@ -112,6 +112,35 @@ var controlWriteTimeout = newDuration(10 * time.Second)
 // 同样是变量只为了测试能把它调小。
 var controlReadTimeout = newDuration(10 * time.Second)
 
+// deadliner 是 armHandshakeDeadlines 需要一条流做的全部事情。
+//
+// 收窄成两个方法而不是直接收 quic.Stream，只为**让它能被断言**：
+// handshake_test.go 里那个假流实现得起这两个方法，而造一个 quic.Stream 的
+// 完整替身要连读、写、关、流 id 一起实现。
+type deadliner interface {
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
+}
+
+// armHandshakeDeadlines 给控制流的读和写**同时**上截止时间；传零值就是撤掉。
+//
+// 一个函数而不是两行，是因为这两行必须成对：
+//
+//   - 上弦时只上读那一侧，就漏掉了写侧那种 slowloris——对端的传输参数是**它**
+//     说了算的，一个把 initial_max_stream_data_bidi_remote 通告成 0 的客户端
+//     能让服务端的第一次 Write 永远阻塞在流控上，和一言不发是同一种攻击，
+//     只是换了一步。
+//   - 撤销时只撤读那一侧，握手那个一次性的写时限就会**留在**一条长连接上：
+//     它早晚会过期，然后掐死一条完全健康的会话，而症状发生在十秒之后、
+//     和任何一次操作都对不上。
+//
+// 两行内联的时候没有任何东西钉得住这种成对关系（真 QUIC 连接上看不见
+// 截止时间被设成了什么），所以抽成一个函数本身就是可测性那条设计反馈。
+func armHandshakeDeadlines(st deadliner, t time.Time) {
+	_ = st.SetReadDeadline(t)
+	_ = st.SetWriteDeadline(t)
+}
+
 // framedReader 在一帧的第一个字节到达之后，给这一帧剩下的部分上读截止时间。
 //
 // 它必须包在 control.ReadFrame **外面**而不是里面：ReadFrame 收的是 io.Reader，
@@ -163,12 +192,7 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 			"peer", conn.RemoteAddr().String(), "error", err)
 		return
 	}
-	deadline := time.Now().Add(handshakeTimeout.Get())
-	_ = st.SetReadDeadline(deadline)
-	// 写也要有截止时间。对端的传输参数是**它**说了算的，一个把
-	// initial_max_stream_data_bidi_remote 通告成 0 的客户端能让我们的第一次
-	// Write 永远阻塞在流控上——和一言不发是同一种 slowloris，只是换了一步。
-	_ = st.SetWriteDeadline(deadline)
+	armHandshakeDeadlines(st, time.Now().Add(handshakeTimeout.Get()))
 
 	// 每条会话一个有界发送队列。把 SessionOpts.Send 直接接到 conn.SendDatagram 上
 	// 是不行的：那个函数在 quic-go 自己的 32 帧队列满时**阻塞**，而 router.Fanout
@@ -199,13 +223,16 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		conn.CloseWithError(CloseHandshakeRefused, reason)
 		return
 	}
-	// 握手过了，取消**读**截止时间——控制面之后是长连接，管制员可能几分钟不说话。
+	// 握手过了，两侧的截止时间都撤掉——控制面之后是长连接，管制员可能几分钟
+	// 不说话，而握手那个一次性的时限留在一条长连接上早晚会过期，然后掐死一条
+	// 完全健康的会话。
 	//
-	// 写不一样：它从"握手那一次性的时限"换成 writeControl 每写一帧各自设一次
-	// （controlWriteTimeout）。整条连接一个写截止时间是不行的——它要么早晚会
-	// 过期掐死一条健康会话，要么就得设成无穷大，而无穷大正是那个卡死的形状。
-	_ = st.SetReadDeadline(time.Time{})
-	_ = st.SetWriteDeadline(time.Time{})
+	// 撤掉不等于此后无人看管，两侧各自换了一套按帧计的：读是 framedReader
+	// （只在一帧已经开了头之后上弦，controlReadTimeout），写是 writeControl
+	// 每写一帧各设一次（controlWriteTimeout）。整条连接一个固定时刻是不行的
+	// ——它要么早晚过期掐死健康会话，要么就得是无穷大，而无穷大正是那个卡死
+	// 的形状。
+	armHandshakeDeadlines(st, time.Time{})
 	slog.Info("session opened", "session", sess.ID, "cid", sess.CID, "peer", conn.RemoteAddr().String())
 	defer func() {
 		closeSession(r, sess.ID, out)

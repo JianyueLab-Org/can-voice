@@ -11,6 +11,7 @@ import (
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
+	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
 	"github.com/JianyueLab-Org/can-voice/server/internal/wire"
 )
@@ -33,7 +34,7 @@ import (
 // locator。这里把真实的 Feed（读真实格式的 SSE）接到真实的 Router 上，
 // 经真实的 QUIC 连接收包。
 //
-// 几何（用 geo/fsdfeed 的真实常量核算过，不要"简化"这几个纬度）：
+// 几何（按今天的 geo 常量，不要"简化"这几个纬度）：
 //
 //	LOS(35000 ft) = 1.23×√35000 = 230.112 NM，两架飞机相加得射程 460.224 NM
 //	满格 ≤ 0.8×460.224 = 368.18 NM，截止 1.1×460.224 = 506.25 NM
@@ -42,6 +43,12 @@ import (
 //	near  Δlat=1.6667  d=100.07 NM  ratio=0.2174  → 255
 //	mid   Δlat=7.3333  d=440.29 NM  ratio=0.9567  → 衰减带里
 //	far   Δlat=11.6667 d=700.47 NM  ratio=1.5220  → 不投递
+//
+// 上面这几个数是**注释**，下面每一条失败信息里的数字都是当场按 geo 的常量算的。
+// 这不是洁癖：这个测试对 geo.FullRatio/CutoffRatio 有隐含耦合（把 FullRatio 提到
+// 0.9567 以上，mid 就落进满格带），而 grep 那两个常量只会找到 geo 自己——改它们
+// 的人不会被任何东西提醒。写死的"368–506"在那一刻会变成一句**假话**，
+// 把下一个人送去查射程数学或者 feed，而真正动的是两个比值。
 //
 // 中间那一档的具体数值（今天是 122）**刻意不写进断言**：它依赖衰减曲线的形状，
 // 而那条曲线是可以调的。要钉的性质是"严格在 0 和 255 之间，且严格低于近的那个"。
@@ -52,6 +59,27 @@ func TestTheWholeStackAttenuatesByDistance(t *testing.T) {
 		`{"callsign":"CCA1002","cid":"1002","latitude":37.3333,"longitude":120.0,"altitude":35000},` +
 		`{"callsign":"CCA1003","cid":"1003","latitude":41.6667,"longitude":120.0,"altitude":35000}` +
 		`],"controllers":[],"atis":[]}`
+
+	// 全部按 geo 的常量当场算，失败信息里报的就是这几个数。
+	const cruiseFt = 35000.0
+	rangeNM := 2 * geo.LOSTermNM(cruiseFt) // 两架同高度的飞机：两个半项相加
+	fullNM := geo.FullRatio * rangeNM
+	cutoffNM := geo.CutoffRatio * rangeNM
+	nearNM := geo.DistanceNM(30.0, 120.0, 31.6667, 120.0)
+	midNM := geo.DistanceNM(30.0, 120.0, 37.3333, 120.0)
+	farNM := geo.DistanceNM(30.0, 120.0, 41.6667, 120.0)
+
+	// 前提：这三个纬度是按今天的 FullRatio/CutoffRatio 选的。谁改了那两个常量，
+	// 本测试要红在**这里**并说出原因，而不是红在"mid 拿了 255"上。
+	if nearNM >= fullNM {
+		t.Fatalf("premise: near is %.1f NM but full strength only reaches %.1f NM (%.2f × %.1f) — geo.FullRatio moved and these latitudes no longer mean what the test needs", nearNM, fullNM, geo.FullRatio, rangeNM)
+	}
+	if midNM <= fullNM || midNM >= cutoffNM {
+		t.Fatalf("premise: mid is %.1f NM, which is not strictly inside the %.1f–%.1f taper (%.2f–%.2f × %.1f) — geo.FullRatio/CutoffRatio moved and these latitudes no longer mean what the test needs", midNM, fullNM, cutoffNM, geo.FullRatio, geo.CutoffRatio, rangeNM)
+	}
+	if farNM <= cutoffNM {
+		t.Fatalf("premise: far is %.1f NM but the cutoff is %.1f NM (%.2f × %.1f) — geo.CutoffRatio moved and these latitudes no longer mean what the test needs", farNM, cutoffNM, geo.CutoffRatio, rangeNM)
+	}
 
 	addr, priv, _ := testServerWithFeed(t, snapshot)
 
@@ -78,11 +106,14 @@ func TestTheWholeStackAttenuatesByDistance(t *testing.T) {
 	midQual := qualityOf(t, mid, 3*time.Second)
 
 	if nearQual != 255 {
-		t.Fatalf("near Qual = %d, want 255 — 100 NM is well inside 0.8 × 460", nearQual)
+		t.Fatalf("near Qual = %d, want 255 — %.1f NM is well inside the full-strength radius of %.1f NM (%.2f × %.1f)", nearQual, nearNM, fullNM, geo.FullRatio, rangeNM)
 	}
 	if midQual == 0 || midQual == 255 {
-		t.Fatalf("mid Qual = %d, want something strictly between 0 and 255 — 440 NM is inside the 368–506 taper", midQual)
+		t.Fatalf("mid Qual = %d, want something strictly between 0 and 255 — %.1f NM is inside the %.1f–%.1f taper", midQual, midNM, fullNM, cutoffNM)
 	}
+	// 这一句今天**不可能失败**：上面两句已经把 nearQual 钉成 255、把 midQual 钉进
+	// [1, 254]。留着不是为了覆盖，是因为它是三句里唯一一句直接说出本测试主旨的话
+	// ——"随距离衰减"——而且一旦将来有人把 near 那句放宽成一个区间，它立刻接管。
 	if midQual >= nearQual {
 		t.Fatalf("mid Qual %d is not below near Qual %d; the whole point is that it attenuates with distance", midQual, nearQual)
 	}
@@ -94,7 +125,7 @@ func TestTheWholeStackAttenuatesByDistance(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	if _, err := far.conn.ReceiveDatagram(ctx); err == nil {
-		t.Fatal("a listener 700 NM away must hear nothing — that is past the 1.1 cutoff")
+		t.Fatalf("a listener %.1f NM away must hear nothing — the cutoff is %.1f NM (%.2f × %.1f)", farNM, cutoffNM, geo.CutoffRatio, rangeNM)
 	}
 }
 
