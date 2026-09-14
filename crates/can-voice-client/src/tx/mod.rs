@@ -1,5 +1,9 @@
 //! 发送路径：采集与 Opus 编码。
 
+pub mod capture;
+
+pub use capture::{TxFrame, TxPipeline};
+
 use crate::rx::decode::FRAME_SAMPLES;
 use audiopus::{coder::Encoder as OpusEncoder, Application, Bitrate, Channels, SampleRate};
 

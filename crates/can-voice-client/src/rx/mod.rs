@@ -5,3 +5,4 @@
 pub mod decode;
 pub mod jitter;
 pub mod mix;
+pub mod mixer;
