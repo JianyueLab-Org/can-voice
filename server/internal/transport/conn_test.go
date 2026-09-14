@@ -666,6 +666,27 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 	}
 }
 
+// TestTheAlpnAndProtoVersionAreTheLiteralValuesTheProtocolNames 是上一条的同款，
+// 管另外两个跨实现字面值。
+//
+// ALPN 之前**哪里都没有钉**：所有测试都是 `NextProtos: []string{ALPN}`，
+// 也就是拿常量比常量——把它改成 `can-voice/2`，整套测试照绿，而每一个已经装在
+// 别人机器上的客户端都会在 TLS 握手上被拒（`no application protocol`），
+// 一条日志都指不到这里。ProtoVersion 一样：握手那道闸判的是
+// `h.Proto != control.ProtoVersion`，两边一起变就还是绿的。
+//
+// 这两个值和关闭码一样是"服务端改了、客户端没改"型的东西，区别只在于坏起来
+// 是响亮的（连不上）而不是安静的。响亮不等于不用钉：响亮的是**用户**那边，
+// 这边仍然什么都不会红。
+func TestTheAlpnAndProtoVersionAreTheLiteralValuesTheProtocolNames(t *testing.T) {
+	if ALPN != "can-voice/1" {
+		t.Errorf("ALPN = %q, want the wire value %q — every shipped client puts this exact string in its TLS NextProtos", ALPN, "can-voice/1")
+	}
+	if control.ProtoVersion != 1 {
+		t.Errorf("control.ProtoVersion = %d, want the wire value 1 — clients put this number in HELLO.proto", control.ProtoVersion)
+	}
+}
+
 // TestADelayedReaderStillLearnsWhyItWasRefused 钉住"被拒的原因走的是关闭码那条道"。
 //
 // byeGrace 只是一个调度上的赌注：它赌对端此刻正卡在 ReadFrame 上。这个包里别的

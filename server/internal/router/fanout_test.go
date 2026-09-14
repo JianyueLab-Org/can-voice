@@ -6,6 +6,7 @@ import (
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
+	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 	"github.com/JianyueLab-Org/can-voice/server/internal/wire"
 )
 
@@ -127,6 +128,131 @@ func TestFanoutPreservesFlagLast(t *testing.T) {
 	h, _, _ := wire.Parse(listener.got[0])
 	if h.Flags != wire.FlagLast {
 		t.Fatalf("Flags = %#x, want FlagLast (%#x) — flags are passed through; stamping a constant leaves the receiver's RX lamp lit after the speaker releases PTT", h.Flags, wire.FlagLast)
+	}
+}
+
+// 下面三条钉的是 wire/header.go 那份跨实现契约里**服务端负责的那一半**。
+//
+// 契约本身写在 wire 包里，但它的三条承诺全都要由这个包兑现：保留位原样转发、
+// 下行 qual 永不为 0、seq 原样转发且耦合的每一份拷贝同号。Rust 客户端会照着
+// 那段文字写抖动缓冲区和 RX 指示灯，所以这三条不是"顺手测一下"，
+// 是那份文档能不能算数的全部依据。
+
+// TestFanoutRelaysTheReservedFlagBitsUntouched 钉住 flags 第 2–7 位原样转发。
+//
+// 这是 wire.ReservedFlags 那段注释里定下的三选一：不拒、不清零、原样转发，
+// 好让将来的一位可以**只升级客户端**就部署。而这句承诺是在这一行代码上兑现的
+// （fanout 里的 `Flags: h.Flags`），所以要在这里钉——上一条 FlagLast 的测试
+// 只用了第 1 位，一个"顺手把没定义的位清掉"的实现照样能让它绿。
+func TestFanoutRelaysTheReservedFlagBitsUntouched(t *testing.T) {
+	r := New()
+	speaker := newRecorder(t, r, "1000")
+	listener := newRecorder(t, r, "1001")
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(listener.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 首帧 + 全部六个保留位。真实客户端今天不会这么发（契约要求置零），
+	// 这里模拟的是**一个比本服务端新的客户端**。
+	in := wire.FlagFirst | wire.ReservedFlags
+	pkt := wire.Header{Ver: wire.Version, Flags: in, Seq: 1, FreqKHz: 121800}.AppendTo(nil)
+	if _, err := r.Fanout(speaker.sess.ID, pkt); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(listener.got) != 1 {
+		t.Fatalf("listener got %d packets, want 1 — reserved bits must not make a packet undeliverable", len(listener.got))
+	}
+	h, _, _ := wire.Parse(listener.got[0])
+	if h.Flags != in {
+		t.Fatalf("Flags = %#02x, want %#02x — the reserved bits are relayed verbatim so a future flag can ship by upgrading clients alone; masking them here makes that extension fail silently on both ends", h.Flags, in)
+	}
+}
+
+// TestFanoutStampsOneAtTheVeryEdgeNotZero 钉住"下行 qual 永远不是 0"。
+//
+// 这条不变量是两处合起来给的，而契约（wire.Header.Qual）现在把它写成了接收端
+// 可以依赖的东西：射程外根本不投递，而衰减带最外侧那一小段被 geo.Quality 夹到 1。
+// 夹紧那一道闸在 geo 包里有自己的钉子；这里钉的是**合起来的结果**——
+// 投出去的包上写的那个数字。
+//
+// 输入是算出来的，不是试出来的：沿同一条经线时大圆距离与纬度差严格成正比，
+// 所以给定比值就能反解出纬度。下面那句前提断言证明这组输入确实落在
+// "四舍五入会得到 0"的那一段里——不落在里面的话，夹紧那一句删掉它照样绿。
+func TestFanoutStampsOneAtTheVeryEdgeNotZero(t *testing.T) {
+	r := New()
+	speaker := newRecorder(t, r, "1000")
+	edge := newRecorder(t, r, "1001")
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(edge.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	// 两个半项各 100，合计射程 200 海里。
+	const rangeNM = 200.0
+	const ratio = 1.0997 // 在 (1.09941, 1.1) 这一段里：还在射程内，但四舍五入是 0
+	perDeg := geo.DistanceNM(0, 0, 1, 0)
+	lat := 30.0 + ratio*rangeNM/perDeg
+
+	// 前提：这组输入真的能区分"夹紧了"和"没夹紧"。
+	raw := (geo.CutoffRatio - ratio) / (geo.CutoffRatio - geo.FullRatio) * 255
+	if ratio >= geo.CutoffRatio || raw >= 0.5 {
+		t.Fatalf("premise: ratio %.6f gives an unclamped quality of %.4f — the input has to land in the band where rounding gives 0 while still being inside range, or the clamp cannot be distinguished from its absence", ratio, raw)
+	}
+
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
+		"1000": airborne("CCA1", "1000", 30.0, 120.0, 100),
+		"1001": airborne("CCA2", "1001", lat, 120.0, 100),
+	}}})
+
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(edge.got) != 1 {
+		t.Fatalf("the listener at ratio %.4f got %d packets, want 1 — still inside the 1.1 cutoff", ratio, len(edge.got))
+	}
+	h, _, _ := wire.Parse(edge.got[0])
+	if h.Qual != 1 {
+		t.Fatalf("Qual = %d, want 1 — a delivered packet must never carry 0: the contract tells receivers that 0 cannot come from a server, so a receiver's \"weakest signal\" branch would be dead code that nobody ever notices is wrong", h.Qual)
+	}
+}
+
+// TestFanoutRelaysTheSequenceNumberUntouchedOnEveryCoupledCopy 钉住 seq 的服务端一半。
+//
+// 契约（wire.Header.Seq）对 Rust 那边的抖动缓冲区承诺两件事，两件都在这里兑现：
+// 服务端不重编号，以及**一个音频帧在所有耦合频率上共用同一个号**。按频率各自
+// 起一个计数器的话，同时听两个耦合频率的人会看到两串号，而按 (Speaker, FreqKHz)
+// 分流的缓冲区会把其中一串当成乱序丢掉。
+//
+// 序号取 0xFFFE，紧挨着 16 位回绕点：任何"顺手 +1"或者"归一化一下"的实现
+// 在这里都会露出来，而在 seq=1 上看不出来。
+func TestFanoutRelaysTheSequenceNumberUntouchedOnEveryCoupledCopy(t *testing.T) {
+	const seq = 0xFFFE
+
+	r := New()
+	ctl := newRecorder(t, r, "1000")    // 把 121800 和 124550 耦合起来的管制员
+	pilotA := newRecorder(t, r, "1001") // 在 121800 上说话
+	pilotB := newRecorder(t, r, "1002") // 只听耦合过去的那一边
+	r.Subscribe(ctl.sess.ID, control.Sub{
+		RX: []uint32{121800, 124550},
+		TX: []uint32{121800, 124550},
+		XC: [][2]uint32{{121800, 124550}},
+	})
+	r.Subscribe(pilotA.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(pilotB.sess.ID, control.Sub{RX: []uint32{124550}})
+
+	if _, err := r.Fanout(pilotA.sess.ID, packet(121800, seq, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	// 前提：耦合真的生效了，两边各收到一份。少了这一半，"两份同号"在
+	// 只投出一份的实现上也成立。
+	if len(ctl.got) != 1 || len(pilotB.got) != 1 {
+		t.Fatalf("premise: ctl got %d and the coupled listener got %d, want 1 each — without two copies there is nothing to compare", len(ctl.got), len(pilotB.got))
+	}
+	primary, _, _ := wire.Parse(ctl.got[0])
+	coupled, _, _ := wire.Parse(pilotB.got[0])
+	if primary.FreqKHz == coupled.FreqKHz {
+		t.Fatalf("premise: both copies name %d — they are supposed to be the two different coupled frequencies", primary.FreqKHz)
+	}
+	if primary.Seq != seq || coupled.Seq != seq {
+		t.Fatalf("Seq = %d on %d and %d on %d, want %d on both — the server never renumbers, and one audio frame carries one number on every coupled copy; a per-frequency counter makes a listener on both frequencies see two streams and throw one away as reordered",
+			primary.Seq, primary.FreqKHz, coupled.Seq, coupled.FreqKHz, seq)
 	}
 }
 

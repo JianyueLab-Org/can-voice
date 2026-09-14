@@ -1,5 +1,5 @@
 {
-  "comment": "can-voice 数据面包头的跨实现黄金文件。Go 与 Rust 两侧都测这份。改它等于改协议。布局见 spec 5.2：ver(1) flags(1) qual(1) seq(2 BE) freq_khz(4 BE) speaker(4 BE)，其后是 Opus 载荷。",
+  "comment": "can-voice 数据面包头的跨实现黄金文件。Go 与 Rust 两侧都测这份。改它等于改协议。布局见 spec 5.2：ver(1) flags(1) qual(1) seq(2 BE) freq_khz(4 BE) speaker(4 BE)，其后是 Opus 载荷。这里只是编码样例，不是契约全文：flags 的保留位、下行 qual 恒在 1-255、freq_khz 是不透明路由键、seq 的每会话语义与 16 位回绕，都写在 server/internal/wire/header.go 和 server/README.md 的《数据面包头》一节。样例里的频率不带任何含义，别从取值上推断什么。",
   "header_size": 13,
   "cases": [
     {
@@ -22,9 +22,15 @@
     },
     {
       "name": "首帧且尾帧：单帧发言",
-      "header": {"ver": 1, "flags": 3, "qual": 200, "seq": 0, "freq_khz": 199998, "speaker": 1},
+      "header": {"ver": 1, "flags": 3, "qual": 200, "seq": 0, "freq_khz": 132500, "speaker": 1},
       "opus_hex": "00",
-      "encoded_hex": "0103c8000000030d3e0000000100"
+      "encoded_hex": "0103c80000000205940000000100"
+    },
+    {
+      "name": "下行衰减带最外侧：qual 的最小值是 1，不是 0；seq 取回绕的中点",
+      "header": {"ver": 1, "flags": 0, "qual": 1, "seq": 32768, "freq_khz": 118000, "speaker": 7},
+      "opus_hex": "aa",
+      "encoded_hex": "01000180000001ccf000000007aa"
     }
   ]
 }
