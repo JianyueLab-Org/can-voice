@@ -482,9 +482,8 @@ func TestStreamConsumesARealEventSequence(t *testing.T) {
 //
 // 这个测试把 feedIdleTimeout 临时调小，否则要跑 30 秒。
 func TestASilentStreamEventuallyGoesDegraded(t *testing.T) {
-	orig := feedIdleTimeout
-	feedIdleTimeout = 150 * time.Millisecond
-	defer func() { feedIdleTimeout = orig }()
+	restore := feedIdleTimeout.Set(150 * time.Millisecond)
+	defer feedIdleTimeout.Set(restore)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1134,9 +1133,8 @@ func TestAltFtIsTheRawAltitudeNotTheFlooredOne(t *testing.T) {
 // 同样会在 feedIdleTimeout 之后掉线，这正是 watchdog.Reset 存在的全部
 // 理由，却没有任何测试盯着它。
 func TestWatchdogIsResetByEachLineNotJustAtConnect(t *testing.T) {
-	orig := feedIdleTimeout
-	feedIdleTimeout = 100 * time.Millisecond
-	defer func() { feedIdleTimeout = orig }()
+	restore := feedIdleTimeout.Set(100 * time.Millisecond)
+	defer feedIdleTimeout.Set(restore)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -1324,9 +1322,8 @@ func TestKeepAlivesDoNotResetTheFailureCounter(t *testing.T) {
 // 阉割版本要撑到 feedIdleTimeout（这里调小到 2 秒，仍然明显大于状态检查
 // 该花的时间）才会断。
 func TestABadStatusFailsFastNotViaTheWatchdog(t *testing.T) {
-	orig := feedIdleTimeout
-	feedIdleTimeout = 2 * time.Second
-	defer func() { feedIdleTimeout = orig }()
+	restore := feedIdleTimeout.Set(2 * time.Second)
+	defer feedIdleTimeout.Set(restore)
 
 	serverSawDone := make(chan time.Duration, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1355,7 +1352,7 @@ func TestABadStatusFailsFastNotViaTheWatchdog(t *testing.T) {
 	select {
 	case elapsed := <-serverSawDone:
 		if elapsed > 500*time.Millisecond {
-			t.Fatalf("the client gave up after %v; a 404 must fail immediately on the status check, not wait for the %v idle watchdog", elapsed, feedIdleTimeout)
+			t.Fatalf("the client gave up after %v; a 404 must fail immediately on the status check, not wait for the %v idle watchdog", elapsed, feedIdleTimeout.Get())
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the server never saw the client disconnect within 3s — the status check for a 404 is not failing fast")

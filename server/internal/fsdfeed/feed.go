@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
@@ -29,6 +30,32 @@ const reconnectDelay = 5 * time.Second
 // 上游出了问题，而不是网络大了一点。
 const maxEventBytes = 8 << 20
 
+// atomicDuration 是一个可以在 Feed 已经跑起来之后安全改动的时长。
+//
+// 和 transport 包里那个同名类型一字不差，理由也一样（那边的注释还点名引用了
+// 本包的 feedIdleTimeout）：改它的那个 goroutine 和读它的那个从来不是同一个。
+// 这里是测试 goroutine 写、Run 的 goroutine 在 stream() 入口读，中间没有任何
+// happens-before 边——裸 var 在那儿就是一条实打实的数据竞争，而 `go test -race`
+// 把整包染红之后，那种红会盖住真正的并发缺陷。
+//
+// 为什么是复制而不是共享：它只有十几行，而抽一个包出来要给两个 internal 包
+// 之间再加一层依赖。本仓库别处（can-audio 的 mumblecompat/applog）也是这个做法。
+type atomicDuration struct{ ns atomic.Int64 }
+
+func newDuration(d time.Duration) *atomicDuration {
+	a := &atomicDuration{}
+	a.ns.Store(int64(d))
+	return a
+}
+
+// Get 读当前值。
+func (a *atomicDuration) Get() time.Duration { return time.Duration(a.ns.Load()) }
+
+// Set 写入新值并返回旧值，测试里拿它 defer 还原。
+func (a *atomicDuration) Set(d time.Duration) time.Duration {
+	return time.Duration(a.ns.Swap(int64(d)))
+}
+
 // feedIdleTimeout 是流静默多久算作已经死掉。can-fsd 每秒推一次
 // （它的 feedPushInterval = 1s），所以 30 秒的静默只可能是连接被黑洞化了
 // ——NAT 空闲丢表、防火墙不回 RST。没有这个超时，sc.Scan() 会永久阻塞，
@@ -37,7 +64,43 @@ const maxEventBytes = 8 << 20
 // 唯一必须说出来的状态，而它恰恰会是唯一不会说的那个。
 //
 // 是变量而不是常量，只为了测试能把它调小——生产代码不要改它。
-var feedIdleTimeout = 30 * time.Second
+var feedIdleTimeout = newDuration(30 * time.Second)
+
+// responseHeaderTimeout 是"请求已经发出去了，但上游一个响应头都还没给"的时限。
+//
+// 它堵的是第三个 wedge，而且是三个里面最隐蔽的一个：**空闲看门狗救不了它**。
+// 看门狗是在 Do() **返回之后**才上弦的（见 stream()），所以一个握完 TCP/TLS、
+// 收下请求、然后扣着响应头不发的上游会让 Do() 永久阻塞，stream() 进不去循环，
+// 看门狗一秒都没走过，Run() 停在那里直到进程退出——而 degraded 停在 false 或者
+// 停在上一次的值，没有任何一行日志。前两个 wedge（SendDatagram 排满 32 帧、
+// 控制流的写没有截止时间）都已经堵上了，这是同一个形状的第三处。
+//
+// 15 秒：can-fsd 答这个头是立刻的（SSE 的响应头在第一个事件之前就写出去了），
+// 所以任何以秒计的等待都已经是异常。取得比 feedIdleTimeout（30 秒）小，是因为
+// 这两段时间的含义不同——那一段是"连上了但没话说"，这一段是"连上了但连招呼
+// 都不打"，后者更可疑，也更该早点放弃重来。
+//
+// 同样是变量只为了测试能把它调小。
+var responseHeaderTimeout = newDuration(15 * time.Second)
+
+// newFeedClient 造这个 Feed 用的 HTTP 客户端。
+//
+// 两个决定都有反例撑着：
+//
+//   - **Clone DefaultTransport，不要从零造一个 &http.Transport{}。** 从零造的那个
+//     只设了 ResponseHeaderTimeout，却同时把 DefaultTransport 里已经有的
+//     DialContext 超时（30 秒）和 **TLSHandshakeTimeout（10 秒）** 一起丢掉了
+//     ——后者的零值是"不超时"，于是堵上一个 wedge 的同时开出另一个，而且是在
+//     更早的一个阶段上。ProxyFromEnvironment 也会一起没掉。
+//   - **绝对不要设 http.Client.Timeout。** 它是对**整个请求**（包括读 body）计时的，
+//     而这个 body 是一条永不结束的 SSE 流：设了它，feed 会每隔 Timeout 就被从
+//     中间掐断一次，看起来像上游不稳定。要的是"响应头阶段"的时限，那正是
+//     ResponseHeaderTimeout。
+func newFeedClient() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.ResponseHeaderTimeout = responseHeaderTimeout.Get()
+	return &http.Client{Transport: tr}
+}
 
 // maxConsecutiveParseFailures 是连续多少个事件解析不了（或者超限被丢弃）
 // 就认定这条流没用。
@@ -359,6 +422,11 @@ func emptySnapshot() Snapshot {
 // 不会长期持锁,也不会互相阻塞。
 type Feed struct {
 	url string
+	// client 是可注入的，两个理由各自都够：生产路径要一个带
+	// ResponseHeaderTimeout 的客户端（见 newFeedClient），而测试要能塞一个
+	// 假的 RoundTripper 进来，去数每条返回路径有没有把响应 body 关掉。
+	// http.DefaultClient 两件事都做不到。
+	client *http.Client
 
 	mu       sync.RWMutex
 	snap     Snapshot
@@ -372,6 +440,7 @@ type Feed struct {
 func NewFeed(url string) *Feed {
 	return &Feed{
 		url:      url,
+		client:   newFeedClient(),
 		snap:     emptySnapshot(),
 		degraded: true,
 	}
@@ -528,10 +597,18 @@ func (f *Feed) stream(parent context.Context) error {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	resp, err := http.DefaultClient.Do(req)
+	// f.client，不是 http.DefaultClient：后者的 Transport 没有
+	// ResponseHeaderTimeout，而这一行下面的看门狗要到 Do() 返回之后才上弦
+	// ——扣着响应头不发的上游因此能把 Run() 停到进程退出。见 responseHeaderTimeout。
+	resp, err := f.client.Do(req)
 	if err != nil {
 		return err
 	}
+	// 每一条返回路径都要关 body，一条都不能漏：下面有状态码、连续失败触发、
+	// 扫描出错三条路径**不会**把响应读空，而 net/http 只在 body 被读完或者被
+	// 关掉之后才会把那条连接放回池子。漏掉的那条路径会把连接（以及它背后的
+	// socket 和 TLS 会话）攒在那里，而 Run 是每 5 秒重来一次的——一次上游故障
+	// 就能把文件描述符耗光。由 TestEveryReturnPathClosesTheResponseBody 钉住。
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("fsd feed returned %s", resp.Status)
@@ -539,11 +616,14 @@ func (f *Feed) stream(parent context.Context) error {
 
 	slog.Info("fsd feed connected", "url", f.url)
 
-	// 一次读出，之后全用局部变量。这个超时不该在一条流的中途改变，而且
-	// 第 548 行原本是在 time.AfterFunc 的回调里读它——那个回调跑在运行时的
-	// 计时器 goroutine 上，watchdog.Stop() 按文档并**不等**已经在跑的回调
-	// 返回，所以测试里那句 defer 还原能和它撞上。读一次就没有这个问题了。
-	idle := feedIdleTimeout
+	// 一次读出，之后全用局部变量：这个超时不该在一条流的中途改变，一条流
+	// 从头到尾用同一个值才说得清"静默了多久算死"。
+	//
+	// 它**在哪里读**已经不再是个安全问题——feedIdleTimeout 是 atomicDuration，
+	// 下面 time.AfterFunc 的回调（跑在运行时的计时器 goroutine 上，而
+	// watchdog.Stop() 按文档并不等已经在跑的回调返回）读它也一样安全。
+	// 裸 var 的时候这两处读都是竞争，只是回调那一处更容易被看见。
+	idle := feedIdleTimeout.Get()
 
 	// 看门狗：每读到一行就续期。到期就取消请求，让 sc.Scan() 返回，
 	// stream() 得以返回，Run 才有机会把 degraded 置位。
