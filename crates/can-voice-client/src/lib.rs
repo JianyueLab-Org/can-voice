@@ -5,4 +5,5 @@
 //! 没有 channel id，没有任何"需要记住"的连接状态 —— 那正是旧实现里
 //! 一整类"UI 是绿的但人还在 root 频道"的 bug 的根源。
 
+pub mod rx;
 pub mod stack;
