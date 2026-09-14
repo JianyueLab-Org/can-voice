@@ -71,7 +71,10 @@ async fn main() {
         }
     };
     let mut events = client.events();
-    client.set_subscription(can_voice_proto::control::Sub { rx, ..Default::default() });
+    client.set_subscription(can_voice_proto::control::Sub {
+        rx,
+        ..Default::default()
+    });
 
     loop {
         match tokio::time::timeout(Duration::from_secs(30), events.recv()).await {

@@ -141,7 +141,9 @@ impl JitterBuffer {
 
         // 上限保护：一个比实时更快的发送方不该把内存吃光。
         while self.frames.len() > MAX_DEPTH {
-            let Some(&oldest) = self.frames.keys().next() else { break };
+            let Some(&oldest) = self.frames.keys().next() else {
+                break;
+            };
             self.frames.remove(&oldest);
             // **只有起播之后才推进播放指针。** 起播之前推进它等于绕过水位等待，
             // 那正是它存在的理由。
@@ -241,7 +243,10 @@ mod tests {
         // 缓冲的意义就是先攒一点再放 —— 立刻输出等于没有抖动缓冲。
         let mut j = JitterBuffer::new();
         j.push(0, vec![0], false);
-        assert!(j.pop().is_none(), "a single frame must not be released immediately");
+        assert!(
+            j.pop().is_none(),
+            "a single frame must not be released immediately"
+        );
     }
 
     /// **注意这里期望的是全部五帧，不是前三帧。**
@@ -267,7 +272,11 @@ mod tests {
     fn out_of_order_frames_are_reordered() {
         let mut j = JitterBuffer::new();
         push_n(&mut j, &[2, 0, 1, 3]);
-        assert_eq!(drain(&mut j), vec![0, 1, 2, 3], "out-of-order arrival must be reordered");
+        assert_eq!(
+            drain(&mut j),
+            vec![0, 1, 2, 3],
+            "out-of-order arrival must be reordered"
+        );
     }
 
     #[test]
@@ -283,8 +292,11 @@ mod tests {
                 _ => break,
             }
         }
-        assert_eq!(got, vec![Some(0), Some(1), None, Some(3)],
-            "seq 2 is missing and must surface as Frame::Lost, got {got:?}");
+        assert_eq!(
+            got,
+            vec![Some(0), Some(1), None, Some(3)],
+            "seq 2 is missing and must surface as Frame::Lost, got {got:?}"
+        );
     }
 
     #[test]
@@ -328,15 +340,22 @@ mod tests {
         for s in 0..1000u16 {
             j.push(s, vec![0], false);
         }
-        assert!(j.depth() <= MAX_DEPTH,
-            "depth grew to {} frames; a sender faster than realtime must not exhaust memory", j.depth());
+        assert!(
+            j.depth() <= MAX_DEPTH,
+            "depth grew to {} frames; a sender faster than realtime must not exhaust memory",
+            j.depth()
+        );
     }
 
     #[test]
     fn a_duplicate_frame_is_ignored() {
         let mut j = JitterBuffer::new();
         push_n(&mut j, &[0, 0, 1, 2]);
-        assert_eq!(drain(&mut j), vec![0, 1, 2], "a repeated seq must not be played twice");
+        assert_eq!(
+            drain(&mut j),
+            vec![0, 1, 2],
+            "a repeated seq must not be played twice"
+        );
     }
 
     // ——— seq 回绕（修订件 §八.1）———
@@ -364,7 +383,9 @@ mod tests {
         // 现在 next 是 1（已播 65534、65535、0）。65533 是更早的迟到帧。
         j.push(65533, vec![99], false);
         match j.pop() {
-            Some(Frame::Audio(b)) => assert_ne!(b[0], 99, "a pre-wrap late frame must not rewind playback"),
+            Some(Frame::Audio(b)) => {
+                assert_ne!(b[0], 99, "a pre-wrap late frame must not rewind playback")
+            }
             other => panic!("pop returned {other:?}"),
         }
     }
@@ -380,7 +401,11 @@ mod tests {
         let mut j = JitterBuffer::new();
         // 从一段发言的中间接进来：序号是任意的，没有任何"这是开头"的信号。
         push_n(&mut j, &[5000, 5001, 5002]);
-        assert_eq!(drain(&mut j).len(), 3, "a mid-talkspurt join must play, not wait for a first flag");
+        assert_eq!(
+            drain(&mut j).len(),
+            3,
+            "a mid-talkspurt join must play, not wait for a first flag"
+        );
     }
 
     // ——— M9：连续丢帧结束发言（也就是静音超时）———
@@ -401,11 +426,16 @@ mod tests {
                 None => break,
             }
         }
-        assert!(j.finished(), "the buffer must time out instead of waiting for a last flag forever");
+        assert!(
+            j.finished(),
+            "the buffer must time out instead of waiting for a last flag forever"
+        );
         assert_eq!(kinds.last(), Some(&Frame::End));
         let lost = kinds.iter().filter(|f| **f == Frame::Lost).count();
-        assert_eq!(lost, MAX_CONSECUTIVE_LOST,
-            "exactly the losses that triggered the timeout, got {kinds:?}");
+        assert_eq!(
+            lost, MAX_CONSECUTIVE_LOST,
+            "exactly the losses that triggered the timeout, got {kinds:?}"
+        );
     }
 
     #[test]
@@ -420,8 +450,14 @@ mod tests {
                 None => break,
             }
         }
-        assert!(!j.finished(), "a two-frame gap must not end the talkspurt, got {got:?}");
-        assert!(got.contains(&Frame::Audio(vec![5])), "playback must resume after the gap");
+        assert!(
+            !j.finished(),
+            "a two-frame gap must not end the talkspurt, got {got:?}"
+        );
+        assert!(
+            got.contains(&Frame::Audio(vec![5])),
+            "playback must resume after the gap"
+        );
     }
 
     // ——— M10：深度自适应，以及 L2 的改名 ———
@@ -435,7 +471,11 @@ mod tests {
         assert_eq!(j.target_depth(), START_DEPTH);
         j.push(0, vec![0], false);
         assert_eq!(j.depth(), 1, "depth() is how many frames are held");
-        assert_eq!(j.target_depth(), START_DEPTH, "the water level does not move just because a frame arrived");
+        assert_eq!(
+            j.target_depth(),
+            START_DEPTH,
+            "the water level does not move just because a frame arrived"
+        );
     }
 
     /// 欠载（缓冲空了还得出一帧）说明水位不够，下一次发言要攒得更深。
@@ -446,8 +486,14 @@ mod tests {
         for _ in 0..4 {
             j.pop();
         }
-        assert!(j.target_depth() > START_DEPTH, "an underrun must deepen the buffer");
-        assert!(j.target_depth() <= MAX_DEPTH, "but never past the 120 ms ceiling");
+        assert!(
+            j.target_depth() > START_DEPTH,
+            "an underrun must deepen the buffer"
+        );
+        assert!(
+            j.target_depth() <= MAX_DEPTH,
+            "but never past the 120 ms ceiling"
+        );
     }
 
     /// 深度是**跨发言**携带的：每次发言都从 60 ms 重新开始的话，自适应等于没有，
@@ -457,13 +503,19 @@ mod tests {
         let mut j = JitterBuffer::with_target_depth(MAX_DEPTH);
         assert_eq!(j.target_depth(), MAX_DEPTH);
         push_n(&mut j, &[0, 1, 2]);
-        assert!(j.pop().is_none(), "a deeper buffer must wait longer before starting");
+        assert!(
+            j.pop().is_none(),
+            "a deeper buffer must wait longer before starting"
+        );
     }
 
     #[test]
     fn the_water_level_stays_inside_the_spec_range() {
         assert_eq!(JitterBuffer::with_target_depth(0).target_depth(), MIN_DEPTH);
-        assert_eq!(JitterBuffer::with_target_depth(99).target_depth(), MAX_DEPTH);
+        assert_eq!(
+            JitterBuffer::with_target_depth(99).target_depth(),
+            MAX_DEPTH
+        );
     }
 
     /// 尾帧已到时不必再等水位：不会再有更多数据了。
@@ -471,8 +523,10 @@ mod tests {
     fn a_last_flag_starts_playback_without_waiting_for_the_water_level() {
         let mut j = JitterBuffer::with_target_depth(MAX_DEPTH);
         j.push(0, vec![0], true);
-        assert!(matches!(j.pop(), Some(Frame::Audio(_))),
-            "a complete one-frame talkspurt must not wait for frames that will never come");
+        assert!(
+            matches!(j.pop(), Some(Frame::Audio(_))),
+            "a complete one-frame talkspurt must not wait for frames that will never come"
+        );
     }
 
     /// `extend` 与 [`seq_cmp`] 必须对"谁在后面"给出同一个答案。

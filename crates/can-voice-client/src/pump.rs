@@ -84,7 +84,10 @@ pub(crate) async fn run(
             }
         };
 
-        subs.on_connected(Limits { max_tx: l.max_tx, max_rx: l.max_rx });
+        subs.on_connected(Limits {
+            max_tx: l.max_tx,
+            max_rx: l.max_rx,
+        });
         emit_state(&events, &mut state, LinkState::Online);
 
         let outcome = pump(l, &mut subs, &events, &mut cmds).await;
@@ -116,7 +119,9 @@ pub(crate) async fn run(
             Outcome::Dropped(Disposition::Refused(reason)) => {
                 // 服务端专门为客户端造了这些串，所以它们要到得了上层，
                 // 而不是死在一行日志里。
-                let _ = events.send(Event::Refused { reason: reason.clone() });
+                let _ = events.send(Event::Refused {
+                    reason: reason.clone(),
+                });
                 tracing::warn!(?reason, "handshake refused");
                 // `token_expired` 是唯一可恢复的一条，但**换票不是这个库能做的事**
                 // ——它拿不到新 token。所以进 Offline，由上层换一张再 connect 一次。
@@ -165,7 +170,12 @@ async fn pump(
     events: &tokio::sync::broadcast::Sender<Event>,
     cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
 ) -> Outcome {
-    let Link { conn: quic, mut control_send, control_recv, .. } = link;
+    let Link {
+        conn: quic,
+        mut control_send,
+        control_recv,
+        ..
+    } = link;
     // **控制流的读取活在它自己的 task 里**，这里只 `recv()`。直接在 `select!` 里
     // 调用一个"读长度前缀再读包体"的 future 不是取消安全的：别的分支赢了的时候
     // 它会在两次读之间被丢掉，已经消费掉的字节回不来，控制流从此错位。
@@ -307,7 +317,10 @@ fn on_ack(
     // 照 `rejected` 派会让一个能听的频率显示成失败；而 `rejected` 本身有上界，
     // 截断之后基于它的推断全部失效。
     for f in subs.denied_tx() {
-        let _ = events.send(Event::TxDenied { freq_khz: f, reason: String::new() });
+        let _ = events.send(Event::TxDenied {
+            freq_khz: f,
+            reason: String::new(),
+        });
     }
     for f in subs.denied_rx() {
         let _ = events.send(Event::RxDenied { freq_khz: f });
@@ -317,7 +330,10 @@ fn on_ack(
 fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice) {
     use can_voice_proto::control::notice_kind;
     if n.kind == notice_kind::TX_DENIED {
-        let _ = events.send(Event::TxDenied { freq_khz: n.freq, reason: n.reason });
+        let _ = events.send(Event::TxDenied {
+            freq_khz: n.freq,
+            reason: n.reason,
+        });
     } else {
         let _ = events.send(Event::Notice {
             kind: n.kind,
@@ -346,8 +362,18 @@ fn on_datagram(
             t.last_seen = now;
         }
         None => {
-            talk.insert(key, Talkspurt { frames: 1, started: now, last_seen: now });
-            let _ = events.send(Event::RxStart { freq_khz: h.freq_khz, speaker: h.speaker });
+            talk.insert(
+                key,
+                Talkspurt {
+                    frames: 1,
+                    started: now,
+                    last_seen: now,
+                },
+            );
+            let _ = events.send(Event::RxStart {
+                freq_khz: h.freq_khz,
+                speaker: h.speaker,
+            });
         }
     }
     if h.is_last() {

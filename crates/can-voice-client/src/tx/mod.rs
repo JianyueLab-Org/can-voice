@@ -28,7 +28,10 @@ impl Encoder {
     pub fn new() -> Result<Self> {
         let mut inner = OpusEncoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         inner.set_bitrate(Bitrate::BitsPerSecond(BITRATE_BPS))?;
-        Ok(Self { inner, buf: vec![0u8; MAX_PACKET] })
+        Ok(Self {
+            inner,
+            buf: vec![0u8; MAX_PACKET],
+        })
     }
 
     /// 编一帧 20 ms 的单声道 PCM。

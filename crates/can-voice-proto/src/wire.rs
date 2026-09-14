@@ -225,7 +225,10 @@ mod tests {
 
     fn golden() -> Golden {
         // 与 Go 侧同一份文件。改它等于改协议。
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../server/testdata/wire-golden.json");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../server/testdata/wire-golden.json"
+        );
         let raw = std::fs::read(path)
             .unwrap_or_else(|e| panic!("read {path}: {e} — P2 Task 1 must have produced it"));
         serde_json::from_slice(&raw).expect("parse golden")
@@ -240,7 +243,10 @@ mod tests {
     /// 而写死数量只会让"加了一个用例"表现成一条测试失败。
     #[test]
     fn the_golden_file_has_cases_to_check() {
-        assert!(!golden().cases.is_empty(), "a golden file with no cases proves nothing");
+        assert!(
+            !golden().cases.is_empty(),
+            "a golden file with no cases proves nothing"
+        );
     }
 
     #[test]
@@ -285,7 +291,11 @@ mod tests {
     #[test]
     fn parse_rejects_an_unknown_version() {
         let mut out = Vec::new();
-        Header { ver: 2, ..Default::default() }.write_to(&mut out);
+        Header {
+            ver: 2,
+            ..Default::default()
+        }
+        .write_to(&mut out);
         assert!(
             Header::parse(&out).is_err(),
             "silently accepting an unknown version means decoding a future layout as if it were this one"
@@ -296,8 +306,13 @@ mod tests {
     fn a_header_with_no_payload_is_valid() {
         // 尾帧可以不带 Opus 载荷。
         let mut out = Vec::new();
-        Header { ver: VERSION, flags: FLAG_LAST, freq_khz: 118_000, ..Default::default() }
-            .write_to(&mut out);
+        Header {
+            ver: VERSION,
+            flags: FLAG_LAST,
+            freq_khz: 118_000,
+            ..Default::default()
+        }
+        .write_to(&mut out);
         let (_, opus) = Header::parse(&out).expect("parse");
         assert!(opus.is_empty());
     }
@@ -335,7 +350,11 @@ mod tests {
         let (h, _) = Header::parse(&out).expect("reserved bits must not be rejected");
         assert!(h.is_first());
         assert!(!h.is_last());
-        assert_eq!(h.flags & RESERVED_FLAGS, RESERVED_FLAGS, "the bits must survive parsing unchanged");
+        assert_eq!(
+            h.flags & RESERVED_FLAGS,
+            RESERVED_FLAGS,
+            "the bits must survive parsing unchanged"
+        );
     }
 
     // ——— seq 的回绕比较（修订件 §八.1）———

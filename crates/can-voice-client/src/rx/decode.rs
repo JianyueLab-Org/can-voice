@@ -45,10 +45,16 @@ impl Decoder {
             return Err(Error::BufferTooSmall(out.len()));
         }
         match frame {
-            Frame::Audio(p) => Ok(self.inner.decode(Some(p), &mut out[..FRAME_SAMPLES], false)?),
+            Frame::Audio(p) => Ok(self
+                .inner
+                .decode(Some(p), &mut out[..FRAME_SAMPLES], false)?),
             // 丢包隐藏：让 Opus 用前一帧外推。填静音会在音频里留下一个
             // 清晰的"咔哒"，比稍微失真难听得多。
-            Frame::Lost => Ok(self.inner.decode(None::<&[u8]>, &mut out[..FRAME_SAMPLES], false)?),
+            Frame::Lost => {
+                Ok(self
+                    .inner
+                    .decode(None::<&[u8]>, &mut out[..FRAME_SAMPLES], false)?)
+            }
             Frame::End => Ok(0),
         }
     }
@@ -77,11 +83,18 @@ mod tests {
 
         let packet = enc.encode(&pcm).expect("encode");
         assert!(!packet.is_empty(), "encoding produced no bytes");
-        assert!(packet.len() < 400, "a 20 ms voice frame should be small, got {}", packet.len());
+        assert!(
+            packet.len() < 400,
+            "a 20 ms voice frame should be small, got {}",
+            packet.len()
+        );
 
         let mut out = vec![0i16; FRAME_SAMPLES];
         let n = dec.decode(&Frame::Audio(packet), &mut out).expect("decode");
-        assert_eq!(n, FRAME_SAMPLES, "a 20 ms frame decodes to {FRAME_SAMPLES} samples");
+        assert_eq!(
+            n, FRAME_SAMPLES,
+            "a 20 ms frame decodes to {FRAME_SAMPLES} samples"
+        );
 
         // Opus 是有损的，不能比对样本；比对能量即可。
         let energy: f64 = out.iter().map(|&v| (v as f64).abs()).sum();
@@ -106,7 +119,10 @@ mod tests {
         let n = dec.decode(&Frame::Lost, &mut out).expect("conceal");
         assert_eq!(n, FRAME_SAMPLES);
         let energy: f64 = out.iter().map(|&v| (v as f64).abs()).sum();
-        assert!(energy > 0.0, "packet loss concealment produced pure silence");
+        assert!(
+            energy > 0.0,
+            "packet loss concealment produced pure silence"
+        );
     }
 
     #[test]
@@ -128,8 +144,10 @@ mod tests {
     #[test]
     fn encoding_rejects_a_wrong_sized_frame() {
         let mut enc = Encoder::new().expect("encoder");
-        assert!(enc.encode(&vec![0i16; 123]).is_err(),
-            "only exact 20 ms frames are valid; a wrong size must fail loudly");
+        assert!(
+            enc.encode(&vec![0i16; 123]).is_err(),
+            "only exact 20 ms frames are valid; a wrong size must fail loudly"
+        );
     }
 
     #[test]
@@ -144,7 +162,11 @@ mod tests {
     /// 所以用一条真正会算的断言来表达它。
     #[test]
     fn a_frame_is_exactly_twenty_milliseconds() {
-        assert_eq!(FRAME_SAMPLES * 50, SAMPLE_RATE as usize,
-            "a 20 ms frame at {SAMPLE_RATE} Hz is {} samples", SAMPLE_RATE / 50);
+        assert_eq!(
+            FRAME_SAMPLES * 50,
+            SAMPLE_RATE as usize,
+            "a 20 ms frame at {SAMPLE_RATE} Hz is {} samples",
+            SAMPLE_RATE / 50
+        );
     }
 }

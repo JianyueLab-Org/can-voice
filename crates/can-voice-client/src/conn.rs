@@ -147,7 +147,9 @@ pub fn classify_close(code: u64, reason: &str) -> Disposition {
         CLOSE_NORMAL => Disposition::Reconnect,
         CLOSE_HANDSHAKE_REFUSED => Disposition::Refused(RefusedReason::parse(reason)),
         CLOSE_EVICTED => Disposition::Evicted,
-        CLOSE_PROTOCOL_VIOLATION => Disposition::ProtocolViolation(ProtocolViolation::parse(reason)),
+        CLOSE_PROTOCOL_VIOLATION => {
+            Disposition::ProtocolViolation(ProtocolViolation::parse(reason))
+        }
         _ => Disposition::Reconnect,
     }
 }
@@ -190,7 +192,11 @@ impl Default for ReconnectPolicy {
 
 impl ReconnectPolicy {
     pub fn new() -> Self {
-        Self { attempts: 0, ever_established: false, state: LinkState::Connecting }
+        Self {
+            attempts: 0,
+            ever_established: false,
+            state: LinkState::Connecting,
+        }
     }
 
     /// 现在可以（再）拨一次吗。
@@ -248,7 +254,8 @@ impl ReconnectPolicy {
 /// 按呼号查位置的键），紧了会把合法呼号挡在外面。
 pub fn is_valid_callsign(s: &str) -> bool {
     (2..=10).contains(&s.len())
-        && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -303,7 +310,9 @@ fn crypto_config(roots: &TrustRoots) -> Result<rustls::ClientConfig, Error> {
             for c in certs {
                 store.add(c.clone())?;
             }
-            builder.with_root_certificates(Arc::new(store)).with_no_client_auth()
+            builder
+                .with_root_certificates(Arc::new(store))
+                .with_no_client_auth()
         }
     };
     cfg.alpn_protocols = vec![ALPN.to_vec()];
@@ -381,7 +390,9 @@ pub async fn write_msg(s: &mut quinn::SendStream, m: &Message) -> Result<(), Err
     let body = m.encode()?;
     let mut framed = Vec::with_capacity(body.len() + 4);
     control::write_frame(&mut framed, &body)?;
-    s.write_all(&framed).await.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    s.write_all(&framed)
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
     Ok(())
 }
 
@@ -449,10 +460,14 @@ where
 /// 握手期间读一条消息。此时还没有 `pump`，所以直接读，没有取消安全的问题。
 async fn read_one(r: &mut quinn::RecvStream) -> Result<Message, Error> {
     let mut hdr = [0u8; 4];
-    r.read_exact(&mut hdr).await.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    r.read_exact(&mut hdr)
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
     let n = control::check_frame_len(u32::from_be_bytes(hdr))?;
     let mut body = vec![0u8; n];
-    r.read_exact(&mut body).await.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    r.read_exact(&mut body)
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(e)))?;
     Ok(Message::decode(&body)?)
 }
 
@@ -467,7 +482,10 @@ mod tests {
         // 首次连接失败是密码错或地址错。重试只是把同一个错误打印三遍。
         let mut p = ReconnectPolicy::new();
         assert!(p.may_attempt(), "the first attempt is always allowed");
-        assert!(!p.may_attempt(), "a never-established link must not be retried");
+        assert!(
+            !p.may_attempt(),
+            "a never-established link must not be retried"
+        );
         assert_eq!(p.state(), LinkState::Offline);
     }
 
@@ -478,7 +496,11 @@ mod tests {
         p.on_session_established();
 
         for i in 0..RECONNECT_LIMIT {
-            assert!(p.may_attempt(), "reconnect {} of {RECONNECT_LIMIT} must be allowed", i + 1);
+            assert!(
+                p.may_attempt(),
+                "reconnect {} of {RECONNECT_LIMIT} must be allowed",
+                i + 1
+            );
             assert_eq!(p.state(), LinkState::Reconnecting);
         }
         assert!(!p.may_attempt(), "the fourth reconnect must be refused");
@@ -498,7 +520,11 @@ mod tests {
         p.may_attempt();
         p.on_session_established(); // 这次是真连上了
         for i in 0..RECONNECT_LIMIT {
-            assert!(p.may_attempt(), "the counter should have reset; attempt {} refused", i + 1);
+            assert!(
+                p.may_attempt(),
+                "the counter should have reset; attempt {} refused",
+                i + 1
+            );
         }
         assert!(!p.may_attempt());
     }
@@ -525,7 +551,10 @@ mod tests {
     /// 唯一的出路是读关闭码，把码 2 当终态。
     #[test]
     fn eviction_is_terminal_and_the_reconnect_counter_cannot_save_us() {
-        assert_eq!(classify_close(CLOSE_EVICTED, "evicted"), Disposition::Evicted);
+        assert_eq!(
+            classify_close(CLOSE_EVICTED, "evicted"),
+            Disposition::Evicted
+        );
         assert!(Disposition::Evicted.is_terminal());
 
         // 演示计数器为什么挡不住：每一次重连都"成功"，于是永远重置。
@@ -577,12 +606,22 @@ mod tests {
     #[test]
     fn a_protocol_violation_names_which_bug_it_is() {
         for (reason, want) in [
-            ("control_write_stalled", ProtocolViolation::ControlWriteStalled),
-            ("control_read_stalled", ProtocolViolation::ControlReadStalled),
+            (
+                "control_write_stalled",
+                ProtocolViolation::ControlWriteStalled,
+            ),
+            (
+                "control_read_stalled",
+                ProtocolViolation::ControlReadStalled,
+            ),
             ("ack_undeliverable", ProtocolViolation::AckUndeliverable),
         ] {
             let d = classify_close(CLOSE_PROTOCOL_VIOLATION, reason);
-            assert_eq!(d, Disposition::ProtocolViolation(want.clone()), "reason {reason}");
+            assert_eq!(
+                d,
+                Disposition::ProtocolViolation(want.clone()),
+                "reason {reason}"
+            );
             assert!(d.is_terminal(), "reconnecting replays the same bug forever");
         }
     }
@@ -604,7 +643,15 @@ mod tests {
         for good in ["CCA", "CCA1501", "ZSPD_TWR", "A-1", "AB"] {
             assert!(is_valid_callsign(good), "{good} should be valid");
         }
-        for bad in ["", "A", "ABCDEFGHIJK", "cca150", "CCA 150", "CCA.150", "呼号"] {
+        for bad in [
+            "",
+            "A",
+            "ABCDEFGHIJK",
+            "cca150",
+            "CCA 150",
+            "CCA.150",
+            "呼号",
+        ] {
             assert!(!is_valid_callsign(bad), "{bad:?} should be rejected");
         }
     }
@@ -624,7 +671,9 @@ mod tests {
         let mut rx = spawn_control_reader(r);
         for t in [1i64, 2, 3] {
             let bytes = frame_of(&Message::Ping(control::Ping { t }));
-            tokio::io::AsyncWriteExt::write_all(&mut w, &bytes).await.expect("write");
+            tokio::io::AsyncWriteExt::write_all(&mut w, &bytes)
+                .await
+                .expect("write");
         }
         for t in [1i64, 2, 3] {
             match rx.recv().await.expect("a message").expect("ok") {
@@ -652,7 +701,9 @@ mod tests {
         let writer = tokio::spawn(async move {
             for t in 0i64..8 {
                 for b in frame_of(&Message::Ping(control::Ping { t })) {
-                    tokio::io::AsyncWriteExt::write_all(&mut w, &[b]).await.expect("write");
+                    tokio::io::AsyncWriteExt::write_all(&mut w, &[b])
+                        .await
+                        .expect("write");
                     tokio::task::yield_now().await;
                 }
             }
@@ -672,8 +723,11 @@ mod tests {
             }
         }
         writer.await.expect("writer");
-        assert_eq!(got, (0i64..8).collect::<Vec<_>>(),
-            "a cancel-safe reader loses neither bytes nor ordering");
+        assert_eq!(
+            got,
+            (0i64..8).collect::<Vec<_>>(),
+            "a cancel-safe reader loses neither bytes nor ordering"
+        );
     }
 
     /// M3：长度上限只有一处实现，异步这一侧不许自己重写一遍那段算术。
@@ -681,10 +735,17 @@ mod tests {
     async fn an_oversized_length_prefix_is_refused_by_the_shared_check() {
         let (mut w, r) = tokio::io::duplex(64);
         let mut rx = spawn_control_reader(r);
-        tokio::io::AsyncWriteExt::write_all(&mut w, &[0xff, 0xff, 0xff, 0xff]).await.expect("write");
+        tokio::io::AsyncWriteExt::write_all(&mut w, &[0xff, 0xff, 0xff, 0xff])
+            .await
+            .expect("write");
         let err = rx.recv().await.expect("a result").expect_err("must refuse");
-        assert!(matches!(err, Error::Control(can_voice_proto::control::Error::TooLarge(_))),
-            "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                Error::Control(can_voice_proto::control::Error::TooLarge(_))
+            ),
+            "got {err:?}"
+        );
     }
 
     /// **这条测试证明 C3 要防的 bug 真的存在**，而且是确定性的、不靠时序。
@@ -702,18 +763,27 @@ mod tests {
         let (prefix, body) = frame.split_at(4);
 
         // 只给前缀。
-        tokio::io::AsyncWriteExt::write_all(&mut w, prefix).await.expect("write");
+        tokio::io::AsyncWriteExt::write_all(&mut w, prefix)
+            .await
+            .expect("write");
         let cancelled = tokio::time::timeout(
             std::time::Duration::from_millis(20),
             read_frame_async(&mut r),
         )
         .await;
-        assert!(cancelled.is_err(), "the read must still be waiting for the body");
+        assert!(
+            cancelled.is_err(),
+            "the read must still be waiting for the body"
+        );
 
         // 现在把包体和一整帧都给它。
-        tokio::io::AsyncWriteExt::write_all(&mut w, body).await.expect("write");
+        tokio::io::AsyncWriteExt::write_all(&mut w, body)
+            .await
+            .expect("write");
         let next = frame_of(&Message::Ping(control::Ping { t: 8 }));
-        tokio::io::AsyncWriteExt::write_all(&mut w, &next).await.expect("write");
+        tokio::io::AsyncWriteExt::write_all(&mut w, &next)
+            .await
+            .expect("write");
 
         // 那 4 个字节已经没了，于是下一次读拿包体的头 4 个字节当长度前缀。
         let out = read_frame_async(&mut r).await;

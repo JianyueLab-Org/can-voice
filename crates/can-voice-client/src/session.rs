@@ -121,8 +121,14 @@ impl SubscriptionState {
     }
 
     fn difference(declared: Option<&Vec<u32>>, granted: &[u32]) -> Vec<u32> {
-        let Some(declared) = declared else { return Vec::new() };
-        declared.iter().copied().filter(|f| !granted.contains(f)).collect()
+        let Some(declared) = declared else {
+            return Vec::new();
+        };
+        declared
+            .iter()
+            .copied()
+            .filter(|f| !granted.contains(f))
+            .collect()
     }
 }
 
@@ -132,12 +138,18 @@ mod tests {
     use can_voice_proto::control::{Sub, SubAck};
 
     fn sub(rx: &[u32]) -> Sub {
-        Sub { rx: rx.to_vec(), ..Default::default() }
+        Sub {
+            rx: rx.to_vec(),
+            ..Default::default()
+        }
     }
 
     fn online() -> SubscriptionState {
         let mut s = SubscriptionState::new();
-        s.on_connected(Limits { max_tx: 32, max_rx: 32 });
+        s.on_connected(Limits {
+            max_tx: 32,
+            max_rx: 32,
+        });
         s
     }
 
@@ -145,9 +157,15 @@ mod tests {
     fn a_declaration_made_while_offline_is_sent_on_connect() {
         let mut s = SubscriptionState::new();
         s.declare(sub(&[118_000]));
-        assert!(s.take_pending().is_none(), "nothing can be sent before the link is up");
+        assert!(
+            s.take_pending().is_none(),
+            "nothing can be sent before the link is up"
+        );
 
-        s.on_connected(Limits { max_tx: 32, max_rx: 32 });
+        s.on_connected(Limits {
+            max_tx: 32,
+            max_rx: 32,
+        });
         assert_eq!(s.take_pending(), Some(sub(&[118_000])));
     }
 
@@ -156,7 +174,10 @@ mod tests {
         let mut s = online();
         s.declare(sub(&[118_000]));
         assert!(s.take_pending().is_some());
-        assert!(s.take_pending().is_none(), "an unchanged declaration must not be resent every tick");
+        assert!(
+            s.take_pending().is_none(),
+            "an unchanged declaration must not be resent every tick"
+        );
     }
 
     #[test]
@@ -178,10 +199,16 @@ mod tests {
         let mut s = online();
         s.declare(sub(&[118_000, 121_800]));
         s.take_pending();
-        s.on_ack(SubAck { rx: vec![118_000, 121_800], ..Default::default() });
+        s.on_ack(SubAck {
+            rx: vec![118_000, 121_800],
+            ..Default::default()
+        });
 
         s.on_disconnected();
-        s.on_connected(Limits { max_tx: 32, max_rx: 32 });
+        s.on_connected(Limits {
+            max_tx: 32,
+            max_rx: 32,
+        });
         assert_eq!(
             s.take_pending(),
             Some(sub(&[118_000, 121_800])),
@@ -196,7 +223,10 @@ mod tests {
         let mut s = online();
         s.declare(sub(&[118_000]));
         s.take_pending();
-        s.on_ack(SubAck { rx: vec![118_000], ..Default::default() });
+        s.on_ack(SubAck {
+            rx: vec![118_000],
+            ..Default::default()
+        });
         assert_eq!(s.acknowledged().rx, vec![118_000]);
 
         s.on_disconnected();
@@ -211,7 +241,11 @@ mod tests {
         // 服务端可能拒掉超出 max_tx 的频率。上层要显示被接受的那一份，
         // 不是我们请求的那一份。
         let mut s = online();
-        s.declare(Sub { rx: vec![118_000], tx: vec![118_000, 121_800], ..Default::default() });
+        s.declare(Sub {
+            rx: vec![118_000],
+            tx: vec![118_000, 121_800],
+            ..Default::default()
+        });
         s.take_pending();
         s.on_ack(SubAck {
             rx: vec![118_000],
@@ -263,7 +297,11 @@ mod tests {
     #[test]
     fn a_frequency_rejected_for_tx_but_granted_for_rx_is_not_an_rx_failure() {
         let mut s = online();
-        s.declare(Sub { rx: vec![121_800], tx: vec![121_800], ..Default::default() });
+        s.declare(Sub {
+            rx: vec![121_800],
+            tx: vec![121_800],
+            ..Default::default()
+        });
         s.take_pending();
         s.on_ack(SubAck {
             rx: vec![121_800],
@@ -280,7 +318,10 @@ mod tests {
     fn a_truncated_rejection_list_does_not_disturb_the_difference() {
         let mut s = online();
         let rx: Vec<u32> = (0..40).map(|i| 118_000 + i * 25).collect();
-        s.declare(Sub { rx: rx.clone(), ..Default::default() });
+        s.declare(Sub {
+            rx: rx.clone(),
+            ..Default::default()
+        });
         s.take_pending();
         s.on_ack(SubAck {
             rx: rx[..32].to_vec(),
@@ -289,7 +330,11 @@ mod tests {
             ..Default::default()
         });
         assert!(s.acknowledged().rejected_truncated);
-        assert_eq!(s.denied_rx(), rx[32..].to_vec(), "the difference is complete even when the list is not");
+        assert_eq!(
+            s.denied_rx(),
+            rx[32..].to_vec(),
+            "the difference is complete even when the list is not"
+        );
     }
 
     /// 差集要对着**发出去的那一份**算，不是对着当前意图。
@@ -301,9 +346,15 @@ mod tests {
         s.take_pending();
         // ACK 在路上时用户又改了。
         s.declare(sub(&[136_975]));
-        s.on_ack(SubAck { rx: vec![118_000], ..Default::default() });
-        assert_eq!(s.denied_rx(), vec![121_800],
-            "the ack answers what was sent, not what the user has since typed");
+        s.on_ack(SubAck {
+            rx: vec![118_000],
+            ..Default::default()
+        });
+        assert_eq!(
+            s.denied_rx(),
+            vec![121_800],
+            "the ack answers what was sent, not what the user has since typed"
+        );
     }
 
     // ——— C1：交叉耦合被拒必须留得住 ———
@@ -333,16 +384,32 @@ mod tests {
     #[test]
     fn the_server_limits_survive_into_the_state() {
         let mut s = SubscriptionState::new();
-        assert_eq!(s.limits(), None, "before READY there is nothing to clamp against");
-        s.on_connected(Limits { max_tx: 4, max_rx: 8 });
-        assert_eq!(s.limits(), Some(Limits { max_tx: 4, max_rx: 8 }));
+        assert_eq!(
+            s.limits(),
+            None,
+            "before READY there is nothing to clamp against"
+        );
+        s.on_connected(Limits {
+            max_tx: 4,
+            max_rx: 8,
+        });
+        assert_eq!(
+            s.limits(),
+            Some(Limits {
+                max_tx: 4,
+                max_rx: 8
+            })
+        );
     }
 
     #[test]
     fn a_disconnect_forgets_the_limits_too() {
         let mut s = online();
         s.on_disconnected();
-        assert_eq!(s.limits(), None,
-            "the next READY may carry different limits; a stale one would clamp wrongly");
+        assert_eq!(
+            s.limits(),
+            None,
+            "the next READY may carry different limits; a stale one would clamp wrongly"
+        );
     }
 }

@@ -149,8 +149,18 @@ impl RadioStack {
     /// 三份列表都**排序**：声明因此是这组开关的一个确定函数，
     /// "这次的声明和上次一样吗"才判得出来，而服务端的 ACK 本来也是排好序的。
     pub fn to_subscription(&self) -> Declaration {
-        let mut rx: Vec<u32> = self.radios.iter().filter(|r| r.rx).map(|r| r.freq_khz).collect();
-        let mut tx: Vec<u32> = self.radios.iter().filter(|r| r.tx).map(|r| r.freq_khz).collect();
+        let mut rx: Vec<u32> = self
+            .radios
+            .iter()
+            .filter(|r| r.rx)
+            .map(|r| r.freq_khz)
+            .collect();
+        let mut tx: Vec<u32> = self
+            .radios
+            .iter()
+            .filter(|r| r.tx)
+            .map(|r| r.freq_khz)
+            .collect();
         rx.sort_unstable();
         tx.sort_unstable();
 
@@ -160,8 +170,12 @@ impl RadioStack {
         // 先排序再两两组合，于是每一对天然是 [小, 大]：服务端的 normaliseXC 在
         // **判完之后**才把次序颠倒的对调过来，所以被拒的对是按客户端发的原样回来的
         // ——自己先规范化，`rejected_xc` 才对得上自己的声明。
-        let mut coupled: Vec<u32> =
-            self.radios.iter().filter(|r| r.xc).map(|r| r.freq_khz).collect();
+        let mut coupled: Vec<u32> = self
+            .radios
+            .iter()
+            .filter(|r| r.xc)
+            .map(|r| r.freq_khz)
+            .collect();
         coupled.sort_unstable();
         let mut xc = Vec::new();
         for (i, a) in coupled.iter().enumerate() {
@@ -169,9 +183,16 @@ impl RadioStack {
                 xc.push([*a, *b]);
             }
         }
-        let dropped_xc = if xc.len() > MAX_XC_PAIRS { xc.split_off(MAX_XC_PAIRS) } else { Vec::new() };
+        let dropped_xc = if xc.len() > MAX_XC_PAIRS {
+            xc.split_off(MAX_XC_PAIRS)
+        } else {
+            Vec::new()
+        };
 
-        Declaration { sub: Sub { rx, tx, xc }, dropped_xc }
+        Declaration {
+            sub: Sub { rx, tx, xc },
+            dropped_xc,
+        }
     }
 
     fn get_mut(&mut self, freq_khz: u32) -> Option<&mut Radio> {
@@ -192,7 +213,10 @@ mod tests {
     }
 
     fn radio(s: &RadioStack, freq: u32) -> &Radio {
-        s.radios().iter().find(|r| r.freq_khz == freq).expect("radio present")
+        s.radios()
+            .iter()
+            .find(|r| r.freq_khz == freq)
+            .expect("radio present")
     }
 
     // 以下三条耦合规则抄自 TrackAudio 的 radio.tsx，
@@ -207,7 +231,10 @@ mod tests {
 
         s.set_rx(121_800, false);
         let r = radio(&s, 121_800);
-        assert!(!r.rx && !r.tx && !r.xc, "clearing rx must clear tx and xc, got {r:?}");
+        assert!(
+            !r.rx && !r.tx && !r.xc,
+            "clearing rx must clear tx and xc, got {r:?}"
+        );
     }
 
     #[test]
@@ -225,7 +252,10 @@ mod tests {
         s.set_rx(121_800, false);
         s.set_xc(121_800, true);
         let r = radio(&s, 121_800);
-        assert!(r.rx && r.tx && r.xc, "xc must force rx and tx on, got {r:?}");
+        assert!(
+            r.rx && r.tx && r.xc,
+            "xc must force rx and tx on, got {r:?}"
+        );
     }
 
     /// 修订件 L12：`set_tx(f, false)` 顺带清掉 `xc` 是**必要**的——耦合的前提是
@@ -238,7 +268,10 @@ mod tests {
         s.set_xc(121_800, true);
         s.set_tx(121_800, false);
         let r = radio(&s, 121_800);
-        assert!(!r.xc, "a radio that cannot transmit cannot be cross-coupled, got {r:?}");
+        assert!(
+            !r.xc,
+            "a radio that cannot transmit cannot be cross-coupled, got {r:?}"
+        );
     }
 
     #[test]
@@ -266,7 +299,10 @@ mod tests {
         let d = s.to_subscription();
         assert!(d.sub.rx.contains(&118_000));
         assert!(d.sub.rx.contains(&121_800));
-        assert!(!d.sub.rx.contains(&124_550), "a radio with rx off must not be subscribed");
+        assert!(
+            !d.sub.rx.contains(&124_550),
+            "a radio with rx off must not be subscribed"
+        );
         assert_eq!(d.sub.tx, vec![121_800]);
     }
 
@@ -279,7 +315,12 @@ mod tests {
         s.set_xc(124_550, true);
 
         let d = s.to_subscription();
-        assert_eq!(d.sub.xc.len(), 3, "three cross-coupled radios make three pairs, got {:?}", d.sub.xc);
+        assert_eq!(
+            d.sub.xc.len(),
+            3,
+            "three cross-coupled radios make three pairs, got {:?}",
+            d.sub.xc
+        );
     }
 
     #[test]
@@ -315,7 +356,10 @@ mod tests {
         for p in &d.sub.xc {
             assert!(p[0] < p[1], "pair {p:?} must be ordered low-high");
         }
-        assert_eq!(d.sub.xc, vec![[118_000, 121_800], [118_000, 124_550], [121_800, 124_550]]);
+        assert_eq!(
+            d.sub.xc,
+            vec![[118_000, 121_800], [118_000, 124_550], [121_800, 124_550]]
+        );
     }
 
     /// 超过 `MAX_XC_PAIRS` 的部分不上线，而且要报给上层。
@@ -331,12 +375,23 @@ mod tests {
             s.set_xc(*f, true);
         }
         let d = s.to_subscription();
-        assert_eq!(d.sub.xc.len(), MAX_XC_PAIRS, "the declaration must not exceed the server limit");
-        assert_eq!(d.dropped_xc.len(), 136 - MAX_XC_PAIRS, "everything clamped must be reported upward");
+        assert_eq!(
+            d.sub.xc.len(),
+            MAX_XC_PAIRS,
+            "the declaration must not exceed the server limit"
+        );
+        assert_eq!(
+            d.dropped_xc.len(),
+            136 - MAX_XC_PAIRS,
+            "everything clamped must be reported upward"
+        );
         // 夹掉的和发出去的合起来正好是全部意图，一对不多一对不少。
         assert_eq!(d.sub.xc.len() + d.dropped_xc.len(), 136);
         for p in &d.dropped_xc {
-            assert!(!d.sub.xc.contains(p), "a pair cannot be both declared and dropped: {p:?}");
+            assert!(
+                !d.sub.xc.contains(p),
+                "a pair cannot be both declared and dropped: {p:?}"
+            );
         }
     }
 
@@ -368,9 +423,15 @@ mod tests {
     #[test]
     fn removing_the_selected_radio_hands_the_marker_to_another() {
         let mut s = stack_with(&[118_000, 121_800]);
-        assert!(radio(&s, 118_000).selected, "the first radio added starts selected");
+        assert!(
+            radio(&s, 118_000).selected,
+            "the first radio added starts selected"
+        );
         s.remove(118_000);
-        assert!(radio(&s, 121_800).selected, "the marker must not vanish with the radio");
+        assert!(
+            radio(&s, 121_800).selected,
+            "the marker must not vanish with the radio"
+        );
     }
 
     #[test]

@@ -75,7 +75,12 @@ pub enum Event {
     /// 带上帧数和时长，是因为日志约定是**每次通话一行**而不是两行 ——
     /// 开始那一行在 DEBUG，这一行在 INFO 且自带全部信息。
     /// 这两个字段要**实算**：唯一的生产者填 0 的话，这条约定就只剩一句空话。
-    RxEnd { freq_khz: u32, speaker: u32, frames: u32, secs: f32 },
+    RxEnd {
+        freq_khz: u32,
+        speaker: u32,
+        frames: u32,
+        secs: f32,
+    },
     /// 声明了 TX 却没拿到。由**差集**得出（`发出去的 tx − ack.tx`），
     /// 不是从 `rejected` 里推断方向；`reason` 为空表示它来自差集而不是 NOTICE。
     TxDenied { freq_khz: u32, reason: String },
@@ -88,15 +93,28 @@ pub enum Event {
     /// 一对交叉耦合没有生效。
     ///
     /// 耦合对不在 `rx`/`tx` 里，差集公式管不到它，所以它必须有自己的事件。
-    XcDenied { a_khz: u32, b_khz: u32, reason: String },
+    XcDenied {
+        a_khz: u32,
+        b_khz: u32,
+        reason: String,
+    },
     /// 服务端的其它通知（`range_unavailable`、`sub_rejected`、`unknown_message`）。
-    Notice { kind: String, freq_khz: u32, reason: String },
+    Notice {
+        kind: String,
+        freq_khz: u32,
+        reason: String,
+    },
     /// 周期性的链路健康报告。
     ///
     /// 掉线时这些数字要跟着掉线日志一起打出来：
     /// "上行真的跟不上"和"网络抖了一下"需要完全不同的处理，
     /// 而旧实现的日志只写了一句 "voice connection dropped"。
-    Health { rtt_ms: u32, sent: u64, received: u64, lost: u64 },
+    Health {
+        rtt_ms: u32,
+        sent: u64,
+        received: u64,
+        lost: u64,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -149,7 +167,10 @@ impl VoiceClient {
 
         let (events_tx, _) = tokio::sync::broadcast::channel(256);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-        let client = VoiceClient { events_tx: events_tx.clone(), commands: cmd_tx };
+        let client = VoiceClient {
+            events_tx: events_tx.clone(),
+            commands: cmd_tx,
+        };
         tokio::spawn(crate::pump::run(cfg, link, events_tx, cmd_rx));
         Ok(client)
     }
@@ -211,7 +232,10 @@ mod tests {
     fn the_public_api_has_no_imperative_channel_verbs() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let files = rust_sources(&root);
-        assert!(files.len() >= 8, "expected the whole module tree, found {files:?}");
+        assert!(
+            files.len() >= 8,
+            "expected the whole module tree, found {files:?}"
+        );
 
         let mut scanned = 0usize;
         for path in &files {
@@ -233,7 +257,10 @@ mod tests {
                 }
             }
         }
-        assert!(scanned > 20, "only {scanned} public fns scanned; the walk is probably broken");
+        assert!(
+            scanned > 20,
+            "only {scanned} public fns scanned; the walk is probably broken"
+        );
     }
 
     fn rust_sources(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -255,7 +282,8 @@ mod tests {
     fn events_can_be_subscribed_to_before_anything_happens() {
         let (tx, _) = tokio::sync::broadcast::channel::<Event>(16);
         let mut rx = tx.subscribe();
-        tx.send(Event::State(crate::conn::LinkState::Online)).expect("send");
+        tx.send(Event::State(crate::conn::LinkState::Online))
+            .expect("send");
         assert!(matches!(
             rx.try_recv(),
             Ok(Event::State(crate::conn::LinkState::Online))
@@ -266,7 +294,12 @@ mod tests {
     fn rx_end_carries_enough_to_log_one_line_per_transmission() {
         // 日志约定：每次收到的通话一行，不是两行。开始是 DEBUG，
         // 结束那一行要自带时长和帧数。
-        let e = Event::RxEnd { freq_khz: 121_800, speaker: 7, frames: 127, secs: 2.5 };
+        let e = Event::RxEnd {
+            freq_khz: 121_800,
+            speaker: 7,
+            frames: 127,
+            secs: 2.5,
+        };
         match e {
             Event::RxEnd { frames, secs, .. } => {
                 assert_eq!(frames, 127);
@@ -283,7 +316,9 @@ mod tests {
     /// 东西客户端用不上，用户只看到一个没有理由的 Offline。
     #[test]
     fn a_refusal_reaches_the_upper_layer_with_its_reason() {
-        let e = Event::Refused { reason: crate::conn::RefusedReason::TokenExpired };
+        let e = Event::Refused {
+            reason: crate::conn::RefusedReason::TokenExpired,
+        };
         match e {
             Event::Refused { reason } => assert!(reason.is_recoverable()),
             other => panic!("{other:?}"),
@@ -294,7 +329,11 @@ mod tests {
     /// 管制员，正是整个重写要逃离的那类故障。
     #[test]
     fn a_rejected_cross_couple_pair_has_an_event_of_its_own() {
-        let e = Event::XcDenied { a_khz: 121_800, b_khz: 124_550, reason: "tx_not_granted".into() };
+        let e = Event::XcDenied {
+            a_khz: 121_800,
+            b_khz: 124_550,
+            reason: "tx_not_granted".into(),
+        };
         assert!(matches!(e, Event::XcDenied { a_khz: 121_800, .. }));
     }
 
@@ -303,7 +342,10 @@ mod tests {
     #[test]
     fn rx_and_tx_denials_are_separate_events() {
         let a = Event::RxDenied { freq_khz: 118_000 };
-        let b = Event::TxDenied { freq_khz: 118_000, reason: String::new() };
+        let b = Event::TxDenied {
+            freq_khz: 118_000,
+            reason: String::new(),
+        };
         assert_ne!(a, b);
     }
 
@@ -311,9 +353,19 @@ mod tests {
     /// 正是区分"上行真的扛不住"和"抖了一下"的东西，而那两者的处置完全不同。
     #[test]
     fn health_carries_what_a_drop_needs_to_explain_itself() {
-        let e = Event::Health { rtt_ms: 42, sent: 1000, received: 995, lost: 5 };
+        let e = Event::Health {
+            rtt_ms: 42,
+            sent: 1000,
+            received: 995,
+            lost: 5,
+        };
         match e {
-            Event::Health { rtt_ms, sent, received, lost } => {
+            Event::Health {
+                rtt_ms,
+                sent,
+                received,
+                lost,
+            } => {
                 assert_eq!(rtt_ms, 42);
                 assert_eq!(sent - received, lost);
             }
@@ -338,7 +390,9 @@ mod tests {
             output_device: None,
             extra_roots: Vec::new(),
         };
-        let err = VoiceClient::connect(cfg).await.expect_err("must not pretend to succeed");
+        let err = VoiceClient::connect(cfg)
+            .await
+            .expect_err("must not pretend to succeed");
         assert!(matches!(err, Error::BadAddress(_)), "got {err:?}");
     }
 
@@ -356,7 +410,9 @@ mod tests {
             output_device: None,
             extra_roots: Vec::new(),
         };
-        let err = VoiceClient::connect(cfg).await.expect_err("must reject the callsign");
+        let err = VoiceClient::connect(cfg)
+            .await
+            .expect_err("must reject the callsign");
         assert!(
             matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
             "got {err:?}"

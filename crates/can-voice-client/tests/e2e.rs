@@ -63,7 +63,9 @@ fn start_server(port: u16) -> Option<(Server, String)> {
 
 #[tokio::test]
 async fn a_client_can_hand_shake_subscribe_and_receive() {
-    let Some((_srv, addr)) = start_server(64738) else { return };
+    let Some((_srv, addr)) = start_server(64738) else {
+        return;
+    };
     let dir = fixture_dir();
 
     let token = std::fs::read_to_string(dir.join("token.txt")).expect("token fixture");
@@ -80,7 +82,9 @@ async fn a_client_can_hand_shake_subscribe_and_receive() {
         output_device: None,
         extra_roots: vec![root],
     };
-    let client = can_voice_client::VoiceClient::connect(cfg).await.expect("connect");
+    let client = can_voice_client::VoiceClient::connect(cfg)
+        .await
+        .expect("connect");
     let mut events = client.events();
 
     client.set_subscription(can_voice_proto::control::Sub {
@@ -110,9 +114,13 @@ async fn a_client_can_hand_shake_subscribe_and_receive() {
 /// 没有理由的 Offline。这同时验证了握手真的在 `connect` 里等完了（M6）。
 #[tokio::test]
 async fn an_expired_token_is_refused_with_a_reason() {
-    let Some((_srv, addr)) = start_server(64739) else { return };
+    let Some((_srv, addr)) = start_server(64739) else {
+        return;
+    };
     let dir = fixture_dir();
-    let Ok(token) = std::fs::read_to_string(dir.join("token-expired.txt")) else { return };
+    let Ok(token) = std::fs::read_to_string(dir.join("token-expired.txt")) else {
+        return;
+    };
     let root = std::fs::read(dir.join("ca.der")).expect("ca.der fixture");
 
     let cfg = can_voice_client::Config {
@@ -125,7 +133,9 @@ async fn an_expired_token_is_refused_with_a_reason() {
         output_device: None,
         extra_roots: vec![root],
     };
-    let err = can_voice_client::VoiceClient::connect(cfg).await.expect_err("must be refused");
+    let err = can_voice_client::VoiceClient::connect(cfg)
+        .await
+        .expect_err("must be refused");
     let text = format!("{err}");
     assert!(
         text.contains("TokenExpired") || text.contains("token_expired"),
@@ -140,7 +150,9 @@ async fn an_expired_token_is_refused_with_a_reason() {
 /// SUBACK 真的回来了"的唯一证据——只看 `Online` 证明不了控制面在动。
 #[tokio::test]
 async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
-    let Some((_srv, addr)) = start_server(64740) else { return };
+    let Some((_srv, addr)) = start_server(64740) else {
+        return;
+    };
     let dir = fixture_dir();
     let token = std::fs::read_to_string(dir.join("token.txt")).expect("token fixture");
     let root = std::fs::read(dir.join("ca.der")).expect("ca.der fixture");
@@ -155,7 +167,9 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
         output_device: None,
         extra_roots: vec![root],
     };
-    let client = can_voice_client::VoiceClient::connect(cfg).await.expect("connect");
+    let client = can_voice_client::VoiceClient::connect(cfg)
+        .await
+        .expect("connect");
     let mut events = client.events();
 
     // MaxTX 是 8，这里声明 10 个。

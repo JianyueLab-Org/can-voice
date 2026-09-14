@@ -94,7 +94,10 @@ pub fn interfere(sources: &[&[i16]], out: &mut [i16], phase: &mut f32) {
 
     let step = 2.0 * std::f32::consts::PI * BEAT_HZ / 48_000.0;
     for (i, o) in out.iter_mut().enumerate() {
-        let sum: f32 = sources.iter().map(|s| s.get(i).copied().unwrap_or(0) as f32).sum();
+        let sum: f32 = sources
+            .iter()
+            .map(|s| s.get(i).copied().unwrap_or(0) as f32)
+            .sum();
         // 拍频调制：幅度随啸叫起伏，这是"两个载波在打架"的听感来源。
         let beat = phase.sin();
         *phase += step;
@@ -155,7 +158,11 @@ mod tests {
 
     #[test]
     fn full_quality_is_unity_gain() {
-        assert!((quality_gain(255) - 1.0).abs() < 0.01, "qual 255 = {}", quality_gain(255));
+        assert!(
+            (quality_gain(255) - 1.0).abs() < 0.01,
+            "qual 255 = {}",
+            quality_gain(255)
+        );
     }
 
     #[test]
@@ -171,7 +178,11 @@ mod tests {
     fn squelch_rises_as_quality_falls() {
         assert!(squelch_level(255) < squelch_level(128));
         assert!(squelch_level(128) < squelch_level(1));
-        assert_eq!(squelch_level(255), 0.0, "a full-quality signal carries no squelch");
+        assert_eq!(
+            squelch_level(255),
+            0.0,
+            "a full-quality signal carries no squelch"
+        );
     }
 
     /// 修订件 §八.2：**下行 `qual` 恒在 1–255，永远不会是 0。**
@@ -183,8 +194,15 @@ mod tests {
     #[test]
     fn there_is_no_special_case_for_a_quality_of_zero() {
         // 0 只是公式的自然延续，不是一个哨兵值。
-        assert!((quality_gain(0) - 0.35).abs() < 0.001, "qual 0 = {}", quality_gain(0));
-        assert!(quality_gain(0) > 0.0, "a zero branch that silences audio would never be exercised");
+        assert!(
+            (quality_gain(0) - 0.35).abs() < 0.001,
+            "qual 0 = {}",
+            quality_gain(0)
+        );
+        assert!(
+            quality_gain(0) > 0.0,
+            "a zero branch that silences audio would never be exercised"
+        );
         assert!(squelch_level(0) > squelch_level(1));
     }
 
@@ -196,8 +214,12 @@ mod tests {
         apply_quality(&mut strong, 255, &mut n);
         let mut n2 = NoiseGen::new(1);
         apply_quality(&mut weak, 40, &mut n2);
-        assert!(rms(&weak) < rms(&strong),
-            "a low-quality signal must be quieter: weak={} strong={}", rms(&weak), rms(&strong));
+        assert!(
+            rms(&weak) < rms(&strong),
+            "a low-quality signal must be quieter: weak={} strong={}",
+            rms(&weak),
+            rms(&strong)
+        );
     }
 
     #[test]
@@ -206,7 +228,10 @@ mod tests {
         let mut silence = vec![0i16; 960];
         let mut n = NoiseGen::new(7);
         apply_quality(&mut silence, 40, &mut n);
-        assert!(rms(&silence) > 0.0, "a weak signal must carry audible squelch noise");
+        assert!(
+            rms(&silence) > 0.0,
+            "a weak signal must carry audible squelch noise"
+        );
     }
 
     #[test]
@@ -214,7 +239,11 @@ mod tests {
         let mut silence = vec![0i16; 960];
         let mut n = NoiseGen::new(7);
         apply_quality(&mut silence, 255, &mut n);
-        assert_eq!(rms(&silence), 0.0, "a full-quality signal must not have noise added");
+        assert_eq!(
+            rms(&silence),
+            0.0,
+            "a full-quality signal must not have noise added"
+        );
     }
 
     #[test]
@@ -232,12 +261,18 @@ mod tests {
         // 两个载波差频的声音，也是"听得出有两个人在压"的依据。
         let a = tone(500.0, 4800, 0.3);
         let b = tone(700.0, 4800, 0.3);
-        let plain: Vec<i16> =
-            a.iter().zip(&b).map(|(x, y)| x.saturating_add(*y)).collect();
+        let plain: Vec<i16> = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| x.saturating_add(*y))
+            .collect();
         let mut out = vec![0i16; 4800];
         let mut phase = 0.0;
         interfere(&[&a, &b], &mut out, &mut phase);
-        assert_ne!(out, plain, "interfere must do more than add the two sources");
+        assert_ne!(
+            out, plain,
+            "interfere must do more than add the two sources"
+        );
         assert!(rms(&out) > 0.0);
     }
 
@@ -248,7 +283,10 @@ mod tests {
         let mut out = vec![0i16; 960];
         let mut phase = 0.0;
         interfere(&[&a, &b], &mut out, &mut phase);
-        assert!(rms(&out) > rms(&a), "two people talking over each other should be more, not less");
+        assert!(
+            rms(&out) > rms(&a),
+            "two people talking over each other should be more, not less"
+        );
     }
 
     #[test]
@@ -268,8 +306,10 @@ mod tests {
         let loud = vec![i16::MAX; 960];
         let mut dst = vec![i16::MAX; 960];
         mix_into(&mut dst, &loud, 1.0);
-        assert!(dst.iter().all(|&v| v > 0),
-            "mixing two loud signals must not wrap around to negative");
+        assert!(
+            dst.iter().all(|&v| v > 0),
+            "mixing two loud signals must not wrap around to negative"
+        );
     }
 
     #[test]
@@ -293,7 +333,10 @@ mod tests {
         let mut b = NoiseGen::new(42);
         let xs: Vec<f32> = (0..100).map(|_| a.sample()).collect();
         let ys: Vec<f32> = (0..100).map(|_| b.sample()).collect();
-        assert_eq!(xs, ys, "noise must be reproducible so these tests are not flaky");
+        assert_eq!(
+            xs, ys,
+            "noise must be reproducible so these tests are not flaky"
+        );
     }
 
     #[test]

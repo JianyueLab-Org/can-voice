@@ -69,7 +69,11 @@ fn devices(input: bool) -> Vec<DeviceInfo> {
     } else {
         host.default_output_device().and_then(|d| d.name().ok())
     };
-    let list = if input { host.input_devices() } else { host.output_devices() };
+    let list = if input {
+        host.input_devices()
+    } else {
+        host.output_devices()
+    };
     let Ok(list) = list else {
         // 枚举失败不该让客户端起不来：没有设备也能听不能说，
         // 或者反过来，总比整个应用打不开好。
@@ -116,7 +120,11 @@ mod tests {
         // 44.1 kHz 是最常见的非 48 kHz 设备采样率，而且比例不是整数。
         let input = vec![0i16; 441];
         let out = resample_to_48k(&input, 44_100);
-        assert!((out.len() as i32 - 480).abs() <= 1, "441 samples at 44.1k is 10 ms = 480 at 48k, got {}", out.len());
+        assert!(
+            (out.len() as i32 - 480).abs() <= 1,
+            "441 samples at 44.1k is 10 ms = 480 at 48k, got {}",
+            out.len()
+        );
     }
 
     #[test]
@@ -124,13 +132,18 @@ mod tests {
         // 常数信号重采样后还该是同一个常数 —— 插值出别的值说明算错了。
         let input = vec![1000i16; 480];
         let out = resample_to_48k(&input, 24_000);
-        assert!(out.iter().all(|&v| (v - 1000).abs() <= 1),
-            "a constant signal must survive resampling, got {:?}", &out[..8]);
+        assert!(
+            out.iter().all(|&v| (v - 1000).abs() <= 1),
+            "a constant signal must survive resampling, got {:?}",
+            &out[..8]
+        );
     }
 
     #[test]
     fn the_two_directions_round_trip_approximately() {
-        let input: Vec<i16> = (0..480).map(|i| ((i as f32 / 10.0).sin() * 8000.0) as i16).collect();
+        let input: Vec<i16> = (0..480)
+            .map(|i| ((i as f32 / 10.0).sin() * 8000.0) as i16)
+            .collect();
         let up = resample_to_48k(&input, 24_000);
         let back = resample_from_48k(&up, 24_000);
         assert_eq!(back.len(), input.len());
@@ -149,8 +162,10 @@ mod tests {
         let input = vec![12_000i16; 240];
         let out = resample_to_48k(&input, 44_100);
         let tail = &out[out.len().saturating_sub(4)..];
-        assert!(tail.iter().all(|&v| (v - 12_000).abs() <= 1),
-            "the tail slid away from the signal: {tail:?}");
+        assert!(
+            tail.iter().all(|&v| (v - 12_000).abs() <= 1),
+            "the tail slid away from the signal: {tail:?}"
+        );
     }
 
     /// 设备枚举不该在没有声卡的机器上把客户端弄崩——CI 就是那种机器。
