@@ -1,0 +1,87 @@
+# can-voice 的 CI。这个仓库此前**没有任何 CI 配置**，所以 `-race` 跑不跑纯属惯例
+# ——而本分支已经出过一次"在单核 runner 上 5/5 必红"的测试，那是靠人手跑发现的。
+#
+# 四个 job 各自的理由写在各自底下。把它们拆开而不是串成一条，是为了让失败信息
+# 直接说出是哪一类问题：格式、静态检查、并发、还是单核调度。
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # 和 go.mod 的 toolchain 对齐。写死而不是用 stable：Go 换大版本时 vet 会多出
+  # 新检查，那时要的是一次**有意**的升级，不是某天早上 main 突然变红。
+  GO_VERSION: '1.27.1'
+
+jobs:
+  vet:
+    name: go vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # 整个仓库，不只是 server/：probe/ 也要编得过。
+      - run: go vet ./...
+
+  gofmt:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # gofmt -l 对格式不对的文件**只是把文件名打出来，退出码仍然是 0**，
+      # 所以直接 `run: gofmt -l .` 是一个永远绿的 job。这里显式判空。
+      - name: gofmt -l must be empty
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "these files are not gofmt'd:"
+            echo "$out"
+            exit 1
+          fi
+
+  test:
+    name: go test -race -count=2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # -race 不是可选项。这套代码里有整整一类只在竞态检测器下才会响的钉子
+      # （atomicDuration 存在的全部理由就是它——裸 var 在那里是一条实打实的
+      # 数据竞争，而第二轮又特意留了一条只在 -race 下咬人的钉子）。一个跳过
+      # -race 的 CI 会把它们悄悄作废，而且是静默作废：全绿。
+      #
+      # -count=2 是为了抓"第二遍就不成立"的测试：进程全局的计数器（router 的
+      # nextID 从不重置）、没清干净的 slog.SetDefault、上一条测试留下的
+      # goroutine。这个仓库里上面每一样都是真的存在的东西。
+      - run: go test ./server/... -race -count=2
+
+  test-single-core:
+    name: go test -race (GOMAXPROCS=1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # **这个 job 不是多余的。** 本分支出过一条在 GOMAXPROCS=1 下 5/5 必红的
+      # 测试（fsdfeed 的并发读者那条，58e55c7 修的），而它在多核上 20/20 全绿。
+      # 那次是人手跑出来的——一个只在多核 runner 上跑的 CI 会让同类问题一直
+      # 活着，直到某天有人在一台单核机器上跑测试，或者更糟：直到调度在生产上
+      # 恰好排成那个顺序。
+      #
+      # 单独一个 job 而不是在上面那个里多跑一遍：红的时候要一眼看出是**调度**
+      # 问题而不是普通的失败。
+      - run: GOMAXPROCS=1 go test ./server/... -race
