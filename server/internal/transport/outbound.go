@@ -1,10 +1,13 @@
 package transport
 
 import (
+	"errors"
 	"log/slog"
+	"net"
 	"sync"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/wire"
+	"github.com/quic-go/quic-go"
 )
 
 // outboundDepth 是每条会话的发送队列深度，单位是帧（20 ms 一帧），
@@ -55,6 +58,10 @@ type outbound struct {
 	quit   chan struct{}
 	exited chan struct{}
 	once   sync.Once
+
+	// reportedFailure 记着这条会话已经为一次"发不出去"说过话了。
+	// 只由排空 goroutine（run）读写，所以不需要锁——见 reportSendFailure。
+	reportedFailure bool
 }
 
 func newOutbound(send func([]byte) error) *outbound {
@@ -76,11 +83,24 @@ func newOutbound(send func([]byte) error) *outbound {
 // ——每秒 50 帧乘以听众数的拷贝，省下来是值得的。
 func (o *outbound) enqueue(p []byte) {
 	o.mu.Lock()
+	var report uint64
 	if len(o.q) >= outboundDepth {
-		o.dropOneLocked()
+		report = o.dropOneLocked()
 	}
 	o.q = append(o.q, p)
 	o.mu.Unlock()
+	// **日志在锁外。** enqueue 跑在扇出那个 goroutine 上，它串行遍历整个频率的
+	// 听众；而 slog 的默认 handler 一路写到 stderr，那是会卡的——docker 的
+	// json-file 驱动、journald 背压、一个满了的磁盘，都会让一次 Write 停住。
+	// 在锁里记日志等于：一个日志后端卡住 → 持锁的 enqueue 卡住 → 同一条会话的
+	// 排空 goroutine 也拿不到锁 → 扇出停在这个听众身上，整个频率一起哑。
+	//
+	// 那正是这条有界队列**专门要消除**的那种耦合（见上面的类型注释），只是把
+	// 慢的东西从"客户端的上行"换成了"日志后端"。锁里只数数，锁外才说话。
+	if report > 0 {
+		slog.Info("outbound queue overflowed, dropping audio",
+			"dropped_total", report, "depth", outboundDepth)
+	}
 	// 唤醒信号只需要"有活干"这一个比特：wake 满了说明排空 goroutine 还没来得及
 	// 消费上一个信号，而它消费之后会一直排到队列空为止，这一帧跑不掉。
 	select {
@@ -89,7 +109,11 @@ func (o *outbound) enqueue(p []byte) {
 	}
 }
 
-// dropOneLocked 丢掉一帧腾位置，调用时必须持锁。
+// dropOneLocked 丢掉一帧腾位置，调用时必须持锁。返回值是"这一次该汇报的
+// 丢帧总数"，不该汇报时返回 0——记日志的事留给锁外的调用方（见 enqueue）。
+//
+// 用 0 当"不用汇报"的哨兵是安全的：drops 是先自增再判的，所以真要汇报的时候
+// 它至少是 1。
 //
 // 丢最老的——实时音频里迟到的帧没有价值。唯一的例外是带 FlagLast 的那一帧：
 // 它是接收端用来熄灭 RX 指示灯的那一位（wire/header.go 写明它存在就是为了取代
@@ -97,14 +121,14 @@ func (o *outbound) enqueue(p []byte) {
 // 而且没有任何东西会来纠正——等于把刚刚设计掉的那个毛病又请回来。所以从最老的
 // 一端往后找第一个**不带** FlagLast 的丢掉；万一整队都是 FlagLast（病态情况），
 // 才丢最老的那个。
-func (o *outbound) dropOneLocked() {
+func (o *outbound) dropOneLocked() uint64 {
 	// 空队列直接回。今天到不了这里——唯一的调用方先判了 len(o.q) >= outboundDepth
 	// ——但下面那句 o.q[victim+1:] 在空队列上是 o.q[1:0]，低位大于高位，会 panic。
 	// 而它 panic 在排空 goroutine **之外**（enqueue 是扇出线程调的），整条会话
 	// 跟着一起走。这一行是给还不存在的第二个调用方留的：比如将来某个"背压时
 	// 主动排空"的助手，它没有理由知道这里有个不成文的前置条件。
 	if len(o.q) == 0 {
-		return
+		return 0
 	}
 	// 整队都带 FlagLast 时循环走完不 break，victim 留在 0，丢最老的那个。
 	victim := 0
@@ -117,9 +141,9 @@ func (o *outbound) dropOneLocked() {
 	o.q = append(o.q[:victim], o.q[victim+1:]...)
 	o.drops++
 	if o.drops == 1 || o.drops%dropReportEvery == 0 {
-		slog.Info("outbound queue overflowed, dropping audio",
-			"dropped_total", o.drops, "depth", outboundDepth)
+		return o.drops
 	}
+	return 0
 }
 
 func hasFlagLast(p []byte) bool {
@@ -153,11 +177,54 @@ func (o *outbound) run() {
 			if !ok {
 				break
 			}
-			// 发送失败不是错误：datagram 本来就不可靠，丢了就丢了，
-			// 下一帧 20 毫秒后就到。连接真的关了的话，quit 会把我们叫走。
-			_ = o.send(p)
+			if err := o.send(p); err != nil {
+				o.reportSendFailure(err, len(p))
+			}
 		}
 	}
+}
+
+// reportSendFailure 判一次发送失败是**丢包**还是**这条会话再也发不出声**，
+// 只有后者出声。
+//
+// 原先这里是 `_ = o.send(p)`，理由写的是"datagram 本来就不可靠，丢了就丢了"。
+// 那句话对一半：quic-go v0.48.2 的 SendDatagram 恰好只会返回三种东西
+// （connection.go:2276），而其中两种**不是丢包，是永久失效**——
+//
+//   - `*quic.DatagramTooLargeError`：这一帧比这条连接协商出来的 datagram 上限
+//     还大，所以**同样大小的每一帧都会失败**，一直到连接结束。表现是这个听众
+//     此后完全静默，而两端都没有一行日志。
+//   - `errors.New("datagram support disabled")`：对端根本没协商 datagram 扩展。
+//     那么这条会话的音频**一帧都发不出去**，从头到尾。它照样握手成功、照样在
+//     台面上亮着——只是谁也听不见他、他也听不见别人。
+//
+// 第三种才是真的"连接没了"：datagramQueue 关闭时返回连接自己的关闭错误。它是
+// 预期的（quit 马上会把我们叫走），必须保持安静，否则每一次正常断连都要多一行
+// 日志。判据用 net.ErrClosed：quic-go 所有的连接关闭错误——TransportError、
+// ApplicationError、IdleTimeoutError、HandshakeTimeoutError、StatelessResetError
+// ——的 Is() 全都返回 `target == net.ErrClosed`（internal/qerr/errors.go），
+// 所以这一条判据盖住整族，不用逐个列类型。
+//
+// 一条会话只说一次：50 帧/秒乘以一条永久错误，不加这个开关就是每秒 50 行。
+// once 这个字段只由排空 goroutine 碰（run 是单 goroutine 的），不需要加锁。
+func (o *outbound) reportSendFailure(err error, size int) {
+	if errors.Is(err, net.ErrClosed) {
+		// 连接关了。正常收尾路径，安静。
+		slog.Debug("dropping a frame on a connection that is going away", "error", err)
+		return
+	}
+	if o.reportedFailure {
+		return
+	}
+	o.reportedFailure = true
+	var tooLarge *quic.DatagramTooLargeError
+	if errors.As(err, &tooLarge) {
+		slog.Error("this connection cannot carry a voice frame this large, and it never will; the listener is silent from here on",
+			"bytes", size, "max_datagram_payload", tooLarge.MaxDatagramPayloadSize, "error", err)
+		return
+	}
+	slog.Error("voice frames cannot be sent on this connection at all; the listener hears nothing and nothing else will say so",
+		"bytes", size, "error", err)
 }
 
 // stop 让排空 goroutine 退出，并返回一个在它真正退出时关闭的 channel。
