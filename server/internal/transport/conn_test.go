@@ -495,6 +495,12 @@ func TestEvictionUsesTheEvictedCloseCode(t *testing.T) {
 	if appErr.ErrorCode != CloseEvicted {
 		t.Fatalf("close code = %d, want CloseEvicted (%d) — the client keys its do-not-reconnect rule on this exact value", appErr.ErrorCode, CloseEvicted)
 	}
+	// 原因串也是协议的一部分。它此前是一句内联的英文散文，挂在**客户端唯一一个
+	// 必须遵守的关闭码**上——一个既看码又看串的客户端是完全合理的写法，而改一改
+	// 措辞就把它弄坏了，还没有任何东西会响。
+	if appErr.ErrorMessage != ReasonEvicted {
+		t.Fatalf("reason = %q, want %q — this string is a literal a client may match on, not a sentence to reword", appErr.ErrorMessage, ReasonEvicted)
+	}
 }
 
 // TestMaxRXIsEnforcedOverTheWire 钉住 Config.MaxRX 真的到了 router。
@@ -649,6 +655,7 @@ func TestTheCloseCodesAndReasonsAreTheLiteralValuesTheProtocolNames(t *testing.T
 		{"ReasonTokenExpired", ReasonTokenExpired, "token_expired"},
 		{"ReasonTokenInvalid", ReasonTokenInvalid, "token_invalid"},
 		{"ReasonRefused", ReasonRefused, "refused"},
+		{"ReasonEvicted", ReasonEvicted, "evicted"},
 		{"ReasonControlWriteStalled", ReasonControlWriteStalled, "control_write_stalled"},
 		{"ReasonControlReadStalled", ReasonControlReadStalled, "control_read_stalled"},
 		{"ReasonAckUndeliverable", ReasonAckUndeliverable, "ack_undeliverable"},

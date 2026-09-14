@@ -240,6 +240,20 @@ func (o *outbound) stop() <-chan struct{} {
 	return o.exited
 }
 
+// stopped 报告 stop 有没有被调过。
+//
+// 它只有一个用处：让"先摘除、再停队列"那条顺序能在**它自己那一层**被断言
+// （见 closeSession）。生产代码不要拿它当控制流——排空 goroutine 自己在
+// quit 上 select，不需要谁去查。
+func (o *outbound) stopped() bool {
+	select {
+	case <-o.quit:
+		return true
+	default:
+		return false
+	}
+}
+
 func (o *outbound) dropped() uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()

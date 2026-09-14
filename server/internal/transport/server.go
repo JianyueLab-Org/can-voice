@@ -101,13 +101,32 @@ func listen(cfg Config) (*quic.Listener, error) {
 	}
 	tlsConf := cfg.TLS.Clone()
 	tlsConf.NextProtos = []string{ALPN}
-	return quic.ListenAddr(cfg.Addr, tlsConf, &quic.Config{
+	return quic.ListenAddr(cfg.Addr, tlsConf, quicConfig())
+}
+
+// quicConfig 是这个监听器的 QUIC 参数。
+//
+// 抽成函数只为一件事：**让它能被断言**。内联在 ListenAddr 的实参里的时候，
+// 这三个值一个都钉不住——把 KeepAlivePeriod 改成 0、把 MaxIdleTimeout 改成
+// 一分钟以外的任何值，整套测试照绿，而它们各自都有一条能在生产上咬人的后果。
+func quicConfig() *quic.Config {
+	return &quic.Config{
+		// 音频走不可靠 datagram。少了这一位，握手照样成功、控制面照样工作，
+		// 而 SendDatagram 每一次都返回 "datagram support disabled"——
+		// 所有人都在台面上亮着，谁也听不见谁。
 		EnableDatagrams: true,
-		// 空闲超时比任何一次正常静默都长：管制员可能几分钟不说话，
-		// 但 QUIC 的保活会撑住连接。
-		MaxIdleTimeout:  60 * time.Second,
+		// 空闲超时比任何一次正常静默都长：管制员可能几分钟不说话。
+		MaxIdleTimeout: 60 * time.Second,
+		// **保活不能是 0。** 零值的意思是"不发保活"，而这条连接上安静几分钟是
+		// 完全正常的——一个只监听、不讲话的管制员，或者一架在巡航段没人叫的
+		// 飞机。没有保活，空闲计时器在 60 秒后开火，他被断开；重连之后一切正常，
+		// 于是表现是"每隔一分钟掉一次线"，而日志里只有一条普通的超时。
+		// 上面那句注释（"管制员可能几分钟不说话，但 QUIC 的保活会撑住连接"）
+		// 正是为这种人写的，而它论证的东西恰恰是这一行。
+		//
+		// 15 秒：明显小于 MaxIdleTimeout 的一半，所以丢一个 PING 也还有一次机会。
 		KeepAlivePeriod: 15 * time.Second,
-	})
+	}
 }
 
 // accept 循环收连接，直到 ctx 取消或者监听器出错。

@@ -81,6 +81,18 @@ const (
 	// 合法 JSON"只对伪造 token 的人有用。详细原因留在服务端日志里。
 	ReasonRefused = "refused"
 
+	// ReasonEvicted：同一个 CID 在别处登录，这一条被顶掉了。配 CloseEvicted。
+	//
+	// 它此前是一句内联的英文句子（"another session signed in with this account"）
+	// ——而它挂在**客户端唯一一个必须遵守的关闭码**上：收到码 2 必须停止重连，
+	// 否则两个客户端无限互顶（见 CloseEvicted）。一个要靠字面值判断的东西写成
+	// 一句散文，等于邀请下一个人顺手改改措辞，而那会把某个客户端的判断悄悄弄坏。
+	//
+	// 严格说客户端靠码 2 就够判了，原因串是给日志和给用户看的那句话用的。
+	// 但"能靠码判"不是"可以随便改串"的理由：一个既看码又看串的客户端是完全
+	// 合理的写法，而它坏掉的时候没有任何东西会响。
+	ReasonEvicted = "evicted"
+
 	// ReasonControlWriteStalled：握手**之后**，服务端往控制流写一帧的时间超过了
 	// controlWriteTimeout——也就是对端不再读这条流了。配 CloseProtocolViolation。
 	//

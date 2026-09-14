@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -389,5 +390,148 @@ func TestTheControlStreamDeathsMapToTheCodesTheProtocolNames(t *testing.T) {
 					tc.err, code, reason, tc.code, tc.reason)
 			}
 		})
+	}
+}
+
+// fakeRemover 在被 Remove 的那一刻回头问队列"你停了没有"。
+//
+// 这就是让拆除顺序变成可断言的事实的全部机关：两行代码的相对位置本身没法断言，
+// 但"Remove 被调到时队列是否已经停了"可以。
+type fakeRemover struct {
+	out          *outbound
+	called       bool
+	stoppedFirst bool
+}
+
+func (f *fakeRemover) Remove(router.SessionID) {
+	f.called = true
+	f.stoppedFirst = f.out.stopped()
+}
+
+// TestTheSessionIsUnregisteredBeforeItsQueueStops 钉住收尾的顺序。
+//
+// 这条顺序在 conn.go 里带着一段注释、预言了一个具体症状，而在此之前把两行互换
+// **整套测试照绿**——正是"有文档、无钉子"的那一类。
+//
+// 症状：反过来的话，在摘除之前最后被扇进来的那几帧会留在一条已经没人排空的
+// 队列里，而它们很可能正是带 FlagLast 的尾帧。那一位是接收端用来熄灭 RX 指示灯
+// 的（wire/header.go 写明它存在就是为了取代 can-audio 那个"松开 PTT 后指示灯多
+// 亮半秒"的超时循环），丢了对端的灯就一直亮着，没有任何东西会来纠正。
+func TestTheSessionIsUnregisteredBeforeItsQueueStops(t *testing.T) {
+	o := newOutbound(func([]byte) error { return nil })
+	rec := &fakeRemover{out: o}
+
+	closeSession(rec, router.SessionID(1), o)
+
+	// 前提：Remove 真的被调到了。少了这一句，"停在它后面"在一个根本不调
+	// Remove 的实现上平凡为真。
+	if !rec.called {
+		t.Fatal("premise failed: closeSession never removed the session at all, so the ordering assertion below means nothing")
+	}
+	if rec.stoppedFirst {
+		t.Fatal("the outbound queue was stopped before the session was unregistered: the frames fanned in during that window sit in a queue nobody drains, and the ones most likely to be there are the FlagLast tail frames — the peer's RX light then stays lit forever, with nothing to correct it")
+	}
+	// 另一半：队列**确实**停了。顺序对而根本没停，会每条会话漏一个 goroutine。
+	if !o.stopped() {
+		t.Fatal("closeSession returned without stopping the outbound queue; every session would leak its drain goroutine")
+	}
+}
+
+// TestAnEstablishedSessionDoesNotLeakItsDrainGoroutine 是被拒那条
+// （TestARefusedHandshakeDoesNotLeakAGoroutine）的另一半。
+//
+// 那一条只走握手失败的路径，所以整段 `defer { closeSession(...) }` 可以被删光
+// 而它照样绿。这一条走**握手成功**的那条路：每条连接一建立就起一个排空
+// goroutine，正常收尾必须停掉它，否则每一个登录过的人都留下一个。
+//
+// 和那一条一样直接调 handleConn 而不走真 QUIC：真连接每条都会带进来一把
+// quic-go 自己的 goroutine，退出时机跟我们无关，差值会被淹掉。
+func TestAnEstablishedSessionDoesNotLeakItsDrainGoroutine(t *testing.T) {
+	const rounds = 50
+
+	pub, priv := testKeys(t)
+	cfg := Config{PublicKey: pub, MaxRX: 32}
+	r := router.New()
+
+	// readDatagrams 跟着这个 ctx 走，所以测完要取消它——不取消的话它自己就是
+	// 一堆不会退出的 goroutine，把要数的那个差值淹掉。
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// cid 每轮都不同：同一个 cid 会走顶号路径，而顶号会再起一个 goroutine 去
+	// 断旧连接，那是另一件事的噪音。
+	//
+	// 每一轮都验一次"服务端回的是 READY"。前提不能靠事后数会话数——handleConn
+	// 返回时它自己的 defer 已经把会话摘掉了，所以那个数永远是 0，跟握手成没成功
+	// 无关。而握手要是**全被拒**，走的就是另一条路径，这条测试就什么都没测。
+	serve := func(n int) {
+		st := helloStream(t, priv, fmt.Sprintf("10%02d", n), false)
+		handleConn(ctx, &stubConn{stream: st}, cfg, r)
+		raw, err := control.ReadFrame(&st.out)
+		if err != nil {
+			t.Fatalf("round %d: the server wrote no reply at all: %v", n, err)
+		}
+		m, err := control.Decode(raw)
+		if err != nil {
+			t.Fatalf("round %d: Decode: %v", n, err)
+		}
+		if _, ok := m.(*control.Ready); !ok {
+			t.Fatalf("round %d: the handshake got %T, want *control.Ready — a refused handshake exercises a different teardown path, which already has its own test", n, m)
+		}
+	}
+
+	serve(0)
+	base := settledGoroutines(t)
+
+	for i := 1; i <= rounds; i++ {
+		serve(i)
+	}
+
+	cancel()
+	after := settledGoroutines(t)
+	if after > base {
+		t.Fatalf("%d established-then-closed sessions left %d extra goroutines behind (%d → %d); the drain goroutine is started per connection and the teardown must stop it",
+			rounds, after-base, base, after)
+	}
+}
+
+// TestTheListenerKeepsSilentSessionsAlive 钉住 quic.Config 的三个值。
+//
+// 它们此前一个都钉不住，因为整个 config 是内联在 ListenAddr 的实参里的：
+// KeepAlivePeriod 改成 0、MaxIdleTimeout 改成任何别的数、EnableDatagrams 去掉，
+// 整套测试照绿——而三者各自都有一条能在生产上咬人的后果。
+//
+// KeepAlivePeriod=0 是里面最阴的一个：零值的意思是"不发保活"，而这条连接上
+// 安静几分钟完全正常（一个只监听、不讲话的管制员）。没有保活，空闲计时器 60 秒
+// 后开火把他断开；重连之后一切正常，于是表现是"每隔一分钟掉一次线"，日志里只有
+// 一条普通的超时。listen() 那段注释（"管制员可能几分钟不说话，但 QUIC 的保活会
+// 撑住连接"）论证的恰恰是这一行。
+func TestTheListenerKeepsSilentSessionsAlive(t *testing.T) {
+	c := quicConfig()
+	if !c.EnableDatagrams {
+		t.Fatal("EnableDatagrams is off: the handshake and the control plane would still work, while every SendDatagram fails with \"datagram support disabled\" — everyone lit up on the board and nobody able to hear anyone")
+	}
+	if c.KeepAlivePeriod <= 0 {
+		t.Fatal("KeepAlivePeriod is 0, which means \"send no keep-alives\": a controller who is only listening gets dropped by the idle timer every minute, reconnects fine, and the log says nothing but \"timeout\"")
+	}
+	if c.MaxIdleTimeout != 60*time.Second {
+		t.Fatalf("MaxIdleTimeout = %v, want 60s — it has to outlast any ordinary silence on a voice channel", c.MaxIdleTimeout)
+	}
+	if c.KeepAlivePeriod*2 >= c.MaxIdleTimeout {
+		t.Fatalf("KeepAlivePeriod (%v) leaves no room for a lost PING inside MaxIdleTimeout (%v); it must be comfortably under half", c.KeepAlivePeriod, c.MaxIdleTimeout)
+	}
+}
+
+// TestListenRefusesToStartWithoutACertificate 钉住 listen() 的那道 nil 守卫。
+//
+// 没有它，下一行的 cfg.TLS.Clone() 返回 nil，给 nil 写 NextProtos 直接 panic，
+// 而 panic 的堆栈指向 crypto/tls——运维看到的是一个崩溃，不是"配置里少了证书"。
+func TestListenRefusesToStartWithoutACertificate(t *testing.T) {
+	defer func() {
+		if v := recover(); v != nil {
+			t.Fatalf("listen panicked instead of returning an error: %v — the stack points at crypto/tls, not at the missing certificate", v)
+		}
+	}()
+	if _, err := listen(Config{Addr: "127.0.0.1:0"}); err == nil {
+		t.Fatal("listen accepted a Config with no TLS at all")
 	}
 }

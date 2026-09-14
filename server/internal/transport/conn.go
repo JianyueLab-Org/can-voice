@@ -208,17 +208,7 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	_ = st.SetWriteDeadline(time.Time{})
 	slog.Info("session opened", "session", sess.ID, "cid", sess.CID, "peer", conn.RemoteAddr().String())
 	defer func() {
-		// 顺序要紧，两头都有理由：
-		//
-		// 先 Remove 再 stop——反过来的话，摘除之前最后被扇进来的那几帧会静静地
-		// 留在一条已经没人排空的队列里，而它们很可能正是带 FlagLast 的尾帧，
-		// 对端的 RX 指示灯就此一直亮着。
-		//
-		// stop 之后**不等** exited：排空 goroutine 这时可能正卡在 SendDatagram 里，
-		// 而把它叫醒的是外层那条 `defer conn.CloseWithError`——它排在这条 defer
-		// 后面。等在这里就是死锁。
-		r.Remove(sess.ID)
-		out.stop()
+		closeSession(r, sess.ID, out)
 		// 丢帧总数跟着会话一起收口：一次拥塞在过程中只按 dropReportEvery 汇报，
 		// 这一行是那条会话的结论。
 		slog.Info("session closed", "session", sess.ID, "cid", sess.CID,
@@ -234,6 +224,36 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 			"session", sess.ID, "cid", sess.CID, "reason", reason, "code", uint64(code))
 		conn.CloseWithError(code, reason)
 	}
+}
+
+// sessionRemover 是 closeSession 需要 router 做的全部事情。
+//
+// 收窄成一个方法，只为**让拆除顺序能被断言**：假的 remover 可以在被调到的
+// 那一刻回头问队列"你停了没有"，于是顺序变成一个可以直接判的事实，而不是
+// 两行代码的相对位置。拿真的 *router.Router 是问不出这个的。
+type sessionRemover interface {
+	Remove(router.SessionID)
+}
+
+// closeSession 收尾一条会话：**先摘除，再停队列**。
+//
+// 顺序是承重的，两头都有理由：
+//
+// 先 Remove 再 stop——反过来的话，在摘除之前最后被扇进来的那几帧会静静地留在
+// 一条已经没人排空的队列里，而它们很可能正是带 FlagLast 的尾帧。那一位是接收端
+// 用来**熄灭 RX 指示灯**的（wire/header.go 写明它存在就是为了取代 can-audio 那个
+// "松开 PTT 后指示灯多亮半秒"的超时循环），丢了对端的灯就一直亮着，而且没有任何
+// 东西会来纠正——等于把刚刚设计掉的那个毛病又请回来。
+//
+// stop 之后**不等** exited：排空 goroutine 这时可能正卡在 SendDatagram 里，而把
+// 它叫醒的是 handleConn 外层那条 `defer conn.CloseWithError`——它排在这条 defer
+// 后面。等在这里就是死锁。
+//
+// 单独一个函数而不是两行内联：这两行互换在此之前**整套测试照绿**，而注释早就
+// 预言了症状。见 TestTheSessionIsUnregisteredBeforeItsQueueStops。
+func closeSession(r sessionRemover, id router.SessionID, out *outbound) {
+	r.Remove(id)
+	out.stop()
 }
 
 // closeAfterControl 把 readControl 的返回值翻成关闭码和原因串。
@@ -278,6 +298,21 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	if !ok {
 		// 什么都不能排在 HELLO 前面：一个未鉴权的连接不该能改动任何状态。
 		return nil, errFirstMessageMustBeHello
+	}
+	// 版本要真的看。README 和 codes.go 都已经把"协议版本不合"写成关闭码 1 的
+	// 一条成因，而这个字段此前从没被读过：`"proto": 99999` 照样拿到 READY。
+	//
+	// 判在验签**之前**：它比一次 Ed25519 验签便宜，而且优先级是对的——一个版本
+	// 对不上的客户端，就算票是新的也一样连不通，告诉他"去换票"是把他送错方向。
+	if h.Proto != control.ProtoVersion {
+		return nil, errProtoUnsupported
+	}
+	// Follow 是观察员跟随的呼号，而它会**被当成 map 的键**，每帧每听众查一次
+	// （router 的 lookup）。无校验的话一个 6 万字节的值就那么进去了。
+	//
+	// 判在验签之前，理由同上：这是一条协议格式错误，和这张票新不新无关。
+	if h.Follow != "" && !isValidCallsign(h.Follow) {
+		return nil, errFollowNotACallsign
 	}
 	claims, err := auth.Verify(cfg.PublicKey, h.Token, time.Now())
 	if err != nil {
@@ -325,7 +360,7 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 			//
 			// 由 TestTheEvictionCloseDoesNotBlockTheNewHandshake 钉住，它不靠计时
 			// 碰运气——假连接把断连真的按住，所以红不红跟本机有多快无关。
-			go conn.CloseWithError(CloseEvicted, "another session signed in with this account")
+			go conn.CloseWithError(CloseEvicted, ReasonEvicted)
 		},
 	})
 	ready := &control.Ready{
@@ -353,6 +388,46 @@ type helloError string
 func (e helloError) Error() string { return string(e) }
 
 const errFirstMessageMustBeHello = helloError("the first control message must be HELLO")
+
+// errProtoUnsupported 是"HELLO 里的 proto 不是本服务端讲的那个版本"。
+//
+// 走 reasonFor 的 default 分支（ReasonRefused），这是对的：那个代码的意思是
+// "别原样重试"，而一个版本对不上的客户端换多少张票都一样——它要做的是升级。
+// README 的关闭码表里，"协议版本不合"本来就列在码 1 底下。
+const errProtoUnsupported = helloError("the client declared a control-plane protocol version this server does not speak")
+
+// errFollowNotACallsign 是"观察员跟随的那个呼号不是一个呼号"。
+const errFollowNotACallsign = helloError("the follow field is not a valid callsign")
+
+// 呼号的形状，照抄 can-fsd 的 IsValidCallsign（internal/fsd/packet.go）：
+// 2–10 个字符，只许 A-Z、0-9、`-`、`_`。
+//
+// 必须照抄而不是自己定一套：Follow 的用途就是去 fsdfeed 的快照里按呼号查位置，
+// 而那份快照里的呼号全都是 can-fsd 收下的，也就是全都满足这条规则。比它松的
+// 规则只会放进一批**永远查不到**的键；比它紧的规则会把合法呼号挡在外面，
+// 表现是那位观察员的射程判定退回"位置未知"，安静地全放行。
+//
+// 保留呼号（can-fsd 那边还查一张 reservedCallsigns 表）不抄：那张表管的是
+// "谁能以这个身份登录 FSD"，而这里只是一个查表的键，多挡一个名字没有意义。
+const (
+	minCallsignLen = 2
+	maxCallsignLen = 10
+)
+
+func isValidCallsign(s string) bool {
+	if len(s) < minCallsignLen || len(s) > maxCallsignLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'Z', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // minRating 是能用语音的最低等级。
 //

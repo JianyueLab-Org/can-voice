@@ -5,12 +5,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/auth"
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
+	"github.com/quic-go/quic-go"
 )
 
 // 本文件钉的是握手里的**准入**：谁能进来，以及进来之后他自己那张票说了多少算。
@@ -207,4 +209,155 @@ func subAckFor(t *testing.T, st interface {
 		t.Fatalf("after SUB got %T, want *control.SubAck", m)
 	}
 	return *ack
+}
+
+// helloWith 发一条**任意形状**的 HELLO，用来测那些 hello() 写死了的字段。
+//
+// hello() 里 Proto: 1 和空 Follow 是写死的，所以这个包里没有任何一条既有测试
+// 能分辨那两个字段有没有被读过——这正是它们直到现在都没有被检查的原因之一。
+func helloWith(t *testing.T, conn quic.Connection, h control.Hello) any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	b, err := control.Encode(&h)
+	if err != nil {
+		t.Fatalf("Encode HELLO: %v", err)
+	}
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(st)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	return m
+}
+
+// goodToken 签一张完全合法的票。准入测试必须用它：拿一张坏票什么都证明不了，
+// 它在验签那一步就被拒了，后面的闸门一个都走不到。
+func goodToken(t *testing.T, priv ed25519.PrivateKey, cid string) string {
+	t.Helper()
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: cid, Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return tok
+}
+
+// TestAHelloDeclaringAnotherProtocolVersionIsRefused 钉住 Hello.Proto 真的被读了。
+//
+// 这个字段声明了、README 把"协议版本不合"列在关闭码 1 底下、codes.go 也这么写，
+// 而在此之前它**从来没有被读过**：`"proto": 99999` 照样拿到 READY。一个客户端
+// 作者照着这个字段填，以为填错会被告知，实际上要等到第一条他看不懂的消息才出
+// 问题——那时候已经没有任何东西指向版本了。
+//
+// Rust 客户端还没开始写，所以这是把这句承诺变成真的最便宜的时刻。
+func TestAHelloDeclaringAnotherProtocolVersionIsRefused(t *testing.T) {
+	addr, priv, r := testServer(t)
+	before := r.SessionCount()
+
+	m := helloWith(t, dial(t, addr), control.Hello{
+		Token: goodToken(t, priv, "1000"), Client: "test/1", Proto: 99999,
+	})
+	bye, ok := m.(*control.Bye)
+	if !ok {
+		t.Fatalf("a HELLO declaring proto 99999 got %T, want *control.Bye — the field is documented as a cause of close code 1 and must actually be read", m)
+	}
+	// refused 而不是 token_*：换一张票不会让客户端变成另一个版本。
+	if bye.Reason != ReasonRefused {
+		t.Fatalf("Reason = %q, want %q — telling a client of the wrong version to fetch a new token sends it into a loop that cannot succeed", bye.Reason, ReasonRefused)
+	}
+	if got := r.SessionCount(); got != before {
+		t.Fatalf("sessions = %d, want %d — a refused handshake must not leave a session behind", got, before)
+	}
+}
+
+// TestAHelloAtTheCurrentProtocolVersionIsAdmitted 是上一条的对照。
+//
+// 没有它，一个把**每一条** HELLO 都拒掉的实现照样绿。顺带钉住 0 不算"没填所以
+// 放行"——那种宽容会让这道闸对最常见的一个错值（漏填）完全失效。
+func TestAHelloAtTheCurrentProtocolVersionIsAdmitted(t *testing.T) {
+	addr, priv, _ := testServer(t)
+
+	m := helloWith(t, dial(t, addr), control.Hello{
+		Token: goodToken(t, priv, "1000"), Client: "test/1", Proto: control.ProtoVersion,
+	})
+	if _, ok := m.(*control.Ready); !ok {
+		t.Fatalf("a HELLO at the current protocol version got %T, want *control.Ready", m)
+	}
+
+	m = helloWith(t, dial(t, addr), control.Hello{
+		Token: goodToken(t, priv, "1001"), Client: "test/1", // Proto 缺席 = 0
+	})
+	if _, ok := m.(*control.Bye); !ok {
+		t.Fatalf("a HELLO with no proto field at all got %T, want *control.Bye — treating the zero value as \"unspecified, let it through\" makes this gate useless against the most likely wrong value", m)
+	}
+}
+
+// TestAFollowThatIsNotACallsignIsRefused 钉住 Hello.Follow 的上界与字符集。
+//
+// Follow 是观察员跟随的呼号，而它**会被当成 map 的键**，每帧每听众查一次
+// （router 的 lookup）。无校验的话一个 6 万字节的值就那么进去了——一条 64 KiB
+// 的控制帧装得下——然后跟着这条会话一直留着。
+//
+// 规则照抄 can-fsd 的 IsValidCallsign：2–10 个字符，A-Z0-9-_。必须照抄而不是
+// 自己定一套——Follow 唯一的用途就是去 fsdfeed 的快照里按呼号查位置，而那份
+// 快照里的呼号全都是 can-fsd 收下的。
+func TestAFollowThatIsNotACallsignIsRefused(t *testing.T) {
+	addr, priv, r := testServer(t)
+
+	for _, tc := range []struct {
+		name   string
+		follow string
+	}{
+		{"sixty thousand bytes of it", strings.Repeat("A", 60000)},
+		{"one character", "A"},
+		{"eleven characters", "CCA12345678"},
+		{"lowercase", "cca101"},
+		{"a colon, which is a field separator on the FSD side", "CCA:101"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := r.SessionCount()
+			m := helloWith(t, dial(t, addr), control.Hello{
+				Token: goodToken(t, priv, "1000"), Client: "test/1",
+				Proto: control.ProtoVersion, Follow: tc.follow,
+			})
+			if _, ok := m.(*control.Bye); !ok {
+				t.Fatalf("a HELLO following %q (%d bytes) got %T, want *control.Bye — an unchecked follow value becomes a map key looked up once per frame per listener", tc.follow, len(tc.follow), m)
+			}
+			if got := r.SessionCount(); got != before {
+				t.Fatalf("sessions = %d, want %d", got, before)
+			}
+		})
+	}
+}
+
+// TestARealCallsignStillWorksAsAFollow 是上一条的对照，而且它不是可选的：
+// 观察员模式是这个字段存在的全部理由，一条把所有 Follow 都拒掉的规则会安静地
+// 把右座那个人赶出去——他连得上语音，只是射程判定退回"位置未知"或者干脆进不来。
+//
+// 取值刻意贴着两端的边界（两个字符、十个字符），所以长度判是 `< 2 / > 10`
+// 而不是 `<= 2 / >= 10` 这件事也被钉住了。
+func TestARealCallsignStillWorksAsAFollow(t *testing.T) {
+	addr, priv, _ := testServer(t)
+
+	for i, follow := range []string{"CCA101", "AB", "CCA1234567", "CES-2", "ZSPD_ATIS"} {
+		m := helloWith(t, dial(t, addr), control.Hello{
+			Token: goodToken(t, priv, "100"+string(rune('0'+i))), Client: "test/1",
+			Proto: control.ProtoVersion, Follow: follow,
+		})
+		if _, ok := m.(*control.Ready); !ok {
+			t.Fatalf("a HELLO following %q got %T, want *control.Ready — observer mode is the only reason this field exists", follow, m)
+		}
+	}
 }

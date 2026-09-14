@@ -62,6 +62,14 @@ type stubConn struct {
 
 func (c *stubConn) SendDatagram([]byte) error { return nil }
 
+// ReceiveDatagram 只是挂住：handleConn 起的 readDatagrams goroutine 会调它，
+// 而 stubConn 里嵌的 quic.Connection 是 nil，不实现它就是空指针 panic——
+// 那个 panic 还发生在**另一个 goroutine 上**，整个测试进程跟着走。
+func (c *stubConn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
 func (c *stubConn) AcceptStream(ctx context.Context) (quic.Stream, error) {
 	if c.stream == nil {
 		<-ctx.Done()
