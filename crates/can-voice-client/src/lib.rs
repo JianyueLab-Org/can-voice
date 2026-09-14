@@ -6,8 +6,13 @@
 //! 一整类"UI 是绿的但人还在 root 频道"的 bug 的根源。
 
 pub mod audio;
+pub mod client;
 pub mod conn;
+mod pump;
 pub mod rx;
 pub mod session;
 pub mod stack;
 pub mod tx;
+
+pub use client::{Config, Event, VoiceClient};
+pub use conn::LinkState;
