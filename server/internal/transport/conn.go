@@ -551,8 +551,15 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 	for {
 		b, err := control.ReadFrame(fr)
 		if err != nil {
-			// 只有**帧读到一半**时的超时算协议违规。上弦的判据就是这个：
-			// 一个字节都没来的时候 framedReader 没有上弦，那种静默是正常的。
+			// 只有**帧读到一半**时的超时算协议违规：一个字节都没来的时候那种
+			// 静默是正常的（一个只监听、不讲话的管制员一坐就是几分钟）。
+			//
+			// fr.armed 这半个条件今天是**纵深防御**，不是做出这个判定的依据。
+			// 结构上它推不出任何输入：读截止时间只在 framedReader 上弦时被设上，
+			// endFrame() 和握手之后的 armHandshakeDeadlines(st, time.Time{}) 都会
+			// 把它撤掉，所以"没上弦却冒出 os.ErrDeadlineExceeded"没有任何输入
+			// 造得出来——去掉这半个条件整套测试照绿（终审 L-8 实测）。留着它是为了
+			// 将来：谁哪天给整条流加一个与帧无关的读截止时间，它就是第二道闸。
 			if fr.armed && errors.Is(err, os.ErrDeadlineExceeded) {
 				slog.Info("a peer started a control frame and then stopped sending it",
 					"session", sess.ID, "cid", sess.CID,

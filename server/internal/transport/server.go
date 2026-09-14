@@ -144,14 +144,11 @@ func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router
 			slog.Error("accept failed", "error", err)
 			return err
 		}
-		// 登记要在起 goroutine **之前**：反过来的话，一条刚接进来、还没被
-		// handleConn 登记上的连接会被关停整个漏掉，而那恰好是重启那一瞬间
-		// 最可能发生的事。
-		live.add(conn)
-		go func() {
-			defer live.remove(conn)
-			handleConn(ctx, conn, cfg, r)
-		}()
+		// 登记要在处理协程起来**之前**完成：反过来的话，一条刚接进来、还没被
+		// 登记上的连接会被关停整个漏掉，而那恰好是重启那一瞬间最可能发生的事。
+		// 这条顺序是 connSet.serve 的后置条件，并且在那里被钉住——写成
+		// live.add(conn) 加一句 go 的话，把 add 挪进协程里整套测试照绿。
+		live.serve(conn, func() { handleConn(ctx, conn, cfg, r) })
 	}
 }
 
@@ -168,10 +165,30 @@ func newConnSet() *connSet {
 	return &connSet{m: map[quic.Connection]struct{}{}}
 }
 
-func (s *connSet) add(c quic.Connection) {
+// serve 登记一条连接，然后在一条新协程上处理它；协程退出时自动注销。
+//
+// **登记在本函数返回之前、并且在调用方自己的协程上完成。** 这不是风格问题，
+// 是这个函数存在的全部理由。写成
+//
+//	live.add(conn)
+//	go func() { defer live.remove(conn); handleConn(...) }()
+//
+// 的话，把 add 挪进协程里**整套测试照绿**（终审 L-7 实测）：窗口很窄，但它恰好在
+// 重启那一瞬间最宽，而漏掉的后果是那条连接收不到关闭码 0，客户端把一次正常重启
+// 当成异常掉线去查网络。两行语句的先后顺序没有任何东西钉得住；变成一个函数的
+// 后置条件之后它可以被直接断言——堵住登记（拿住 mu），serve 必须卡在那里、
+// fn 必须还没开始跑。见 TestAConnectionIsRegisteredBeforeItsHandlerCanStart。
+func (s *connSet) serve(c quic.Connection, fn func()) {
+	// 登记就地做，不留一个单独的 add 方法：留着的话，把它挪进下面那条协程里
+	// 仍然是一次看着很自然的"整理"，而这个函数存在的全部意义就是那个顺序。
 	s.mu.Lock()
 	s.m[c] = struct{}{}
 	s.mu.Unlock()
+
+	go func() {
+		defer s.remove(c)
+		fn()
+	}()
 }
 
 func (s *connSet) remove(c quic.Connection) {

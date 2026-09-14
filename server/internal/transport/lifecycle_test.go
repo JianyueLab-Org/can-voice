@@ -535,3 +535,52 @@ func TestListenRefusesToStartWithoutACertificate(t *testing.T) {
 		t.Fatal("listen accepted a Config with no TLS at all")
 	}
 }
+
+// TestAConnectionIsRegisteredBeforeItsHandlerCanStart 钉住 connSet.serve 的那条
+// 后置条件：登记在 serve 返回之前、在调用方的协程上完成。
+//
+// 为什么值得一个函数加一个测试：终审门禁把 accept 里的 live.add(conn) 挪进
+// 处理协程，**整套测试照绿**。窗口窄，但它恰好在重启那一瞬间最宽，而漏掉的连接
+// 收不到关闭码 0，客户端会把一次正常重启当成异常掉线。两行语句的先后顺序从外面
+// 断言不出来——一次协程调度而已；换成一个函数的后置条件就断言得出来了。
+//
+// 这里的等待**不是概率性的**（房规 9/14）：mu 被本测试自己拿着，正确实现
+// 不可能走过 add，不是"很可能走不过"。200 毫秒只是给错误实现留出充分暴露的时间，
+// 它跑到那两条 Fatal 用的是微秒。
+func TestAConnectionIsRegisteredBeforeItsHandlerCanStart(t *testing.T) {
+	live := newConnSet()
+	// 堵住登记。连接本身用 nil：这个测试量的是 serve 里两件事的先后，
+	// 跟那条连接是什么毫无关系，而造一条真的 QUIC 连接会把噪声引进来。
+	live.mu.Lock()
+
+	started := make(chan struct{})
+	returned := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		live.serve(nil, func() { close(started); <-release })
+		close(returned)
+	}()
+
+	select {
+	case <-returned:
+		t.Fatal("serve returned while registration was blocked — the connection is not in the set yet, so a shutdown starting right now would skip it and that client would read a normal restart as an abnormal drop")
+	case <-started:
+		t.Fatal("the handler started while registration was blocked — the same window seen from the other side")
+	case <-time.After(200 * time.Millisecond):
+		// 想要的结果：两件事都没能发生。
+	}
+
+	live.mu.Unlock()
+	<-returned
+	<-started
+
+	// 肯定式的对照（房规 5/12）：解开锁之后它确实进了集合。少了这一句，
+	// 上面那个 select 在一个什么都不登记、也什么都不跑的 serve 上同样通过。
+	live.mu.Lock()
+	n := len(live.m)
+	live.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("the set holds %d connections after registration was let through, want 1 — without this the block above would also pass on a serve that registers nothing at all", n)
+	}
+	close(release)
+}
