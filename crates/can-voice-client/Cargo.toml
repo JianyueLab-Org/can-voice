@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+audiopus = "0.2"
+audiopus_sys = { version = "0.1", default-features = false, features = ["static"] }
 can-voice-proto = { path = "../can-voice-proto" }
 serde.workspace = true
 serde_json.workspace = true
