@@ -8,6 +8,7 @@ rust-version.workspace = true
 audiopus = "0.2"
 audiopus_sys = { version = "0.1", default-features = false, features = ["static"] }
 can-voice-proto = { path = "../can-voice-proto" }
+cpal = "0.15"
 quinn = "0.11.9"
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std"] }
 rustls-pki-types = "1.15.1"
