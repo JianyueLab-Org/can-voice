@@ -11,14 +11,12 @@
 //! `can-voice-token` 的 `TokenSource` 只有一个构造函数，它要凭据。
 //! **没有一个入口能直接塞一张票进来**——这不是纪律，是类型层面的事实。
 
-pub mod datafeed;
-pub mod fleet;
-pub mod readback;
-pub mod station;
-pub mod tts;
+//! 模块本身在 `lib.rs`——这个 crate 也是一个库，桌面通播客户端
+//! （`apps/atis`）从那边取同一套 METAR / 模板 / 读法逻辑。
 
+use can_voice_atis::fleet::{Action, Running};
+use can_voice_atis::{datafeed, fleet, station, tts};
 use can_voice_token::TokenSource;
-use fleet::{Action, Running};
 use std::collections::HashMap;
 use std::time::Duration;
 

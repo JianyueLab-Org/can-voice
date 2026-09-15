@@ -140,6 +140,7 @@ dependencies = [
  "can-voice-client",
  "can-voice-proto",
  "can-voice-token",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

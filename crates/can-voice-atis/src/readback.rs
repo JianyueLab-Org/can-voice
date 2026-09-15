@@ -4,19 +4,15 @@
 //! 东西**——大陆的无线电数字读法（洞幺两……拐）和普通中文数字不一样，而
 //! `niner` 之所以不是 `nine`，是因为无线电上 nine 和 five 太像。
 //!
-//! # 中文那一半里的字母仍然念英文，这是已知的缺口
+//! # 中文那一半念中文字母词，这一条和服务端的 Python 版不一样
 //!
-//! Python 版的 `replace_letter` 不分语言，一律用英文 NATO 词，所以中文那一半里
-//! 一个孤立的 `A` 会被念成 "Alpha"。这里照搬了那个行为。
+//! Python 版的 `replace_letter` 不分语言，一律用英文 NATO 词，于是中文那一半里
+//! 一个孤立的 `A` 会被念成 "Alpha"——TTS 在一串汉字中间蹦出一个英文字符。
+//! 这里**没有**照搬那个行为。
 //!
-//! **它多半是错的**：`can-audio` 的客户端侧（`chinese.py`）为此专门做过研究，
-//! 结论是中文播报要念中文字母词（`J` → 朱丽叶），理由正是"念拉丁字母会让 TTS 在
-//! 中文句子中间蹦出一个英文字符"。但那张表 `CLAUDE.md` 只给了 J 一个字母，
-//! 26 个凑不齐，**猜出来的表比照搬更糟**。
-//!
-//! 实际影响有限：`text_atis` 的中文那一半多半是 `atis-for-can` 渲染的，
-//! 它已经把字母换成中文词了，所以这里的替换根本不会触发。会触发的是
-//! vATIS/EuroScope 之类别的来源。补齐那张表之后再改这里。
+//! 曾经照搬过，理由是"26 个字母的中文表凑不齐，猜出来的比照搬更糟"。那个理由
+//! 是错的：表一直在 `can-audio/atis/chinese.py` 的 `LETTERS` 里，客户端侧为此
+//! 专门研究过。整张表搬了过来，见 [`CHINESE_LETTERS`]。
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -62,9 +58,99 @@ const NATO: [(char, &str); 26] = [
     ('Z', "Zulu"),
 ];
 
+/// 通话字母的中文读法，照搬 `can-audio/atis/chinese.py` 的 `LETTERS`。
+///
+/// 中文通播念的是"情报通播 朱丽叶"，不是拉丁字母 J。
+/// **和 [`NATO`] 一一对应，顺序相同**——两张表要一起改。
+const CHINESE_LETTERS: [&str; 26] = [
+    "阿尔法",
+    "布拉沃",
+    "查理",
+    "德尔塔",
+    "埃科",
+    "福克斯特罗",
+    "高尔夫",
+    "霍特尔",
+    "印地亚",
+    "朱丽叶",
+    "基洛",
+    "利马",
+    "迈克",
+    "诺文贝",
+    "奥斯卡",
+    "帕帕",
+    "魁北克",
+    "罗米欧",
+    "塞拉",
+    "探戈",
+    "尤尼佛",
+    "维克多",
+    "威士忌",
+    "爱克斯瑞",
+    "洋基",
+    "祖鲁",
+];
+
 fn nato() -> &'static HashMap<char, &'static str> {
     static M: OnceLock<HashMap<char, &'static str>> = OnceLock::new();
     M.get_or_init(|| NATO.iter().copied().collect())
+}
+
+/// 一个字母的通话字母表词。`metar` 那边的情报字母也念这一张表——
+/// **不要再抄一份**：两张 NATO 表迟早会有一张被改。
+pub fn nato_word(letter: char) -> Option<&'static str> {
+    nato().get(&letter.to_ascii_uppercase()).copied()
+}
+
+/// 逐位念（中文无线电读法）：`350` → `三 五 洞`。非数字原样保留。
+///
+/// 和 [`crate::voicefix::spell_digits`] 是同一件事的另一半语言，
+/// **表在这里，不要再抄一份**。
+pub fn spell_chinese(text: &str) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        match c.to_digit(10) {
+            Some(d) => out.push_str(CHINESE_DIGITS[d as usize]),
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// 一个字母的中文通话词。中文通播念它，不念拉丁字母。
+pub fn chinese_letter_word(letter: char) -> Option<&'static str> {
+    let c = letter.to_ascii_uppercase();
+    c.is_ascii_uppercase()
+        .then(|| CHINESE_LETTERS[(c as u8 - b'A') as usize])
+}
+
+/// 一个字母在这一半语言里该念的词。
+fn letter_word(letter: char, chinese: bool) -> Option<&'static str> {
+    if chinese {
+        chinese_letter_word(letter)
+    } else {
+        nato_word(letter)
+    }
+}
+
+/// 紧跟在数字后面的孤立大写字母，是**单位**而不是字母。
+///
+/// `/LEVEL 3600 M` 里的 `M` 是"米"。不看位置的话它会被念成 "Mike"，
+/// 而听的人得到的是一个不存在的情报字母。
+///
+/// 表只有一行，这是有意的：判据是"**前一个 token 以数字收尾**"，
+/// 那才是真正做事的部分；再出现一个单位时往表里加一行就是了。
+/// 换个位置的 `M`（`ATIS M` 的情报字母）前面不是数字，照旧念 Mike。
+const UNITS_AFTER_A_NUMBER: [(char, &str, &str); 1] = [('M', "meters", "米")];
+
+fn unit_word(letter: char, chinese: bool) -> Option<&'static str> {
+    UNITS_AFTER_A_NUMBER
+        .iter()
+        .find(|(c, _, _)| *c == letter)
+        .map(|(_, en, zh)| if chinese { *zh } else { *en })
 }
 
 /// 处理一整段 ATIS 文本，自动识别中英混合。
@@ -101,6 +187,8 @@ pub fn single(text: &str, chinese: bool) -> String {
     };
     let mut out = String::with_capacity(text.len() * 2);
 
+    // 前一个 token 是不是以数字收尾。单位（`3600 M`）靠它和情报字母分开。
+    let mut after_a_number = false;
     for token in text.split_whitespace() {
         if !out.is_empty() {
             out.push(' ');
@@ -109,11 +197,21 @@ pub fn single(text: &str, chinese: bool) -> String {
         //
         // **只换孤立的。** `RWY 18L` 里的 L 贴着数字，换掉它会念成
         // "one eight Lima"，而那不是跑道号的读法。
-        if let Some(word) = lone_capital(token) {
-            out.push_str(word);
+        if let Some(c) = lone_capital(token) {
+            match unit_word(c, chinese).filter(|_| after_a_number) {
+                Some(unit) => out.push_str(unit),
+                None => {
+                    out.push_str(letter_word(c, chinese).expect("lone_capital only yields A-Z"))
+                }
+            }
+            after_a_number = false;
             continue;
         }
         expand_digits(token, digits, &mut out);
+        after_a_number = token
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_digit());
     }
     out
 }
@@ -125,13 +223,13 @@ pub fn single(text: &str, chinese: bool) -> String {
 /// A（开头没有前导空格）和 C（空格被上一个匹配吃了）都漏掉。那是正则的副作用
 /// 不是约定——漏掉的字母会被 TTS 念成一个孤零零的英文字母，而听的人根本不知道
 /// 少了什么。按 token 切就没有这个问题。
-fn lone_capital(token: &str) -> Option<&'static str> {
+fn lone_capital(token: &str) -> Option<char> {
     let mut chars = token.chars();
     let c = chars.next()?;
     if chars.next().is_some() {
         return None;
     }
-    nato().get(&c).copied()
+    nato().contains_key(&c).then_some(c)
 }
 
 /// 把 token 里的每一段数字逐位展开，其余原样保留。
@@ -272,23 +370,37 @@ mod tests {
         assert_eq!(process(""), "");
     }
 
-    /// 孤立大写字母在**中文那一半**也换成英文 NATO 词，这是照搬 Python 版的行为。
-    /// 见 `nato_in_the_chinese_half_is_a_known_gap` 上面那段注释。
+    /// 中文那一半念中文字母词。**这是和服务端 Python 版有意不同的一条**：
+    /// 那边不分语言一律念 NATO，于是一串汉字中间蹦出一个 "Alpha"。
     #[test]
-    fn nato_in_the_chinese_half_is_a_known_gap() {
-        assert!(single("通播 A", true).contains("Alpha"));
+    fn the_chinese_half_speaks_chinese_letter_words() {
+        let got = single("通播 A", true);
+        assert!(got.contains("阿尔法"), "{got}");
+        assert!(!got.contains("Alpha"), "{got}");
+        assert_eq!(single("通播 J", true), "通播 朱丽叶");
+        // 英文那一半不受影响。
+        assert!(single("INFO J", false).contains("Juliett"));
+    }
+
+    /// 两张字母表必须一一对应——中文那张是按 A..Z 的下标取的，
+    /// 顺序错一位，整个表就偏了一格而每一条单独看都像对的。
+    #[test]
+    fn the_two_letter_tables_line_up() {
+        assert_eq!(NATO.len(), CHINESE_LETTERS.len());
+        for (i, (c, _)) in NATO.iter().enumerate() {
+            assert_eq!(*c, (b'A' + i as u8) as char, "NATO is out of order at {i}");
+            assert_eq!(chinese_letter_word(*c), Some(CHINESE_LETTERS[i]));
+        }
+        assert_eq!(chinese_letter_word('A'), Some("阿尔法"));
+        assert_eq!(chinese_letter_word('Z'), Some("祖鲁"));
     }
     // ——— 真实报文 ———
 
     /// 拿金文件里那段真实 ZSSS ATIS 过一遍，当回归锚点。
     ///
-    /// **它同时钉住一个已知的毛病：`/LEVEL 3600 M` 里的 `M` 是"米"，
-    /// 却被念成 "Mike"。** Python 版一模一样（`\s([A-Z])\s` 照样匹配 " M "），
-    /// 所以这不是移植引入的，是搬过来的。
-    ///
-    /// 没有顺手改掉，是因为改对需要一张"哪些孤立大写字母是单位"的表
-    /// （M=米、FT=英尺……），而 `M` 在别的位置确实可能就是字母 M。
-    /// 拍脑袋加一条规则，风险是把另一处读对的地方读错。先让它可见。
+    /// 它曾经钉着一个毛病：`/LEVEL 3600 M` 里的 `M` 是"米"，却被念成 "Mike"
+    /// （Python 版一模一样，`\s([A-Z])\s` 照样匹配 " M "，所以那不是移植引入的）。
+    /// **现在修好了**，靠的是位置而不是一张更长的表——见 [`UNITS_AFTER_A_NUMBER`]。
     #[test]
     fn a_real_atis_report_reads_sensibly() {
         let real = "ZSSS ATIS A 1200Z DEP RWY 18L & 18R EXP ILS APCH LDG RWY 18L & \
@@ -306,10 +418,34 @@ SHANGHAI TERMINAL CONTROL AREA 1008 TRANSITION ALTITUDE 3000 \
         assert!(got.contains("QNH one zero zero seven HPA"), "{got}");
         assert!(got.contains("YOU HAVE INFO Alpha"), "{got}");
 
-        // 已知毛病，见上。哪天修了，改这一行而不是删掉它。
         assert!(
-            got.contains("three six zero zero Mike"),
-            "the metres M is still read as the letter Mike; if this changed, the fix landed: {got}"
+            got.contains("three six zero zero meters"),
+            "the metres M must not be read as the letter Mike: {got}"
         );
+        assert!(!got.contains("Mike"), "{got}");
+    }
+
+    /// 单位靠**位置**和情报字母分开，不靠一张更长的字母表。
+    ///
+    /// `3600 M` 的 M 是米；`ATIS M` 的 M 是情报字母。两者是同一个 token，
+    /// 区别只在前面那个词——这就是为什么判据是"前一个 token 以数字收尾"。
+    #[test]
+    fn a_unit_after_a_number_is_not_an_information_letter() {
+        assert!(single("LEVEL 3600 M", false).contains("meters"));
+        assert!(single("ATIS M 1200Z", false).contains("Mike"));
+        assert!(!single("ATIS M 1200Z", false).contains("meters"));
+        // 中文那一半念中文单位。
+        assert!(single("高度 3600 M", true).contains("米"));
+    }
+
+    /// 单位只在紧跟数字时算数——隔一个词就不算。
+    ///
+    /// 这条钉住的是"前一个 token"而不是"这一行里出现过数字"：后者会把
+    /// `QNH 1007 HPA M` 这种写法里的 M 也吃掉。
+    #[test]
+    fn the_number_has_to_be_the_token_right_before() {
+        let got = single("3600 FT M", false);
+        assert!(got.contains("Mike"), "{got}");
+        assert!(!got.contains("meters"), "{got}");
     }
 }

@@ -1,0 +1,2410 @@
+{
+ "note": "由 can-audio/atis 的 Python 实现生成（.temp/gen_atis_golden.py）。Rust 侧的 metar/voicefix/template 必须一字不差地念出同样的话。",
+ "metars": [
+  {
+   "raw": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "station": "ZSPD",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "09004MPS",
+     "voice": "wind zero niner zero degrees four meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "FEW030 SCT100",
+     "voice": "few three thousand, scattered one zero thousand"
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "Q1013",
+     "voice": "QNH one zero one three hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "09004MPS 9999 FEW030 SCT100 25/18 Q1013",
+    "voice": "wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, few three thousand, scattered one zero thousand, temperature two five, dewpoint one eight, QNH one zero one three hectopascals"
+   }
+  },
+  {
+   "raw": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "station": "ZBAA",
+   "valid": true,
+   "cavok": true,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "291000Z",
+     "voice": "time one zero zero zero"
+    },
+    "wind": {
+     "text": "30007MPS",
+     "voice": "wind three zero zero degrees seven meters per second"
+    },
+    "visibility": {
+     "text": "CAVOK",
+     "voice": "cavok"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "",
+     "voice": ""
+    },
+    "temperature": {
+     "text": "24",
+     "voice": "temperature two four"
+    },
+    "dew_point": {
+     "text": "M08",
+     "voice": "dewpoint minus eight"
+    },
+    "pressure": {
+     "text": "Q1003",
+     "voice": "QNH one zero zero three hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "30007MPS CAVOK 24/M08 Q1003",
+    "voice": "wind three zero zero degrees seven meters per second, cavok, temperature two four, dewpoint minus eight, QNH one zero zero three hectopascals"
+   }
+  },
+  {
+   "raw": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "station": "ZGGG",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "010800Z",
+     "voice": "time zero eight zero zero"
+    },
+    "wind": {
+     "text": "13003MPS 080V180",
+     "voice": "wind one three zero degrees three meters per second variable between zero eight zero and one eight zero"
+    },
+    "visibility": {
+     "text": "6000",
+     "voice": "visibility six kilometers"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "-RA",
+     "voice": "light rain"
+    },
+    "clouds": {
+     "text": "BKN010 OVC030",
+     "voice": "broken one thousand, overcast three thousand"
+    },
+    "temperature": {
+     "text": "27",
+     "voice": "temperature two seven"
+    },
+    "dew_point": {
+     "text": "26",
+     "voice": "dewpoint two six"
+    },
+    "pressure": {
+     "text": "Q1005",
+     "voice": "QNH one zero zero five hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005",
+    "voice": "wind one three zero degrees three meters per second variable between zero eight zero and one eight zero, visibility six kilometers, light rain, broken one thousand, overcast three thousand, temperature two seven, dewpoint two six, QNH one zero zero five hectopascals"
+   }
+  },
+  {
+   "raw": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "station": "ZULS",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "020200Z",
+     "voice": "time zero two zero zero"
+    },
+    "wind": {
+     "text": "25006MPS",
+     "voice": "wind two five zero degrees six meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "SCT023 BKN046",
+     "voice": "scattered two thousand three hundred, broken four thousand six hundred"
+    },
+    "temperature": {
+     "text": "12",
+     "voice": "temperature one two"
+    },
+    "dew_point": {
+     "text": "M05",
+     "voice": "dewpoint minus five"
+    },
+    "pressure": {
+     "text": "Q0995",
+     "voice": "QNH zero niner niner five hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "25006MPS 9999 SCT023 BKN046 12/M05 Q0995",
+    "voice": "wind two five zero degrees six meters per second, visibility one zero kilometers or more, scattered two thousand three hundred, broken four thousand six hundred, temperature one two, dewpoint minus five, QNH zero niner niner five hectopascals"
+   }
+  },
+  {
+   "raw": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "station": "ZSSS",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251200Z",
+     "voice": "time one two zero zero"
+    },
+    "wind": {
+     "text": "VRB01MPS",
+     "voice": "wind variable one meters per second"
+    },
+    "visibility": {
+     "text": "1200",
+     "voice": "visibility one two zero zero meters"
+    },
+    "rvr": {
+     "text": "R36L/1000",
+     "voice": "runway three six L visual range one zero zero zero meters"
+    },
+    "present_weather": {
+     "text": "BR",
+     "voice": "mist"
+    },
+    "clouds": {
+     "text": "NSC",
+     "voice": "no significant clouds"
+    },
+    "temperature": {
+     "text": "18",
+     "voice": "temperature one eight"
+    },
+    "dew_point": {
+     "text": "17",
+     "voice": "dewpoint one seven"
+    },
+    "pressure": {
+     "text": "Q1020",
+     "voice": "QNH one zero two zero hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020",
+    "voice": "wind variable one meters per second, visibility one two zero zero meters, runway three six L visual range one zero zero zero meters, mist, no significant clouds, temperature one eight, dewpoint one seven, QNH one zero two zero hectopascals"
+   }
+  },
+  {
+   "raw": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "station": "ZYTX",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "09004MPS",
+     "voice": "wind zero niner zero degrees four meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "",
+     "voice": ""
+    },
+    "temperature": {
+     "text": "M03",
+     "voice": "temperature minus three"
+    },
+    "dew_point": {
+     "text": "M07",
+     "voice": "dewpoint minus seven"
+    },
+    "pressure": {
+     "text": "A2992",
+     "voice": "altimeter two niner point niner two"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "09004MPS 9999 M03/M07 A2992",
+    "voice": "wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature minus three, dewpoint minus seven, altimeter two niner point niner two"
+   }
+  },
+  {
+   "raw": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "station": "KLAX",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "26015G25KT 220V300",
+     "voice": "wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero"
+    },
+    "visibility": {
+     "text": "10SM",
+     "voice": "visibility 10 statute miles"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "FEW015 SCT200",
+     "voice": "few one thousand five hundred, scattered two zero thousand"
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "A2992",
+     "voice": "altimeter two niner point niner two"
+    },
+    "trend": {
+     "text": "",
+     "voice": ""
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+    "voice": "wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero, visibility 10 statute miles, few one thousand five hundred, scattered two zero thousand, temperature two five, dewpoint one eight, altimeter two niner point niner two"
+   }
+  },
+  {
+   "raw": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "station": "RJTT",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "36012KT",
+     "voice": "wind three six zero degrees one two knots"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "BKN020CB",
+     "voice": "broken two thousand cumulonimbus"
+    },
+    "temperature": {
+     "text": "28",
+     "voice": "temperature two eight"
+    },
+    "dew_point": {
+     "text": "24",
+     "voice": "dewpoint two four"
+    },
+    "pressure": {
+     "text": "Q1008",
+     "voice": "QNH one zero zero eight hectopascals"
+    },
+    "trend": {
+     "text": "TEMPO 36020G35KT",
+     "voice": "TEMPO 36020G35KT"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "36012KT 9999 BKN020CB 28/24 Q1008",
+    "voice": "wind three six zero degrees one two knots, visibility one zero kilometers or more, broken two thousand cumulonimbus, temperature two eight, dewpoint two four, QNH one zero zero eight hectopascals"
+   }
+  },
+  {
+   "raw": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "station": "ZSPD",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "09004MPS",
+     "voice": "wind zero niner zero degrees four meters per second"
+    },
+    "visibility": {
+     "text": "3000",
+     "voice": "visibility three kilometers"
+    },
+    "rvr": {
+     "text": "R35L/1200",
+     "voice": "runway three five L visual range one two zero zero meters"
+    },
+    "present_weather": {
+     "text": "-SHRA",
+     "voice": "light showers of rain"
+    },
+    "clouds": {
+     "text": "BKN010",
+     "voice": "broken one thousand"
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "Q1013",
+     "voice": "QNH one zero one three hectopascals"
+    },
+    "trend": {
+     "text": "",
+     "voice": ""
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "09004MPS 3000 R35L/1200 -SHRA BKN010 25/18 Q1013",
+    "voice": "wind zero niner zero degrees four meters per second, visibility three kilometers, runway three five L visual range one two zero zero meters, light showers of rain, broken one thousand, temperature two five, dewpoint one eight, QNH one zero one three hectopascals"
+   }
+  },
+  {
+   "raw": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "station": "ZHHH",
+   "valid": true,
+   "cavok": false,
+   "auto": true,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "00000MPS",
+     "voice": "wind calm"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "VV///",
+     "voice": "vertical visibility"
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "Q1013",
+     "voice": "QNH one zero one three hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "RERA",
+     "voice": "recent rain"
+    }
+   },
+   "full_wx": {
+    "text": "00000MPS 9999 VV/// 25/18 Q1013",
+    "voice": "wind calm, visibility one zero kilometers or more, vertical visibility, temperature two five, dewpoint one eight, QNH one zero one three hectopascals"
+   }
+  },
+  {
+   "raw": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "station": "ZSAM",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "09004MPS",
+     "voice": "wind zero niner zero degrees four meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "NSC",
+     "voice": "no significant clouds"
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "Q1013",
+     "voice": "QNH one zero one three hectopascals"
+    },
+    "trend": {
+     "text": "",
+     "voice": ""
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "09004MPS 9999 NSC 25/18 Q1013",
+    "voice": "wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, no significant clouds, temperature two five, dewpoint one eight, QNH one zero one three hectopascals"
+   }
+  },
+  {
+   "raw": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "station": "ZPPP",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "09004MPS",
+     "voice": "wind zero niner zero degrees four meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "",
+     "voice": ""
+    },
+    "temperature": {
+     "text": "25",
+     "voice": "temperature two five"
+    },
+    "dew_point": {
+     "text": "18",
+     "voice": "dewpoint one eight"
+    },
+    "pressure": {
+     "text": "Q1013",
+     "voice": "QNH one zero one three hectopascals"
+    },
+    "trend": {
+     "text": "",
+     "voice": ""
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "09004MPS 9999 25/18 Q1013",
+    "voice": "wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature two five, dewpoint one eight, QNH one zero one three hectopascals"
+   }
+  },
+  {
+   "raw": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "station": "ZLXY",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "34003MPS",
+     "voice": "wind three four zero degrees three meters per second"
+    },
+    "visibility": {
+     "text": "4000",
+     "voice": "visibility four kilometers"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "BR",
+     "voice": "mist"
+    },
+    "clouds": {
+     "text": "FEW006 SCT033",
+     "voice": "few six hundred, scattered three thousand three hundred"
+    },
+    "temperature": {
+     "text": "08",
+     "voice": "temperature eight"
+    },
+    "dew_point": {
+     "text": "07",
+     "voice": "dewpoint seven"
+    },
+    "pressure": {
+     "text": "Q1024",
+     "voice": "QNH one zero two four hectopascals"
+    },
+    "trend": {
+     "text": "BECMG TL0530 0800 FG",
+     "voice": "BECMG TL0530 0800 FG"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "34003MPS 4000 BR FEW006 SCT033 08/07 Q1024",
+    "voice": "wind three four zero degrees three meters per second, visibility four kilometers, mist, few six hundred, scattered three thousand three hundred, temperature eight, dewpoint seven, QNH one zero two four hectopascals"
+   }
+  },
+  {
+   "raw": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "station": "ZWWW",
+   "valid": true,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "251300Z",
+     "voice": "time one three zero zero"
+    },
+    "wind": {
+     "text": "07008G14MPS",
+     "voice": "wind zero seven zero degrees eight meters per second gusting one four meters per second"
+    },
+    "visibility": {
+     "text": "9999",
+     "voice": "visibility one zero kilometers or more"
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "-TSRA",
+     "voice": "light thunderstorm rain"
+    },
+    "clouds": {
+     "text": "SCT030CB BKN040",
+     "voice": "scattered three thousand cumulonimbus, broken four thousand"
+    },
+    "temperature": {
+     "text": "22",
+     "voice": "temperature two two"
+    },
+    "dew_point": {
+     "text": "16",
+     "voice": "dewpoint one six"
+    },
+    "pressure": {
+     "text": "Q1010",
+     "voice": "QNH one zero one zero hectopascals"
+    },
+    "trend": {
+     "text": "NOSIG",
+     "voice": "no significant change"
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010",
+    "voice": "wind zero seven zero degrees eight meters per second gusting one four meters per second, visibility one zero kilometers or more, light thunderstorm rain, scattered three thousand cumulonimbus, broken four thousand, temperature two two, dewpoint one six, QNH one zero one zero hectopascals"
+   }
+  },
+  {
+   "raw": "",
+   "station": "",
+   "valid": false,
+   "cavok": false,
+   "auto": false,
+   "elements": {
+    "observation_time": {
+     "text": "",
+     "voice": ""
+    },
+    "wind": {
+     "text": "",
+     "voice": ""
+    },
+    "visibility": {
+     "text": "",
+     "voice": ""
+    },
+    "rvr": {
+     "text": "",
+     "voice": ""
+    },
+    "present_weather": {
+     "text": "",
+     "voice": ""
+    },
+    "clouds": {
+     "text": "",
+     "voice": ""
+    },
+    "temperature": {
+     "text": "",
+     "voice": ""
+    },
+    "dew_point": {
+     "text": "",
+     "voice": ""
+    },
+    "pressure": {
+     "text": "",
+     "voice": ""
+    },
+    "trend": {
+     "text": "",
+     "voice": ""
+    },
+    "recent_weather": {
+     "text": "",
+     "voice": ""
+    }
+   },
+   "full_wx": {
+    "text": "",
+    "voice": ""
+   }
+  }
+ ],
+ "free_text": [
+  {
+   "input": "ARR RWY 16L, 17R, DEP RWY 16R, 17L",
+   "expand": "arrival runway one six left, one seven right, departure runway one six right, one seven left",
+   "polish": "ARR RWY 16 L, 17 R, DEP RWY 16 R, 17 L"
+  },
+  {
+   "input": "SIMUL PARL ILS APCHS TO RWY34L_R ARE INPR",
+   "expand": "simultaneous parallel I L S approaches TO runway three four left and right ARE in progress",
+   "polish": "SIMUL PARL ILS APCHS TO RWY34 L R ARE INPR"
+  },
+  {
+   "input": "DEP FREQ 126.0, CTC TWR 118.2",
+   "expand": "departure frequency one two six decimal zero, contact tower one one eight decimal two",
+   "polish": "DEP FREQ 126. 0, CTC TWR 118. 2"
+  },
+  {
+   "input": "RWY 36Left",
+   "expand": "runway 36Left",
+   "polish": "RWY 36 Left"
+  },
+  {
+   "input": "TWY A CLSD DUE MAINT, EXP DELAY",
+   "expand": "taxiway A closed DUE maintenance, expect DELAY",
+   "polish": "TWY A CLSD DUE MAINT, EXP DELAY"
+  },
+  {
+   "input": "ILS CAT II APCH AVBL RWY 18L, RVR INOP",
+   "expand": "I L S category II approach available runway one eight left, R V R inoperative",
+   "polish": "ILS CAT II APCH AVBL RWY 18 L, RVR INOP"
+  },
+  {
+   "input": "跑道 35L 使用中",
+   "expand": "跑道 three five left 使用中",
+   "polish": "跑道 35 L 使用中"
+  },
+  {
+   "input": "BIRD ACTIVITY VC ARPT, ACFT ADVISED",
+   "expand": "BIRD ACTIVITY VC ARPT, aircraft ADVISED",
+   "polish": "BIRD ACTIVITY VC ARPT, ACFT ADVISED"
+  },
+  {
+   "input": "TRL 3600, TA 3000",
+   "expand": "transition level three six zero zero, transition altitude three zero zero zero",
+   "polish": "TRL 3600, TA 3000"
+  },
+  {
+   "input": "RNAV DEPS UNAVBL, ADVISE ATC ON FIRST CTC",
+   "expand": "R NAV departures unavailable, ADVISE A T C ON FIRST contact",
+   "polish": "RNAV DEPS UNAVBL, ADVISE ATC ON FIRST CTC"
+  },
+  {
+   "input": "WIP BTN TWY B AND TWY C, GND FREQ 121.6",
+   "expand": "work in progress between taxiway B AND taxiway C, ground frequency one two one decimal six",
+   "polish": "WIP BTN TWY B AND TWY C, GND FREQ 121. 6"
+  },
+  {
+   "input": "",
+   "expand": "",
+   "polish": ""
+  }
+ ],
+ "renders": [
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 FEW030 SCT100 25/18 Q1013. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, few three thousand, scattered one zero thousand, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 FEW030 SCT100 25/18 Q1013. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, few three thousand, scattered one zero thousand, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "09004MPS wind zero niner zero degrees four meters per second",
+   "voice": "wind zero niner zero degrees four meters per second wind zero niner zero degrees four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "09004MPS. Q1013",
+   "voice": "wind zero niner zero degrees four meters per second. Q N H one zero one three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 09004MPS",
+   "voice": "[NOPE] wind zero niner zero degrees four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18 FEW030 SCT100 NOSIG",
+   "voice": "temperature two five dewpoint one eight few three thousand, scattered one zero thousand no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 291000Z. 30007MPS CAVOK 24/M08 Q1003. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one zero zero zero. wind three zero zero degrees seven meters per second, cavok, temperature two four, dewpoint minus eight, Q N H one zero zero three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 291000Z. 30007MPS CAVOK 24/M08 Q1003. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one zero zero zero. wind three zero zero degrees seven meters per second, cavok, temperature two four, dewpoint minus eight, Q N H one zero zero three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "30007MPS wind three zero zero degrees seven meters per second",
+   "voice": "wind three zero zero degrees seven meters per second wind three zero zero degrees seven meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "30007MPS. Q1003",
+   "voice": "wind three zero zero degrees seven meters per second. Q N H one zero zero three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 30007MPS",
+   "voice": "[NOPE] wind three zero zero degrees seven meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "24/M08 NOSIG",
+   "voice": "temperature two four dewpoint minus eight no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 010800Z. 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time zero eight zero zero. wind one three zero degrees three meters per second variable between zero eight zero and one eight zero, visibility six kilometers, light rain, broken one thousand, overcast three thousand, temperature two seven, dewpoint two six, Q N H one zero zero five hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 010800Z. 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time zero eight zero zero. wind one three zero degrees three meters per second variable between zero eight zero and one eight zero, visibility six kilometers, light rain, broken one thousand, overcast three thousand, temperature two seven, dewpoint two six, Q N H one zero zero five hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "13003MPS 080V180 wind one three zero degrees three meters per second variable between zero eight zero and one eight zero",
+   "voice": "wind one three zero degrees three meters per second variable between zero eight zero and one eight zero wind one three zero degrees three meters per second variable between zero eight zero and one eight zero",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "13003MPS 080V180. Q1005",
+   "voice": "wind one three zero degrees three meters per second variable between zero eight zero and one eight zero. Q N H one zero zero five hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 13003MPS 080V180",
+   "voice": "[NOPE] wind one three zero degrees three meters per second variable between zero eight zero and one eight zero",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "27/26 BKN010 OVC030 NOSIG",
+   "voice": "temperature two seven dewpoint two six broken one thousand, overcast three thousand no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 020200Z. 25006MPS 9999 SCT023 BKN046 12/M05 Q0995. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time zero two zero zero. wind two five zero degrees six meters per second, visibility one zero kilometers or more, scattered two thousand three hundred, broken four thousand six hundred, temperature one two, dewpoint minus five, Q N H zero niner niner five hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 020200Z. 25006MPS 9999 SCT023 BKN046 12/M05 Q0995. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time zero two zero zero. wind two five zero degrees six meters per second, visibility one zero kilometers or more, scattered two thousand three hundred, broken four thousand six hundred, temperature one two, dewpoint minus five, Q N H zero niner niner five hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "25006MPS wind two five zero degrees six meters per second",
+   "voice": "wind two five zero degrees six meters per second wind two five zero degrees six meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "25006MPS. Q0995",
+   "voice": "wind two five zero degrees six meters per second. Q N H zero niner niner five hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 25006MPS",
+   "voice": "[NOPE] wind two five zero degrees six meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "12/M05 SCT023 BKN046 NOSIG",
+   "voice": "temperature one two dewpoint minus five scattered two thousand three hundred, broken four thousand six hundred no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251200Z. VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one two zero zero. wind variable one meters per second, visibility one two zero zero meters, runway three six L visual range one zero zero zero meters, mist, no significant clouds, temperature one eight, dewpoint one seven, Q N H one zero two zero hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251200Z. VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one two zero zero. wind variable one meters per second, visibility one two zero zero meters, runway three six L visual range one zero zero zero meters, mist, no significant clouds, temperature one eight, dewpoint one seven, Q N H one zero two zero hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "VRB01MPS wind variable one meters per second",
+   "voice": "wind variable one meters per second wind variable one meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "VRB01MPS. R36L/1000. Q1020",
+   "voice": "wind variable one meters per second. runway three six L visual range one zero zero zero meters. Q N H one zero two zero hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] VRB01MPS",
+   "voice": "[NOPE] wind variable one meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "18/17 NSC NOSIG",
+   "voice": "temperature one eight dewpoint one seven no significant clouds no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 M03/M07 A2992. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature minus three, dewpoint minus seven, altimeter two niner point niner two. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 M03/M07 A2992. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature minus three, dewpoint minus seven, altimeter two niner point niner two. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "09004MPS wind zero niner zero degrees four meters per second",
+   "voice": "wind zero niner zero degrees four meters per second wind zero niner zero degrees four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "09004MPS. A2992",
+   "voice": "wind zero niner zero degrees four meters per second. altimeter two niner point niner two",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 09004MPS",
+   "voice": "[NOPE] wind zero niner zero degrees four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "M03/M07 NOSIG",
+   "voice": "temperature minus three dewpoint minus seven no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero, visibility one zero statute miles, few one thousand five hundred, scattered two zero thousand, temperature two five, dewpoint one eight, altimeter two niner point niner two. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero, visibility one zero statute miles, few one thousand five hundred, scattered two zero thousand, temperature two five, dewpoint one eight, altimeter two niner point niner two. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "26015G25KT 220V300 wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero",
+   "voice": "wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "26015G25KT 220V300. A2992",
+   "voice": "wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero. altimeter two niner point niner two",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 26015G25KT 220V300",
+   "voice": "[NOPE] wind two six zero degrees one five knots gusting two five knots variable between two two zero and three zero zero",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18 FEW015 SCT200",
+   "voice": "temperature two five dewpoint one eight few one thousand five hundred, scattered two zero thousand",
+   "unknown": []
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 36012KT 9999 BKN020CB 28/24 Q1008. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind three six zero degrees one two knots, visibility one zero kilometers or more, broken two thousand cumulonimbus, temperature two eight, dewpoint two four, Q N H one zero zero eight hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 36012KT 9999 BKN020CB 28/24 Q1008. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind three six zero degrees one two knots, visibility one zero kilometers or more, broken two thousand cumulonimbus, temperature two eight, dewpoint two four, Q N H one zero zero eight hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "36012KT wind three six zero degrees one two knots",
+   "voice": "wind three six zero degrees one two knots wind three six zero degrees one two knots",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "36012KT. Q1008",
+   "voice": "wind three six zero degrees one two knots. Q N H one zero zero eight hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 36012KT",
+   "voice": "[NOPE] wind three six zero degrees one two knots",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "28/24 BKN020CB TEMPO 36020G35KT",
+   "voice": "temperature two eight dewpoint two four broken two thousand cumulonimbus TEMPO 36020 G35 KT",
+   "unknown": []
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 3000 R35L/1200 -SHRA BKN010 25/18 Q1013. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility three kilometers, runway three five L visual range one two zero zero meters, light showers of rain, broken one thousand, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 3000 R35L/1200 -SHRA BKN010 25/18 Q1013. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility three kilometers, runway three five L visual range one two zero zero meters, light showers of rain, broken one thousand, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "09004MPS wind zero niner zero degrees four meters per second",
+   "voice": "wind zero niner zero degrees four meters per second wind zero niner zero degrees four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "09004MPS. R35L/1200. Q1013",
+   "voice": "wind zero niner zero degrees four meters per second. runway three five L visual range one two zero zero meters. Q N H one zero one three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 09004MPS",
+   "voice": "[NOPE] wind zero niner zero degrees four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18 BKN010",
+   "voice": "temperature two five dewpoint one eight broken one thousand",
+   "unknown": []
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 00000MPS 9999 VV/// 25/18 Q1013. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind calm, visibility one zero kilometers or more, vertical visibility, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 00000MPS 9999 VV/// 25/18 Q1013. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind calm, visibility one zero kilometers or more, vertical visibility, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "00000MPS wind calm",
+   "voice": "wind calm wind calm",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "00000MPS. Q1013",
+   "voice": "wind calm. Q N H one zero one three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 00000MPS",
+   "voice": "[NOPE] wind calm",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18 VV/// NOSIG RERA",
+   "voice": "temperature two five dewpoint one eight vertical visibility no significant change recent rain",
+   "unknown": []
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 NSC 25/18 Q1013. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, no significant clouds, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 NSC 25/18 Q1013. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, no significant clouds, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "09004MPS wind zero niner zero degrees four meters per second",
+   "voice": "wind zero niner zero degrees four meters per second wind zero niner zero degrees four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "09004MPS. Q1013",
+   "voice": "wind zero niner zero degrees four meters per second. Q N H one zero one three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 09004MPS",
+   "voice": "[NOPE] wind zero niner zero degrees four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18 NSC",
+   "voice": "temperature two five dewpoint one eight no significant clouds",
+   "unknown": []
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 25/18 Q1013. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 09004MPS 9999 25/18 Q1013. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero niner zero degrees four meters per second, visibility one zero kilometers or more, temperature two five, dewpoint one eight, Q N H one zero one three hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "09004MPS wind zero niner zero degrees four meters per second",
+   "voice": "wind zero niner zero degrees four meters per second wind zero niner zero degrees four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "09004MPS. Q1013",
+   "voice": "wind zero niner zero degrees four meters per second. Q N H one zero one three hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 09004MPS",
+   "voice": "[NOPE] wind zero niner zero degrees four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "25/18",
+   "voice": "temperature two five dewpoint one eight",
+   "unknown": []
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind three four zero degrees three meters per second, visibility four kilometers, mist, few six hundred, scattered three thousand three hundred, temperature eight, dewpoint seven, Q N H one zero two four hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind three four zero degrees three meters per second, visibility four kilometers, mist, few six hundred, scattered three thousand three hundred, temperature eight, dewpoint seven, Q N H one zero two four hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "34003MPS wind three four zero degrees three meters per second",
+   "voice": "wind three four zero degrees three meters per second wind three four zero degrees three meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "34003MPS. Q1024",
+   "voice": "wind three four zero degrees three meters per second. Q N H one zero two four hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 34003MPS",
+   "voice": "[NOPE] wind three four zero degrees three meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "08/07 FEW006 SCT033 BECMG TL0530 0800 FG",
+   "voice": "temperature eight dewpoint seven few six hundred, scattered three thousand three hundred BECMG TL0530 zero eight zero zero FG",
+   "unknown": []
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero seven zero degrees eight meters per second gusting one four meters per second, visibility one zero kilometers or more, light thunderstorm rain, scattered three thousand cumulonimbus, broken four thousand, temperature two two, dewpoint one six, Q N H one zero one zero hectopascals. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F 251300Z. 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot time one three zero zero. wind zero seven zero degrees eight meters per second gusting one four meters per second, visibility one zero kilometers or more, light thunderstorm rain, scattered three thousand cumulonimbus, broken four thousand, temperature two two, dewpoint one six, Q N H one zero one zero hectopascals. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "07008G14MPS wind zero seven zero degrees eight meters per second gusting one four meters per second",
+   "voice": "wind zero seven zero degrees eight meters per second gusting one four meters per second wind zero seven zero degrees eight meters per second gusting one four meters per second",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "07008G14MPS. Q1010",
+   "voice": "wind zero seven zero degrees eight meters per second gusting one four meters per second. Q N H one zero one zero hectopascals",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE] 07008G14MPS",
+   "voice": "[NOPE] wind zero seven zero degrees eight meters per second gusting one four meters per second",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "22/16 SCT030CB BKN040 NOSIG",
+   "voice": "temperature two two dewpoint one six scattered three thousand cumulonimbus, broken four thousand no significant change",
+   "unknown": []
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [ARPT_COND] [NOTAMS] [CLOSING]",
+   "text": "ZSPD ATIS F. ARR RWY 16L, 17R. ILS APCH IN USE TWY A CLSD DUE MAINT advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot. arrival runway one six left, one seven right. I L S approach IN USE taxiway A closed DUE maintenance advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[FACILITY] ATIS [ATIS_LETTER] [OBS_TIME]. [WX]. [CLOSING]",
+   "text": "ZSPD ATIS F. advise on initial contact you have information F",
+   "voice": "Shanghai Pudong International Airport ATIS Foxtrot. advise on initial contact you have information Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[WIND] [WIND:VOX]",
+   "text": "",
+   "voice": "",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[FACILITY] INFORMATION [ATIS_LETTER]",
+   "text": "ZSPD INFORMATION F",
+   "voice": "Shanghai Pudong International Airport INFORMATION Foxtrot",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[WIND]. [RVR]. [PRESSURE]",
+   "text": "",
+   "voice": "",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "[NOPE] [WIND]",
+   "text": "[NOPE]",
+   "voice": "[NOPE]",
+   "unknown": [
+    "NOPE"
+   ]
+  },
+  {
+   "metar": "",
+   "template": "[TEMP]/[DEW] [CLOUDS] [TREND] [RECENT_WX]",
+   "text": "/",
+   "voice": "",
+   "unknown": []
+  },
+  {
+   "metar": "",
+   "template": "TRL [TL]. @ils APCH IN USE. [ARPT_COND]",
+   "text": "TRL 3600. ILS APCH IN USE. ARR RWY 16L, 17R. ILS APCH IN USE",
+   "voice": "transition level three six zero zero. I L S approach IN USE. arrival runway one six left, one seven right. I L S approach IN USE",
+   "unknown": []
+  }
+ ],
+ "chinese": [
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 少云 九百 米 疏云 三千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 少云 九百 米 疏云 三千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 少云 九百 米 疏云 三千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 少云 九百 米 疏云 三千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 洞 洞 洞 世界协调时 使用跑道 三五左 风向 三 洞 洞 度 风速 七 米每秒 能见度 幺洞 公里 以上 云高 幺五洞洞 米 以上 气温 二十四 摄氏度 露点负 八 摄氏度 修正海压 幺 洞 洞 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 洞 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 三 洞 洞 度 风速 七 米每秒 能见度 幺洞 公里 以上 云高 幺五洞洞 米 以上 气温 二十四 摄氏度 露点负 八 摄氏度 修正海压 幺 洞 洞 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 洞 洞 洞 世界协调时 风向 三 洞 洞 度 风速 七 米每秒 能见度 幺洞 公里 以上 云高 幺五洞洞 米 以上 气温 二十四 摄氏度 露点负 八 摄氏度 修正海压 幺 洞 洞 三 百帕"
+  },
+  {
+   "metar": "ZBAA 291000Z 30007MPS CAVOK 24/M08 Q1003 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 洞 洞 洞 世界协调时 使用跑道 零两左 风向 三 洞 洞 度 风速 七 米每秒 能见度 幺洞 公里 以上 云高 幺五洞洞 米 以上 气温 二十四 摄氏度 露点负 八 摄氏度 修正海压 幺 洞 洞 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 洞 八 洞 洞 世界协调时 使用跑道 三五左 风向 幺 三 洞 度 风速 三 米每秒 风向在 洞 八 洞 度 和 幺 八 洞 度 之间变化 能见度 六 公里 小雨 多云 三百 米 阴天 九百 米 气温 二十七 摄氏度 露点 二十六 摄氏度 修正海压 幺 洞 洞 五 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 洞 八 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 幺 三 洞 度 风速 三 米每秒 风向在 洞 八 洞 度 和 幺 八 洞 度 之间变化 能见度 六 公里 小雨 多云 三百 米 阴天 九百 米 气温 二十七 摄氏度 露点 二十六 摄氏度 修正海压 幺 洞 洞 五 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "洞 八 洞 洞 世界协调时 风向 幺 三 洞 度 风速 三 米每秒 风向在 洞 八 洞 度 和 幺 八 洞 度 之间变化 能见度 六 公里 小雨 多云 三百 米 阴天 九百 米 气温 二十七 摄氏度 露点 二十六 摄氏度 修正海压 幺 洞 洞 五 百帕"
+  },
+  {
+   "metar": "ZGGG 010800Z 13003MPS 080V180 6000 -RA BKN010 OVC030 27/26 Q1005 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 洞 八 洞 洞 世界协调时 使用跑道 零两左 风向 幺 三 洞 度 风速 三 米每秒 风向在 洞 八 洞 度 和 幺 八 洞 度 之间变化 能见度 六 公里 小雨 多云 三百 米 阴天 九百 米 气温 二十七 摄氏度 露点 二十六 摄氏度 修正海压 幺 洞 洞 五 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 洞 两 洞 洞 世界协调时 使用跑道 三五左 风向 两 五 洞 度 风速 六 米每秒 能见度 幺洞 公里 以上 疏云 六百九十 米 多云 一千三百八十 米 气温 十二 摄氏度 露点负 五 摄氏度 修正海压 洞 九 九 五 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 洞 两 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 两 五 洞 度 风速 六 米每秒 能见度 幺洞 公里 以上 疏云 六百九十 米 多云 一千三百八十 米 气温 十二 摄氏度 露点负 五 摄氏度 修正海压 洞 九 九 五 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "洞 两 洞 洞 世界协调时 风向 两 五 洞 度 风速 六 米每秒 能见度 幺洞 公里 以上 疏云 六百九十 米 多云 一千三百八十 米 气温 十二 摄氏度 露点负 五 摄氏度 修正海压 洞 九 九 五 百帕"
+  },
+  {
+   "metar": "ZULS 020200Z 25006MPS 9999 SCT023 BKN046 12/M05 Q0995 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 洞 两 洞 洞 世界协调时 使用跑道 零两左 风向 两 五 洞 度 风速 六 米每秒 能见度 幺洞 公里 以上 疏云 六百九十 米 多云 一千三百八十 米 气温 十二 摄氏度 露点负 五 摄氏度 修正海压 洞 九 九 五 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 两 洞 洞 世界协调时 使用跑道 三五左 风向不定 风速 一 米每秒 能见度 一千二百 米 轻雾 无重要云 气温 十八 摄氏度 露点 十七 摄氏度 修正海压 幺 洞 两 洞 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 两 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向不定 风速 一 米每秒 能见度 一千二百 米 轻雾 无重要云 气温 十八 摄氏度 露点 十七 摄氏度 修正海压 幺 洞 两 洞 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 两 洞 洞 世界协调时 风向不定 风速 一 米每秒 能见度 一千二百 米 轻雾 无重要云 气温 十八 摄氏度 露点 十七 摄氏度 修正海压 幺 洞 两 洞 百帕"
+  },
+  {
+   "metar": "ZSSS 251200Z VRB01MPS 1200 R36L/1000 BR NSC 18/17 Q1020 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 两 洞 洞 世界协调时 使用跑道 零两左 风向不定 风速 一 米每秒 能见度 一千二百 米 轻雾 无重要云 气温 十八 摄氏度 露点 十七 摄氏度 修正海压 幺 洞 两 洞 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温负 三 摄氏度 露点负 七 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温负 三 摄氏度 露点负 七 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温负 三 摄氏度 露点负 七 摄氏度 修正海压 两 九 点 九 两 英寸汞柱"
+  },
+  {
+   "metar": "ZYTX 251300Z 09004MPS 9999 M03/M07 A2992 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温负 三 摄氏度 露点负 七 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 两 六 洞 度 风速 十五 海里每小时 阵风 二十五 海里每小时 风向在 两 两 洞 度 和 三 洞 洞 度 之间变化 少云 四百五十 米 疏云 六千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 两 六 洞 度 风速 十五 海里每小时 阵风 二十五 海里每小时 风向在 两 两 洞 度 和 三 洞 洞 度 之间变化 少云 四百五十 米 疏云 六千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 两 六 洞 度 风速 十五 海里每小时 阵风 二十五 海里每小时 风向在 两 两 洞 度 和 三 洞 洞 度 之间变化 少云 四百五十 米 疏云 六千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 两 九 点 九 两 英寸汞柱"
+  },
+  {
+   "metar": "KLAX 251300Z 26015G25KT 220V300 10SM FEW015 SCT200 25/18 A2992",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 两 六 洞 度 风速 十五 海里每小时 阵风 二十五 海里每小时 风向在 两 两 洞 度 和 三 洞 洞 度 之间变化 少云 四百五十 米 疏云 六千 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 两 九 点 九 两 英寸汞柱 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 三 六 洞 度 风速 十二 海里每小时 能见度 幺洞 公里 以上 多云 六百 米 积雨云 气温 二十八 摄氏度 露点 二十四 摄氏度 修正海压 幺 洞 洞 八 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 三 六 洞 度 风速 十二 海里每小时 能见度 幺洞 公里 以上 多云 六百 米 积雨云 气温 二十八 摄氏度 露点 二十四 摄氏度 修正海压 幺 洞 洞 八 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 三 六 洞 度 风速 十二 海里每小时 能见度 幺洞 公里 以上 多云 六百 米 积雨云 气温 二十八 摄氏度 露点 二十四 摄氏度 修正海压 幺 洞 洞 八 百帕"
+  },
+  {
+   "metar": "RJTT 251300Z 36012KT 9999 BKN020CB 28/24 Q1008 TEMPO 36020G35KT",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 三 六 洞 度 风速 十二 海里每小时 能见度 幺洞 公里 以上 多云 六百 米 积雨云 气温 二十八 摄氏度 露点 二十四 摄氏度 修正海压 幺 洞 洞 八 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 九 洞 度 风速 四 米每秒 能见度 三 公里 小阵性雨 多云 三百 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 九 洞 度 风速 四 米每秒 能见度 三 公里 小阵性雨 多云 三百 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 九 洞 度 风速 四 米每秒 能见度 三 公里 小阵性雨 多云 三百 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕"
+  },
+  {
+   "metar": "ZSPD 251300Z 09004MPS 3000 -SHRA R35L/1200 BKN010 25/18 Q1013",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 九 洞 度 风速 四 米每秒 能见度 三 公里 小阵性雨 多云 三百 米 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 静风 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 静风 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 静风 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕"
+  },
+  {
+   "metar": "ZHHH 251300Z AUTO 00000MPS 9999 RERA VV/// 25/18 Q1013 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 静风 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 无重要云 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 无重要云 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 无重要云 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕"
+  },
+  {
+   "metar": "METAR ZSAM 251300Z 09004MPS 9999 NSC 25/18 Q1013=",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 无重要云 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕"
+  },
+  {
+   "metar": "ZPPP 251300Z 09004MPS 9999 XYZZY123 25/18 Q1013",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 九 洞 度 风速 四 米每秒 能见度 幺洞 公里 以上 气温 二十五 摄氏度 露点 十八 摄氏度 修正海压 幺 洞 幺 三 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 三 四 洞 度 风速 三 米每秒 能见度 四 公里 轻雾 少云 一百八十 米 疏云 九百九十 米 气温 八 摄氏度 露点 七 摄氏度 修正海压 幺 洞 两 四 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 三 四 洞 度 风速 三 米每秒 能见度 四 公里 轻雾 少云 一百八十 米 疏云 九百九十 米 气温 八 摄氏度 露点 七 摄氏度 修正海压 幺 洞 两 四 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 三 四 洞 度 风速 三 米每秒 能见度 四 公里 轻雾 少云 一百八十 米 疏云 九百九十 米 气温 八 摄氏度 露点 七 摄氏度 修正海压 幺 洞 两 四 百帕"
+  },
+  {
+   "metar": "ZLXY 251300Z 34003MPS 4000 BR FEW006 SCT033 08/07 Q1024 BECMG TL0530 0800 FG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 三 四 洞 度 风速 三 米每秒 能见度 四 公里 轻雾 少云 一百八十 米 疏云 九百九十 米 气温 八 摄氏度 露点 七 摄氏度 修正海压 幺 洞 两 四 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法 幺 三 洞 洞 世界协调时 使用跑道 三五左 风向 洞 拐 洞 度 风速 八 米每秒 阵风 十四 米每秒 能见度 幺洞 公里 以上 小雷暴雨 疏云 九百 米 积雨云 多云 一千二百 米 气温 二十二 摄氏度 露点 十六 摄氏度 修正海压 幺 洞 幺 洞 百帕 首次与管制员联络时报告你已收到通播 阿尔法"
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶 幺 三 洞 洞 世界协调时 跑道独立平行离场，跑道 三六左 起始高度 六百米 风向 洞 拐 洞 度 风速 八 米每秒 阵风 十四 米每秒 能见度 幺洞 公里 以上 小雷暴雨 疏云 九百 米 积雨云 多云 一千二百 米 气温 二十二 摄氏度 露点 十六 摄氏度 修正海压 幺 洞 幺 洞 百帕 谨慎鸟情 首次与管制员联络时报告你已收到通播 朱丽叶"
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": "幺 三 洞 洞 世界协调时 风向 洞 拐 洞 度 风速 八 米每秒 阵风 十四 米每秒 能见度 幺洞 公里 以上 小雷暴雨 疏云 九百 米 积雨云 多云 一千二百 米 气温 二十二 摄氏度 露点 十六 摄氏度 修正海压 幺 洞 幺 洞 百帕"
+  },
+  {
+   "metar": "ZWWW 251300Z 07008G14MPS 9999 -TSRA SCT030CB BKN040 22/16 Q1010 NOSIG",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁 幺 三 洞 洞 世界协调时 使用跑道 零两左 风向 洞 拐 洞 度 风速 八 米每秒 阵风 十四 米每秒 能见度 幺洞 公里 以上 小雷暴雨 疏云 九百 米 积雨云 多云 一千二百 米 气温 二十二 摄氏度 露点 十六 摄氏度 修正海压 幺 洞 幺 洞 百帕 机坪施工 首次与管制员联络时报告你已收到通播 祖鲁"
+  },
+  {
+   "metar": "",
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法"
+  },
+  {
+   "metar": "",
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶"
+  },
+  {
+   "metar": "",
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": ""
+  },
+  {
+   "metar": "",
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁"
+  },
+  {
+   "metar": null,
+   "facility": "上海浦东",
+   "letter": "A",
+   "runway": "三五左",
+   "extra": "",
+   "script": "上海浦东情报通播 阿尔法"
+  },
+  {
+   "metar": null,
+   "facility": "北京首都",
+   "letter": "J",
+   "runway": "跑道独立平行离场，跑道 三六左 起始高度 六百米",
+   "extra": "谨慎鸟情",
+   "script": "北京首都情报通播 朱丽叶"
+  },
+  {
+   "metar": null,
+   "facility": "",
+   "letter": "",
+   "runway": "",
+   "extra": "",
+   "script": ""
+  },
+  {
+   "metar": null,
+   "facility": "广州白云",
+   "letter": "Z",
+   "runway": "零两左",
+   "extra": "机坪施工",
+   "script": "广州白云情报通播 祖鲁"
+  }
+ ],
+ "counts": [
+  {
+   "value": 0,
+   "spoken": "零"
+  },
+  {
+   "value": 1,
+   "spoken": "一"
+  },
+  {
+   "value": 5,
+   "spoken": "五"
+  },
+  {
+   "value": 10,
+   "spoken": "十"
+  },
+  {
+   "value": 11,
+   "spoken": "十一"
+  },
+  {
+   "value": 15,
+   "spoken": "十五"
+  },
+  {
+   "value": 20,
+   "spoken": "二十"
+  },
+  {
+   "value": 30,
+   "spoken": "三十"
+  },
+  {
+   "value": 100,
+   "spoken": "一百"
+  },
+  {
+   "value": 101,
+   "spoken": "一百零一"
+  },
+  {
+   "value": 110,
+   "spoken": "一百一十"
+  },
+  {
+   "value": 115,
+   "spoken": "一百一十五"
+  },
+  {
+   "value": 120,
+   "spoken": "一百二十"
+  },
+  {
+   "value": 200,
+   "spoken": "二百"
+  },
+  {
+   "value": 305,
+   "spoken": "三百零五"
+  },
+  {
+   "value": 900,
+   "spoken": "九百"
+  },
+  {
+   "value": 960,
+   "spoken": "九百六十"
+  },
+  {
+   "value": 1000,
+   "spoken": "一千"
+  },
+  {
+   "value": 1005,
+   "spoken": "一千零五"
+  },
+  {
+   "value": 1050,
+   "spoken": "一千零五十"
+  },
+  {
+   "value": 1500,
+   "spoken": "一千五百"
+  },
+  {
+   "value": 3000,
+   "spoken": "三千"
+  },
+  {
+   "value": 9999,
+   "spoken": "九千九百九十九"
+  },
+  {
+   "value": -8,
+   "spoken": "零下 八"
+  },
+  {
+   "value": -25,
+   "spoken": "零下 二十五"
+  }
+ ]
+}
