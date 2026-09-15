@@ -2374,7 +2374,7 @@ dependencies = [
 
 [[package]]
 name = "msfs-for-can"
-version = "3.0.0"
+version = "27.0.1"
 dependencies = [
  "can-voice-app",
  "can-voice-client",
