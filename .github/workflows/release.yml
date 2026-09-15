@@ -1,0 +1,136 @@
+# 四个桌面端的 Windows 安装包，发成一个 GitHub Release。
+#
+#     gh workflow run release.yml -f version=v27.0.1
+#
+# 或者推一个 `v*` 标签。
+#
+# # 为什么只出 Windows
+#
+# `can-audio` 现在发的四个客户端全部是 Windows（它的 release.yml 四个 job 都是
+# `runs-on: windows-latest`），所以 macOS 是一个**新能力**而不是一个回归。先把
+# 能替换现状的那一份发出来，mac 之后再说。
+#
+# # 为什么不签名
+#
+# 没有证书。Windows 会弹蓝色的"已保护你的电脑"，用户要点"更多信息 → 仍要运行"
+# ——和现在的 can-audio 一模一样（它的测试说明里就写着这一句）。**这不是可以
+# 悄悄跳过的一步**：release 说明里必须写出来，否则第一批测试者会以为下载到了
+# 病毒。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号，形如 v27.0.1"
+        required: true
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  build:
+    name: ${{ matrix.app }}
+    runs-on: windows-latest
+    strategy:
+      # 一个挂了其余三个照打，一次看全问题。
+      fail-fast: false
+      matrix:
+        include:
+          - app: controller
+            product: audio-for-can
+          - app: atis
+            product: atis-for-can
+          - app: xpc
+            product: xpc-for-can
+          - app: msfs
+            product: msfs-for-can
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/${{ matrix.app }}/src-tauri
+
+      # GITHUB_TOKEN 是给 can-ui 用的：GitHub 的 npm registry 即使是公开包也
+      # 要求带令牌。.npmrc 里写的是 ${GITHUB_TOKEN}，Actions 不会自动放进 env。
+      - run: bun install --frozen-lockfile
+        working-directory: apps/${{ matrix.app }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # tauri build 自己会调 beforeBuildCommand（也就是 bun run build），
+      # 所以前端不用单独再跑一遍。
+      - run: bun run tauri build
+        working-directory: apps/${{ matrix.app }}
+
+      # NSIS 和 MSI 都出。装不上 MSI 的机器不少（组策略、旧的 Windows
+      # Installer），而 NSIS 那个双击就装。
+      - name: 收集产物
+        shell: pwsh
+        run: |
+          $out = "dist-out"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $bundle = "apps/${{ matrix.app }}/src-tauri/target/release/bundle"
+          Get-ChildItem -Path $bundle -Recurse -Include *.exe,*.msi |
+            ForEach-Object { Copy-Item $_.FullName $out }
+          Get-ChildItem $out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.product }}
+          path: dist-out/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 摊平目录
+        run: |
+          mkdir -p out
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' \) -exec cp {} out/ \;
+          ls -lh out
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version || github.ref_name }}
+          # **beta 一律 prerelease。** 一个标着 Latest 的版本会被没在看群的人
+          # 当成正式版装上，而这几个包连一次真实服务端都没连过。
+          prerelease: true
+          generate_release_notes: true
+          files: out/*
+          body: |
+            ## ⚠️ 这是测试版
+
+            这几个客户端**没有连过真实的语音服务端**，也**没有签名**。
+
+            - **Windows 会弹蓝色的"已保护你的电脑"**：点「更多信息」→「仍要运行」。
+              这是因为没有数字签名，不是杀毒软件误报。现在的 can-audio 也是这样。
+            - **和现在的 Mumble 客户端不通。** 两套语音是两个互不相通的系统，
+              同一个频率上不会互相听见。测试时请约好时间，或者同时开着老客户端守听。
+
+            ## 装哪一个
+
+            | 文件 | 给谁 |
+            |---|---|
+            | `audio-for-can` | 管制员的语音客户端 |
+            | `atis-for-can` | 做通播的 |
+            | `xpc-for-can` | X-Plane 飞行员 |
+            | `msfs-for-can` | MSFS 飞行员 |
+
+            `.exe` 是安装程序，`.msi` 是给有组策略的机器用的，装一个就行。
+
+            ## 已知还不行的
+
+            - **MSFS 的他机画不出来**：AI 机注入还没接上。位置、语音、文字都正常。
+            - **X-Plane 要单独装插件**才看得见他机，见仓库里 `apps/xpc/plugin/`。
+            - **通播不出声**：声音由服务端的机队播，客户端这边只做稿子。

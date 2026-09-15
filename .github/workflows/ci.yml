@@ -155,6 +155,41 @@ jobs:
         env:
           CAN_VOICE_E2E: '1'
 
+  # 四个桌面端的 **Rust 侧**，在 Windows 上编一次。
+  #
+  # 它存在的唯一理由是 `can-voice-sim` 里那段 SimConnect 绑定：它是
+  # `#[cfg(windows)]` 的，而别的 job 全在 Linux 上跑，开发机是 macOS ——
+  # 也就是说在这个 job 之前，那段代码**在合并之前没有任何东西看过它**。
+  #
+  # 只 `cargo check` 不 `tauri build`：要的是"这段代码编得过"，而不是一个
+  # 安装包。真正的打包在 release.yml 里，它慢得多。
+  windows:
+    name: windows (四个桌面端编得过)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [controller, atis, xpc, msfs]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/${{ matrix.app }}/src-tauri
+      # tauri 的 build.rs 要 frontendDist 存在才肯跑，而这个 job 不构建前端。
+      # 给它一个空目录就够——这里验的是 Rust 那一半。
+      #
+      # 图标那一头不用在这里补：`icons/icon.ico` 是提交在仓库里的。Windows 上
+      # tauri-build 要拿它生成资源文件，**没有就直接编译失败**，而在 Linux 和
+      # macOS 上它压根不看这个文件——这个 job 第一次跑就是被这一条挡下来的。
+      - run: New-Item -ItemType Directory -Force -Path ../dist | Out-Null
+        shell: pwsh
+      - run: cargo check --all-targets
+      - run: cargo clippy --all-targets -- -D warnings
+
   apps:
     name: apps (前端类型检查 + 构建)
     runs-on: ubuntu-latest
