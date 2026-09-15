@@ -18,6 +18,7 @@ pub mod csl;
 pub mod traffic;
 pub mod xplane;
 
+pub mod inject;
 pub mod msfs;
 
 use can_voice_fsd::pilot::XpdrMode;
@@ -97,6 +98,7 @@ pub struct Animation {
     pub landing_on: bool,
     pub taxi_on: bool,
     pub strobe_on: bool,
+    pub nav_on: bool,
 }
 
 /// 位置包最后一个字段：气压高度减真高，英尺。
@@ -124,9 +126,21 @@ pub fn pressure_delta(
     (pressure_altitude - f64::from(true_altitude_ft)).round() as i32
 }
 
+/// X-Plane 的应答机档位：0 关 / 1 待机 / 2 开 / 3 测试或 C。
+pub const XPDR_ONLINE_FROM_XPLANE: i32 = 2;
+/// MSFS 的应答机档位：0 关 / 1 待机 / **2 测试** / 3 开 / 4 高度(C) / 5 地面。
+///
+/// **和 X-Plane 差一格，而且差的正好是"测试"那一格。** 用同一个门槛的话，
+/// 一架在做应答机自检的飞机会被当成在线报出去。
+pub const XPDR_ONLINE_FROM_MSFS: i32 = 3;
+
 /// 模拟器的应答机档位 → 位置包要的模式。
 ///
-/// 模拟器那边的取值是 0 关 / 1 待机 / 2 开 / 3 测试或 C，所以 `>= 2` 算在线。
+/// `online_from` 是"从这一档起算在线"，两个模拟器的档位表不一样——见
+/// [`XPDR_ONLINE_FROM_XPLANE`] 和 [`XPDR_ONLINE_FROM_MSFS`]。**这是一个参数
+/// 而不是一个写死的 2**：把两张不同的档位表压进同一个常量，就是在悄悄地把
+/// 一个模拟器的语义套到另一个头上。
+///
 /// **读不到当在线**：默认"关"等于在拿不准的时候主动把自己从管制端的标牌上抹掉，
 /// 方向反了。
 ///
@@ -134,11 +148,16 @@ pub fn pressure_delta(
 /// C 模式目标，而冷舱恰恰就是"停在机坪上没动"这一种；一架已经在滑行或者已经
 /// 离地的飞机还报待机，对管制没有任何好处——待机在位置包里是包头的 `@S`，
 /// EuroScope 收到就当成没有 C 模式的目标，标牌上的**高度和地速会一起空掉**。
-pub fn xpdr_mode(raw: Option<i32>, on_ground: bool, groundspeed_kt: i32) -> XpdrMode {
+pub fn xpdr_mode(
+    raw: Option<i32>,
+    online_from: i32,
+    on_ground: bool,
+    groundspeed_kt: i32,
+) -> XpdrMode {
     let Some(raw) = raw else {
         return XpdrMode::ModeC;
     };
-    if raw >= 2 {
+    if raw >= online_from {
         return XpdrMode::ModeC;
     }
     if on_ground && groundspeed_kt < PARKED_SPEED_KT {
@@ -188,20 +207,55 @@ mod tests {
     /// 抹掉，方向反了。
     #[test]
     fn an_unknown_transponder_state_counts_as_on() {
-        assert_eq!(xpdr_mode(None, false, 0), XpdrMode::ModeC);
+        assert_eq!(
+            xpdr_mode(None, XPDR_ONLINE_FROM_XPLANE, false, 0),
+            XpdrMode::ModeC
+        );
+        assert_eq!(
+            xpdr_mode(None, XPDR_ONLINE_FROM_MSFS, false, 0),
+            XpdrMode::ModeC
+        );
     }
 
     /// 待机只在飞机**确实停着**的时候当真。
     #[test]
     fn standby_is_only_believed_when_the_aircraft_is_parked() {
-        assert_eq!(xpdr_mode(Some(1), true, 0), XpdrMode::Standby);
+        let x = XPDR_ONLINE_FROM_XPLANE;
+        assert_eq!(xpdr_mode(Some(1), x, true, 0), XpdrMode::Standby);
         // 已经在滑行：报待机对管制没有好处，EuroScope 会把高度和地速一起空掉。
-        assert_eq!(xpdr_mode(Some(1), true, 12), XpdrMode::ModeC);
+        assert_eq!(xpdr_mode(Some(1), x, true, 12), XpdrMode::ModeC);
         // 已经离地。
-        assert_eq!(xpdr_mode(Some(0), false, 250), XpdrMode::ModeC);
+        assert_eq!(xpdr_mode(Some(0), x, false, 250), XpdrMode::ModeC);
         // 开着就是开着。
-        assert_eq!(xpdr_mode(Some(2), true, 0), XpdrMode::ModeC);
-        assert_eq!(xpdr_mode(Some(3), true, 0), XpdrMode::ModeC);
+        assert_eq!(xpdr_mode(Some(2), x, true, 0), XpdrMode::ModeC);
+        assert_eq!(xpdr_mode(Some(3), x, true, 0), XpdrMode::ModeC);
+    }
+
+    /// **两个模拟器的档位表差一格，而且差的正好是"测试"那一格。**
+    ///
+    /// X-Plane 的 2 是"开"，MSFS 的 2 是"测试"。用同一个门槛的话，一架在做
+    /// 应答机自检的飞机会被当成在线报出去。
+    #[test]
+    fn the_two_simulators_do_not_share_a_threshold() {
+        // 停在机坪上按着"测试"。
+        assert_eq!(
+            xpdr_mode(Some(2), XPDR_ONLINE_FROM_XPLANE, true, 0),
+            XpdrMode::ModeC,
+            "X-Plane 的 2 是开"
+        );
+        assert_eq!(
+            xpdr_mode(Some(2), XPDR_ONLINE_FROM_MSFS, true, 0),
+            XpdrMode::Standby,
+            "MSFS 的 2 是测试，不是开"
+        );
+        // MSFS 的 3 起才是真在线。
+        for state in 3..=5 {
+            assert_eq!(
+                xpdr_mode(Some(state), XPDR_ONLINE_FROM_MSFS, true, 0),
+                XpdrMode::ModeC,
+                "state {state}"
+            );
+        }
     }
 
     #[test]

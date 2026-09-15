@@ -182,7 +182,7 @@ jobs:
       # 一支红了要能看见另一支是什么状态。它们互不相干，没有理由互相打断。
       fail-fast: false
       matrix:
-        app: [controller, atis]
+        app: [controller, atis, xpc, msfs]
     defaults:
       run:
         working-directory: apps/${{ matrix.app }}

@@ -183,7 +183,12 @@ pub fn snapshot(raw: &HashMap<&str, f32>) -> Option<Snapshot> {
         bank: get("bank").unwrap_or(0.0),
         heading: get("heading_true").unwrap_or(0.0).rem_euclid(360.0),
         squawk: get("squawk").unwrap_or(2000.0) as u16,
-        xpdr_mode: crate::xpdr_mode(get("xpdr_mode").map(|v| v as i32), on_ground, groundspeed),
+        xpdr_mode: crate::xpdr_mode(
+            get("xpdr_mode").map(|v| v as i32),
+            crate::XPDR_ONLINE_FROM_XPLANE,
+            on_ground,
+            groundspeed,
+        ),
         com1: frequency(get("com1"), get("com1_legacy")),
         com2: frequency(get("com2"), get("com2_legacy")),
         com1_power: get("com1_power").unwrap_or(1.0) != 0.0,
