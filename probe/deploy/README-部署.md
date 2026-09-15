@@ -41,7 +41,38 @@ chmod 640      /etc/letsencrypt/live/probe.ceruleanavi.net/privkey.pem
 `can-voice.service` 有一模一样的坑，`server/README.md` 的《排障》一节写着同一条。
 探针是一次性的，活不到证书续期那天，所以 deploy hook 可以省；**生产服务端不能省**。
 
-### 3. 二进制与单元
+### 3. 起服务（Docker，推荐）
+
+```bash
+docker run -d --name can-voice-probe --restart always \
+  -p 64739:64739/udp \
+  -v /etc/letsencrypt:/etc/letsencrypt:ro \
+  ghcr.io/jianyuelab-org/can-voice-probe:latest \
+  -addr :64739 \
+  -cert /etc/letsencrypt/live/probe.ceruleanavi.net/fullchain.pem \
+  -key  /etc/letsencrypt/live/probe.ceruleanavi.net/privkey.pem
+```
+
+**`/udp` 不能漏。** 漏了的症状是握手超时，和"QUIC 在这个网络被封了"长得一模一样，
+而那正是本次实验要测的东西。
+
+**走 Docker 就不用做上面第 2 节末尾那两条 `chgrp`/`chmod`。** 容器里以 root 读一个
+只读挂载的证书目录，`DynamicUser` 读不到 0600 私钥那个坑整个不存在——那是这条路
+相对 systemd 的实际好处，不是省事。
+
+镜像里**没有 shell**（distroless static），看日志用 `docker logs -f can-voice-probe`，
+不要指望 `docker exec` 进去。
+
+镜像由 `.github/workflows/probe-image.yml` 在 main 上构建并推到 GHCR，
+`latest` 和一个 `sha-<commit>` 两个标签，`linux/amd64` + `linux/arm64`。
+
+> **仓库是私有的，所以这个包默认也是私有的。** 拉之前要先
+> `echo <PAT> | docker login ghcr.io -u <你的用户名> --password-stdin`
+> （PAT 需要 `read:packages`）。想免登录拉取，就去
+> `github.com/orgs/JianyueLab-Org/packages` 把 `can-voice-probe`
+> 这个包的可见性改成 public —— **改的是包，不是仓库**，仓库可以继续私有。
+
+### 3'. 二进制与单元（不想用 Docker 时）
 
 **二到五这几步**串成了一个脚本（第一步的 A 记录要先加好，脚本没法替你做——
 certbot 的 standalone 校验当场就要解析得到这台机器）：

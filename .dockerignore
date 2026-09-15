@@ -1,0 +1,8 @@
+# 构建上下文只需要 go.mod / go.sum / probe/。其余全部排除 ——
+# target/ 是 Rust 的构建产物，几个 GB，不排掉的话每次构建光传上下文就要等半天。
+*
+!go.mod
+!go.sum
+!probe/
+probe/dist/
+probe/reports/

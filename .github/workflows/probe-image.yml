@@ -1,0 +1,78 @@
+# 探针服务端的容器镜像。**丢弃型**，和 probe/ 一起删。
+#
+# 有了它，部署那台机器上不需要 Go、不需要 scp 二进制、也不需要碰私钥权限
+# （见 probe/Dockerfile 里那段关于 root 的注释）：
+#
+#     docker run -d --name can-voice-probe --restart always \
+#       -p 64739:64739/udp \
+#       -v /etc/letsencrypt:/etc/letsencrypt:ro \
+#       ghcr.io/jianyuelab-org/can-voice-probe:latest \
+#       -addr :64739 \
+#       -cert /etc/letsencrypt/live/probe.ceruleanavi.net/fullchain.pem \
+#       -key  /etc/letsencrypt/live/probe.ceruleanavi.net/privkey.pem
+
+name: probe image
+
+on:
+  push:
+    branches: [main]
+    # 路径过滤：客户端和别的改动不该重新发一版镜像。
+    paths:
+      - 'probe/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - '.github/workflows/probe-image.yml'
+  pull_request:
+    paths:
+      - 'probe/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.dockerignore'
+      - '.github/workflows/probe-image.yml'
+  # 想手动发一版时用。
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    name: build (+ push on main)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+
+      # PR 上只构建不推送：**镜像构建本身就是要验的那件事**，而一个 PR 不该
+      # 往 latest 上盖东西。
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # 小写固定写死，不用 ${{ github.repository }} 派生：组织名里有大写字母，
+          # 而 GHCR 只收小写——派生出来的名字会在 push 那一步才报错。
+          images: ghcr.io/jianyuelab-org/can-voice-probe
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: probe/Dockerfile
+          # arm64 一起出：云厂商的 ARM 机型便宜不少，而纯 Go 交叉编译不要钱
+          # （见 Dockerfile 里那段，没有走 QEMU）。
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
