@@ -83,9 +83,10 @@ pub struct Hello {
 }
 
 // 这里**没有** `transport` 字段，而且不是漏了（修订件 M1）。服务端的
-// `control.Hello` 没有它，P2 Task 12（stream 回退）也因 P1 探针未部署而未做。
+// `control.Hello` 没有它，而 P2 Task 12（stream 回退）**定为不做**——
+// 网络可达性不在这个项目的考虑范围内，语音只走 datagram 一条路。
 // 一个宣称了未构建行为的字段比没有这个字段更糟：真设成 "stream" 时服务端会
-// 忽略它，客户端却以为自己走了回退通道。等 Task 12 真做了再加。
+// 忽略它，客户端却以为自己走了回退通道。
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Ready {
@@ -398,7 +399,7 @@ mod tests {
     }
 
     /// M1：`Hello` 不得有 `transport` 字段。服务端（`control.Hello`）没有它，
-    /// Task 12 也没做——一个宣称了未构建行为的字段比没有这个字段更糟：
+    /// 而 Task 12 定为不做——一个宣称了未构建行为的字段比没有这个字段更糟：
     /// 真设成 "stream" 时服务端会忽略它，客户端却以为自己走了回退通道。
     #[test]
     fn hello_declares_no_transport_field() {
