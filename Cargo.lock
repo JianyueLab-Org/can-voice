@@ -106,6 +106,7 @@ version = "0.1.0"
 dependencies = [
  "audiopus",
  "audiopus_sys",
+ "bytes",
  "can-voice-proto",
  "cpal",
  "quinn",

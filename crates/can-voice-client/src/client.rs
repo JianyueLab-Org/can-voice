@@ -28,6 +28,14 @@ pub struct Config {
     pub follow: String,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
+    /// 要不要打开声卡。
+    ///
+    /// 四个桌面客户端当然要。**服务端 ATIS 机器人不要**——它跑在没有声卡的主机上，
+    /// 音频来自 TTS，经 [`VoiceClient::push_audio`] 注进来。端到端测试同理。
+    ///
+    /// 打不开声卡**不是致命错误**：会话照常建立，只是既听不见也说不出，
+    /// 而那比"整个客户端起不来"好——can-audio 那边的规矩也是这一条。
+    pub audio_devices: bool,
     /// 额外信任的根证书，DER 编码。**生产留空。**
     ///
     /// 这**不是**"跳过校验"的开关，而且这里永远不会有那样一个开关：一个
@@ -137,7 +145,12 @@ pub struct VoiceClient {
 pub(crate) enum Command {
     Declare(Sub),
     Transmit(bool),
-    Volume { freq_khz: u32, gain: f32 },
+    Volume {
+        freq_khz: u32,
+        gain: f32,
+    },
+    /// 直接注入 48 kHz 单声道 PCM，绕过麦克风。
+    PushAudio(Vec<i16>),
     Shutdown,
 }
 
@@ -189,6 +202,15 @@ impl VoiceClient {
     /// 设置某个频率的播放音量。
     pub fn set_frequency_volume(&self, freq_khz: u32, gain: f32) {
         let _ = self.commands.send(Command::Volume { freq_khz, gain });
+    }
+
+    /// 直接送一段 48 kHz 单声道 PCM 去发送，绕过麦克风。
+    ///
+    /// 给**没有声卡的调用方**用：服务端 ATIS 机器人跑在一台没有麦克风的主机上，
+    /// 它的音频是 TTS 合成出来的。照样要按 [`Self::set_transmitting`] 开关 PTT
+    /// ——序号、首帧尾帧、扇出到每个 TX 频率，走的是同一条路。
+    pub fn push_audio(&self, pcm48: &[i16]) {
+        let _ = self.commands.send(Command::PushAudio(pcm48.to_vec()));
     }
 
     /// 订阅事件流。
@@ -388,6 +410,7 @@ mod tests {
             follow: String::new(),
             input_device: None,
             output_device: None,
+            audio_devices: false,
             extra_roots: Vec::new(),
         };
         let err = VoiceClient::connect(cfg)
@@ -408,6 +431,7 @@ mod tests {
             follow: "bad callsign".into(),
             input_device: None,
             output_device: None,
+            audio_devices: false,
             extra_roots: Vec::new(),
         };
         let err = VoiceClient::connect(cfg)

@@ -1,4 +1,4 @@
-//! 后台任务：把控制面、订阅状态机、数据面与事件流接起来。
+//! 后台任务：把控制面、订阅状态机、数据面、音频与事件流接起来。
 //!
 //! # 掉线之后做什么，不是由重连策略一个人说了算
 //!
@@ -6,35 +6,28 @@
 //! 一成功计数器就清零。所以每一次掉线都要先经 [`crate::conn::classify`] 读 QUIC 的
 //! 应用层关闭码：码 2（顶号）和码 3（协议违规）是终态，重连只会把同一件事
 //! 无限重演，而且每一轮都"成功"。
+//!
+//! # 这条循环就是音频时钟
+//!
+//! [`TICK`] 是 20 毫秒，也就是一个 Opus 帧。每一拍做四件事：把混音器的一帧送去
+//! 播放、把采集到的音频喂进编码、该发就发、以及（每隔几秒）发一次 PING。
+//! **混音器每一拍都出恰好一帧**，不管有没有人在说话——声卡那头每 20 毫秒都要一帧。
 
+use crate::audio::AudioIo;
 use crate::client::{Command, Config, Event};
 use crate::conn::{self, Disposition, Link, LinkState, ReconnectPolicy};
+use crate::rx::mixer::{RxEvent, RxMixer};
 use crate::session::{Limits, SubscriptionState};
+use crate::tx::TxPipeline;
 use can_voice_proto::control::{self, Message};
 use can_voice_proto::wire::Header;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-/// 主循环的节拍。它负责三件定时的事：让发言超时、发 PING、报 Health。
-const TICK: Duration = Duration::from_millis(200);
-
-/// 多久没有新帧就认为这次发言结束了。
-///
-/// **`FLAG_LAST` 是尽力而为的优化，不是熄灯的机制**：它走不可靠数据报会丢，
-/// 而且服务端在听众飞出射程时**不打招呼就停发**——那种情况下它保证到不了。
-/// 只认尾帧的实现会让 RX 指示灯亮一整条会话。
-const RX_SILENCE: Duration = Duration::from_millis(600);
+/// 主循环的节拍，等于一个 Opus 帧。
+const TICK: Duration = Duration::from_millis(20);
 
 /// PING 的间隔。
 const PING_EVERY: Duration = Duration::from_secs(5);
-
-/// 一次正在进行的发言。`frames` 与起始时刻都要**实算**——
-/// "每次通话一行、自带时长和帧数"这条日志约定，唯一的生产者填 0 的话就只剩一句空话。
-struct Talkspurt {
-    frames: u32,
-    started: Instant,
-    last_seen: Instant,
-}
 
 /// 这一条连接是怎么结束的。
 enum Outcome {
@@ -55,6 +48,25 @@ pub(crate) async fn run(
     policy.may_attempt();
     policy.on_session_established();
 
+    // 声卡打不开**不该让会话起不来**：听不见总比连不上好，而服务端 ATIS 机器人
+    // 根本没有麦克风——它的音频是 `push_audio` 注进来的。
+    let audio = if cfg.audio_devices {
+        match AudioIo::start(cfg.input_device.as_deref(), cfg.output_device.as_deref()) {
+            Ok(io) => Some(io),
+            Err(e) => {
+                tracing::error!(error = %e, "could not open the audio devices; running deaf and mute");
+                let _ = events.send(Event::Notice {
+                    kind: "audio_unavailable".into(),
+                    freq_khz: 0,
+                    reason: e.to_string(),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut subs = SubscriptionState::new();
     let mut state = LinkState::Connecting;
     let mut link = Some(first);
@@ -71,8 +83,8 @@ pub(crate) async fn run(
                 emit_state(&events, &mut state, policy.state());
                 match dial(&cfg).await {
                     Ok(l) => {
-                        // **只有真的收到 READY 才重置计数。** 拨号返回成功不等于
-                        // 连上了——`conn::connect` 会等到 READY，所以走到这里是安全的。
+                        // **只有真的收到 READY 才重置计数。** `conn::connect` 会等到
+                        // READY，所以走到这里是安全的。
                         policy.on_session_established();
                         l
                     }
@@ -90,7 +102,7 @@ pub(crate) async fn run(
         });
         emit_state(&events, &mut state, LinkState::Online);
 
-        let outcome = pump(l, &mut subs, &events, &mut cmds).await;
+        let outcome = pump(l, &mut subs, &events, &mut cmds, audio.as_ref()).await;
         subs.on_disconnected();
 
         match outcome {
@@ -117,8 +129,6 @@ pub(crate) async fn run(
                 return;
             }
             Outcome::Dropped(Disposition::Refused(reason)) => {
-                // 服务端专门为客户端造了这些串，所以它们要到得了上层，
-                // 而不是死在一行日志里。
                 let _ = events.send(Event::Refused {
                     reason: reason.clone(),
                 });
@@ -169,6 +179,7 @@ async fn pump(
     subs: &mut SubscriptionState,
     events: &tokio::sync::broadcast::Sender<Event>,
     cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    audio: Option<&AudioIo>,
 ) -> Outcome {
     let Link {
         conn: quic,
@@ -181,13 +192,23 @@ async fn pump(
     // 它会在两次读之间被丢掉，已经消费掉的字节回不来，控制流从此错位。
     let mut control = conn::spawn_control_reader(control_recv);
 
-    let mut talk: HashMap<(u32, u32), Talkspurt> = HashMap::new();
+    let mut mixer = RxMixer::new();
+    let mut tx = match TxPipeline::new() {
+        Ok(t) => Some(t),
+        Err(e) => {
+            tracing::error!(error = %e, "could not create the opus encoder; receive only");
+            None
+        }
+    };
+    let mut ptt = false;
+
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let epoch = Instant::now();
     let mut last_ping = Instant::now();
     let mut rtt_ms = 0u32;
+    let mut sent = 0u64;
     let mut received = 0u64;
     let mut unparsable = 0u64;
 
@@ -204,9 +225,14 @@ async fn pump(
         tokio::select! {
             cmd = cmds.recv() => match cmd {
                 Some(Command::Declare(sub)) => subs.declare(sub),
-                // 采集与播放接的是音频设备，属于 P4 的四个应用。
-                Some(Command::Transmit(on)) => tracing::debug!(on, "ptt"),
-                Some(Command::Volume { freq_khz, gain }) => tracing::debug!(freq_khz, gain, "volume"),
+                Some(Command::Transmit(on)) => ptt = on,
+                Some(Command::Volume { freq_khz, gain }) => mixer.set_gain(freq_khz, gain),
+                // 给没有麦克风的调用方用（服务端 ATIS 机器人的音频来自 TTS）。
+                Some(Command::PushAudio(pcm)) => {
+                    if let Some(t) = tx.as_mut() {
+                        t.push(&pcm);
+                    }
+                }
                 Some(Command::Shutdown) | None => {
                     quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
                     return Outcome::Shutdown;
@@ -214,16 +240,12 @@ async fn pump(
             },
 
             msg = control.recv() => match msg {
-                Some(Ok(Message::SubAck(ack))) => {
-                    on_ack(subs, events, ack);
-                }
+                Some(Ok(Message::SubAck(ack))) => on_ack(subs, events, ack),
                 Some(Ok(Message::Pong(p))) => {
                     let now = epoch.elapsed().as_millis() as i64;
                     rtt_ms = now.saturating_sub(p.t).clamp(0, u32::MAX as i64) as u32;
                 }
-                Some(Ok(Message::Notice(n))) => {
-                    on_notice(events, n);
-                }
+                Some(Ok(Message::Notice(n))) => on_notice(events, n),
                 Some(Ok(Message::Bye(b))) => {
                     // BYE **会丢**——真正丢不掉的是关闭码与原因串，它们和关闭
                     // 原子地一起送达。所以这里只记日志，处置交给 `drop_reason`。
@@ -242,18 +264,18 @@ async fn pump(
             },
 
             dg = quic.read_datagram() => match dg {
-                Ok(bytes) => {
-                    match Header::parse(&bytes) {
-                        Ok((h, _opus)) => {
-                            received += 1;
-                            on_datagram(&mut talk, events, &h);
-                        }
-                        Err(e) => {
-                            unparsable += 1;
-                            tracing::debug!(error = %e, "dropping an unparsable datagram");
+                Ok(bytes) => match Header::parse(&bytes) {
+                    Ok((h, opus)) => {
+                        received += 1;
+                        if let Some(e) = mixer.feed(&h, opus) {
+                            send_rx_event(events, e);
                         }
                     }
-                }
+                    Err(e) => {
+                        unparsable += 1;
+                        tracing::debug!(error = %e, "dropping an unparsable datagram");
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(error = %e, "datagram stream ended");
                     return Outcome::Dropped(conn::classify(&e));
@@ -261,7 +283,41 @@ async fn pump(
             },
 
             _ = ticker.tick() => {
-                expire_talkspurts(&mut talk, events);
+                // 接收：混音器每一拍都出恰好一帧，直接送去播放。
+                let (pcm, rx_events) = mixer.tick();
+                if let Some(io) = audio {
+                    io.play(&pcm);
+                }
+                for e in rx_events {
+                    send_rx_event(events, e);
+                }
+
+                // 发送：先把采集到的喂进去，再看这一拍有没有一帧要发。
+                if let Some(t) = tx.as_mut() {
+                    if let Some(io) = audio {
+                        let captured = io.take_capture();
+                        if !captured.is_empty() {
+                            t.push(&captured);
+                        }
+                    }
+                    if let Some(frame) = t.tick(ptt) {
+                        // **每一个 TX 频率各发一份，每份带同一个 `seq`。** 服务端
+                        // 检查不了这件事：只发一份的客户端在另一个频率上完全静默，
+                        // 而两端日志都正常。
+                        for freq in subs.acknowledged().tx.clone() {
+                            let dg = bytes::Bytes::from(frame.datagram(freq));
+                            match quic.send_datagram(dg) {
+                                Ok(()) => sent += 1,
+                                Err(e) => {
+                                    // 发不出去只丢这一帧：数据报本来就是不可靠的，
+                                    // 为一帧音频断开整条连接是过度反应。
+                                    tracing::debug!(error = %e, freq, "datagram not sent");
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if last_ping.elapsed() >= PING_EVERY {
                     last_ping = Instant::now();
                     let t = epoch.elapsed().as_millis() as i64;
@@ -270,16 +326,28 @@ async fn pump(
                     }
                     // **掉线必须自己解释。** RTT 和收发计数正是区分"上行真的扛不住"
                     // 和"抖了一下"的东西，而那两者的处置完全不同。
-                    let _ = events.send(Event::Health {
-                        rtt_ms,
-                        sent: 0,
-                        received,
-                        lost: unparsable,
-                    });
+                    let _ = events.send(Event::Health { rtt_ms, sent, received, lost: unparsable });
                 }
             },
         }
     }
+}
+
+fn send_rx_event(events: &tokio::sync::broadcast::Sender<Event>, e: RxEvent) {
+    let _ = events.send(match e {
+        RxEvent::Start { freq_khz, speaker } => Event::RxStart { freq_khz, speaker },
+        RxEvent::End {
+            freq_khz,
+            speaker,
+            frames,
+            secs,
+        } => Event::RxEnd {
+            freq_khz,
+            speaker,
+            frames,
+            secs,
+        },
+    });
 }
 
 /// 连接已经没了时，从 quinn 那里读出应用层关闭码。
@@ -341,74 +409,4 @@ fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice)
             reason: n.reason,
         });
     }
-}
-
-/// 收到一个数据面包头。
-///
-/// **起播/点灯的判据是"这个 (speaker, freq) 上来了第一个包"，不是 `FLAG_FIRST`。**
-/// `SUB` 是全量声明、立即整体替换，所以管制员在别人说到一半时把一个频率加进台面，
-/// 下一帧就投给他，而那一帧没有首帧位；飞机飞进射程同理。等首帧的实现会让他
-/// 一声不响，直到对方下一次按下 PTT，而服务端日志完全正常。
-fn on_datagram(
-    talk: &mut HashMap<(u32, u32), Talkspurt>,
-    events: &tokio::sync::broadcast::Sender<Event>,
-    h: &Header,
-) {
-    let key = (h.speaker, h.freq_khz);
-    let now = Instant::now();
-    match talk.get_mut(&key) {
-        Some(t) => {
-            t.frames += 1;
-            t.last_seen = now;
-        }
-        None => {
-            talk.insert(
-                key,
-                Talkspurt {
-                    frames: 1,
-                    started: now,
-                    last_seen: now,
-                },
-            );
-            let _ = events.send(Event::RxStart {
-                freq_khz: h.freq_khz,
-                speaker: h.speaker,
-            });
-        }
-    }
-    if h.is_last() {
-        if let Some(t) = talk.remove(&key) {
-            emit_rx_end(events, key, &t);
-        }
-    }
-}
-
-/// 静音超时：尾帧丢了、或者服务端悄悄停发时唯一的出路。
-fn expire_talkspurts(
-    talk: &mut HashMap<(u32, u32), Talkspurt>,
-    events: &tokio::sync::broadcast::Sender<Event>,
-) {
-    let stale: Vec<(u32, u32)> = talk
-        .iter()
-        .filter(|(_, t)| t.last_seen.elapsed() >= RX_SILENCE)
-        .map(|(k, _)| *k)
-        .collect();
-    for key in stale {
-        if let Some(t) = talk.remove(&key) {
-            emit_rx_end(events, key, &t);
-        }
-    }
-}
-
-fn emit_rx_end(
-    events: &tokio::sync::broadcast::Sender<Event>,
-    (speaker, freq_khz): (u32, u32),
-    t: &Talkspurt,
-) {
-    let _ = events.send(Event::RxEnd {
-        freq_khz,
-        speaker,
-        frames: t.frames,
-        secs: t.started.elapsed().as_secs_f32(),
-    });
 }

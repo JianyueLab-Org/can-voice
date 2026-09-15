@@ -102,6 +102,7 @@ async fn a_client_can_hand_shake_subscribe_and_receive() {
         follow: String::new(),
         input_device: None,
         output_device: None,
+        audio_devices: false,
         extra_roots: vec![root],
     };
     let client = connect_or_explain(cfg).await;
@@ -151,6 +152,7 @@ async fn an_expired_token_is_refused_with_a_reason() {
         follow: String::new(),
         input_device: None,
         output_device: None,
+        audio_devices: false,
         extra_roots: vec![root],
     };
     let err = can_voice_client::VoiceClient::connect(cfg)
@@ -185,6 +187,7 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
         follow: String::new(),
         input_device: None,
         output_device: None,
+        audio_devices: false,
         extra_roots: vec![root],
     };
     let client = connect_or_explain(cfg).await;
@@ -216,4 +219,104 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
         assert!(freqs.contains(f), "{f} was never declared");
     }
     client.shutdown().await;
+}
+
+/// 一段 440 Hz 的正弦，48 kHz 单声道，正好一帧。
+fn tone_frame() -> Vec<i16> {
+    (0..960)
+        .map(|i| {
+            let t = i as f32 / 48_000.0;
+            (0.4 * 32767.0 * (2.0 * std::f32::consts::PI * 440.0 * t).sin()) as i16
+        })
+        .collect()
+}
+
+fn cfg_for(addr: &str, token: &str, root: &[u8]) -> can_voice_client::Config {
+    can_voice_client::Config {
+        server: addr.to_string(),
+        server_name: "localhost".into(),
+        token: token.trim().to_string(),
+        client_id: "e2e-test/1".into(),
+        follow: String::new(),
+        input_device: None,
+        output_device: None,
+        // 不开声卡：CI 的 runner 没有。音频用 `push_audio` 注进去，
+        // 走的是和麦克风完全相同的那条路（成帧、编码、序号、扇出）。
+        audio_devices: false,
+        extra_roots: vec![root.to_vec()],
+    }
+}
+
+/// **音频真的从一个客户端穿到另一个客户端。**
+///
+/// 这是整个 P3/P4 里唯一一条端到端验证音频通路的测试：它同时走通了
+/// 成帧 → Opus 编码 → 序号 → 数据报 → 服务端扇出 → 抖动缓冲 → 解码 → 混音 →
+/// 发言记账。上面那几条只验到控制面为止。
+///
+/// 两个账号是必须的：服务端对同一个 CID 会**顶号**（关闭码 2），
+/// 用一个 token 连两次的话后连上的会把先连上的踢掉。
+#[tokio::test]
+async fn audio_crosses_the_wire_from_one_client_to_another() {
+    let Some((_srv, addr)) = start_server(64741) else {
+        return;
+    };
+    let dir = fixture_dir();
+    let root = std::fs::read(dir.join("ca.der")).expect("ca.der fixture");
+    let token_a = std::fs::read_to_string(dir.join("token.txt")).expect("token fixture");
+    let Ok(token_b) = std::fs::read_to_string(dir.join("token-b.txt")) else {
+        return; // 旧夹具没有第二个账号
+    };
+
+    let listener = connect_or_explain(cfg_for(&addr, &token_a, &root)).await;
+    let speaker = connect_or_explain(cfg_for(&addr, &token_b, &root)).await;
+    let mut events = listener.events();
+
+    listener.set_subscription(can_voice_proto::control::Sub {
+        rx: vec![121_800],
+        ..Default::default()
+    });
+    speaker.set_subscription(can_voice_proto::control::Sub {
+        rx: vec![121_800],
+        tx: vec![121_800],
+        ..Default::default()
+    });
+    speaker.set_transmitting(true);
+
+    // 一边灌音频一边等对方报"有人在讲话"。订阅的 ACK 也在这个窗口里完成。
+    let mut start = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    while tokio::time::Instant::now() < deadline && start.is_none() {
+        speaker.push_audio(&tone_frame());
+        if let Ok(Ok(e)) = tokio::time::timeout(Duration::from_millis(20), events.recv()).await {
+            if let can_voice_client::Event::RxStart { freq_khz, .. } = e {
+                assert_eq!(freq_khz, 121_800);
+                start = Some(e);
+            }
+        }
+    }
+    assert!(start.is_some(), "no audio ever arrived on the listener");
+
+    // 松开 PTT：尾帧应当让对方结束这次发言，而且帧数要是真算出来的。
+    speaker.set_transmitting(false);
+    let mut ended = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while tokio::time::Instant::now() < deadline && ended.is_none() {
+        if let Ok(Ok(can_voice_client::Event::RxEnd { frames, secs, .. })) =
+            tokio::time::timeout(Duration::from_millis(200), events.recv()).await
+        {
+            ended = Some((frames, secs));
+        }
+    }
+    let (frames, secs) = ended.expect("the talkspurt never ended on the listener");
+    assert!(
+        frames > 0,
+        "RxEnd reported {frames} frames — the accounting is not real"
+    );
+    assert!(
+        (secs - frames as f32 * 0.02).abs() < 1e-4,
+        "secs must be frames x 20 ms, got {secs} for {frames} frames"
+    );
+
+    listener.shutdown().await;
+    speaker.shutdown().await;
 }

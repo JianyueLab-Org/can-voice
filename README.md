@@ -74,10 +74,25 @@ CAN_VOICE_E2E=1 cargo test -p can-voice-client --test e2e
 `Config::extra_roots`（额外的**根**证书）进来的，链校验一步不少。一个 `insecure`
 标志一旦存在就会有人在生产里打开它，而这条链路上跑的是成员的网络密码。
 
+端到端里最有分量的一条是 `audio_crosses_the_wire_from_one_client_to_another`：
+两个客户端、两个账号（服务端对同一个 CID 会**顶号**），音频从一个穿到另一个。
+它一条就走通了成帧 → Opus 编码 → 序号 → 数据报 → 服务端扇出 → 抖动缓冲 → 解码 →
+混音 → 发言记账；其余几条只验到控制面为止。
+
 ## 手工验证
 
 ```bash
+# 只收听（--audio 才真的开声卡）
 cargo run -p can-voice-client --example canvoice-cli -- \
   --server 127.0.0.1:64738 --token "$(cat target/e2e/token.txt)" \
-  --root target/e2e/ca.der --rx 118000,121800
+  --root target/e2e/ca.der --audio --rx 118000,121800
+
+# 收 + 发
+cargo run -p can-voice-client --example canvoice-cli -- \
+  --server 127.0.0.1:64738 --token "$(cat target/e2e/token-b.txt)" \
+  --root target/e2e/ca.der --audio --rx 121800 --tx 121800
 ```
+
+**夹具里的 token 有效期 5 分钟**（`auth.maxTokenLifetime` 是 10 分钟，短有效期是
+这套设计里唯一的吊销机制）。隔一会儿再跑要重新 `go run ./server/cmd/can-voice-e2e-fixture`
+——端到端测试会认出这个情况并直接告诉你该跑哪条命令。

@@ -3,7 +3,9 @@
 //	ca.der              一张一次性的根证书（DER），Rust 侧当**额外的根证书**用
 //	cert.pem / key.pem  由它签出的服务端叶证书（CN=localhost，含 127.0.0.1 的 SAN）
 //	api.pub             Ed25519 公钥，裸 32 字节的 base64（服务端要的正是这个形状）
-//	token.txt           一张有效的 token
+//	token.txt           一张有效的 token（CID 1000）
+//	token-b.txt         第二个账号的 token（CID 1001）——服务端会把同一个 CID 的
+//	                    旧会话顶掉，所以 两个客户端互相说话 的测试需要两个账号
 //	token-expired.txt   一张已经过期的 token，用来验"拒绝要说得出原因"
 //
 // 刻意把证书也一起生成，而不是让人去跑 openssl：少一条要抄对的命令，
@@ -117,7 +119,16 @@ func writeTokens() {
 
 	must(os.WriteFile(path("api.pub"),
 		[]byte(base64.StdEncoding.EncodeToString(pub)), 0o644))
+	// 第二个账号：服务端对同一个 CID 会顶号（关闭码 2），所以"两个客户端互相说话"
+	// 这种测试必须用两个不同的 CID，否则后连上的那个会把先连上的踢掉。
+	second, err := auth.Sign(priv, auth.Claims{
+		CID: "1001", Rating: 5, MaxTX: 8,
+		Exp: time.Now().Add(5 * time.Minute).Unix(),
+	})
+	must(err)
+
 	must(os.WriteFile(path("token.txt"), []byte(good), 0o644))
+	must(os.WriteFile(path("token-b.txt"), []byte(second), 0o644))
 	must(os.WriteFile(path("token-expired.txt"), []byte(expired), 0o644))
 }
 

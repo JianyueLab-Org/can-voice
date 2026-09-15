@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 audiopus = "0.2"
 audiopus_sys = { version = "0.1", default-features = false, features = ["static"] }
+bytes = "1.12.1"
 can-voice-proto = { path = "../can-voice-proto" }
 cpal = "0.15"
 quinn = "0.11.9"

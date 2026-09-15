@@ -3,10 +3,15 @@
 //!     cargo run -p can-voice-client --example canvoice-cli -- \
 //!         --server audio.ceruleanavi.net:64738 --token "$TOKEN" --rx 118000,121800
 //!
-//! 打本地自签的服务端时加 `--root target/e2e/cert.der`。**没有"跳过校验"的开关**，
+//! 加 `--audio` 才真的开声卡（默认不开，免得在没有声卡的机器上报错）。
+//! 打本地自签的服务端时加 `--root target/e2e/ca.der`。**没有"跳过校验"的开关**，
 //! 而且不会有：这条链路上跑的是成员的网络密码。
 
 use std::time::Duration;
+
+fn freq_list(s: String) -> Vec<u32> {
+    s.split(',').filter_map(|x| x.trim().parse().ok()).collect()
+}
 
 #[tokio::main]
 async fn main() {
@@ -17,9 +22,12 @@ async fn main() {
     let mut follow = String::new();
     let mut rx: Vec<u32> = Vec::new();
     let mut roots: Vec<Vec<u8>> = Vec::new();
+    let mut audio = false;
+    let mut tx: Vec<u32> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--audio" => audio = true,
             "--server" => server = args.next().unwrap_or_default(),
             "--token" => token = args.next().unwrap_or_default(),
             "--follow" => follow = args.next().unwrap_or_default(),
@@ -33,14 +41,8 @@ async fn main() {
                     }
                 }
             }
-            "--rx" => {
-                rx = args
-                    .next()
-                    .unwrap_or_default()
-                    .split(',')
-                    .filter_map(|s| s.trim().parse().ok())
-                    .collect()
-            }
+            "--rx" => rx = freq_list(args.next().unwrap_or_default()),
+            "--tx" => tx = freq_list(args.next().unwrap_or_default()),
             other => eprintln!("unknown argument {other}"),
         }
     }
@@ -58,6 +60,7 @@ async fn main() {
         follow,
         input_device: None,
         output_device: None,
+        audio_devices: audio,
         extra_roots: roots,
     };
 
@@ -73,6 +76,7 @@ async fn main() {
     let mut events = client.events();
     client.set_subscription(can_voice_proto::control::Sub {
         rx,
+        tx,
         ..Default::default()
     });
 
