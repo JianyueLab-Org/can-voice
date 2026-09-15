@@ -190,6 +190,49 @@ jobs:
       - run: cargo check --all-targets
       - run: cargo clippy --all-targets -- -D warnings
 
+  # 四个桌面端的 Rust 侧，在 Linux 上编一次。
+  #
+  # 和 windows 那个 job 是同一件事的另一半：**`apps/` 不在 workspace 里**，
+  # 所以上面那个 `rust` job 一行客户端代码都不编。Linux 这边要装的系统库比
+  # Windows 多得多，而每一条缺了都只在这里露头。
+  linux:
+    name: linux (四个桌面端编得过)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [controller, atis, xpc, msfs]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}/src-tauri
+    steps:
+      - uses: actions/checkout@v7
+      # 三组，缺哪一组报的错都指不到原因：
+      #
+      # webkit2gtk / gtk / appindicator / rsvg / xdo —— Tauri 自己要的。
+      # Tauri 2 用的是 **4.1**，不是 4.0；装错版本报的是找不到 .pc 文件。
+      #
+      # autotools + libasound2-dev —— audiopus_sys 从源码静态编 libopus，
+      # cpal 在 Linux 上走 ALSA。macOS 上 cpal 走 CoreAudio，所以这一条在
+      # 开发机上永远不会露头。
+      #
+      # X11 + udev —— can-voice-ptt 的 rdev 走 Xlib、gilrs 走 udev。
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+          librsvg2-dev libxdo-dev libssl-dev
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
+        working-directory: .
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/${{ matrix.app }}/src-tauri
+      # 和 windows 那个 job 同一个理由：build.rs 要 frontendDist 存在才肯跑。
+      - run: mkdir -p ../dist
+      - run: cargo check --all-targets
+      - run: cargo clippy --all-targets -- -D warnings
+
   apps:
     name: apps (前端类型检查 + 构建)
     runs-on: ubuntu-latest

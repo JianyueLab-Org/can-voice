@@ -4,11 +4,13 @@
 #
 # 或者推一个 `v*` 标签。
 #
-# # 为什么只出 Windows
+# # Windows 和 Linux，还没有 macOS
 #
-# `can-audio` 现在发的四个客户端全部是 Windows（它的 release.yml 四个 job 都是
-# `runs-on: windows-latest`），所以 macOS 是一个**新能力**而不是一个回归。先把
-# 能替换现状的那一份发出来，mac 之后再说。
+# `can-audio` 现在发的四个客户端**全部只有 Windows**（它的 release.yml 四个 job
+# 都是 `runs-on: windows-latest`），所以这两样都是新能力而不是回归。
+#
+# Linux 这一份不是凑数：X-Plane 本来就有 Linux 版，而管制端和通播端跟模拟器
+# 无关。macOS 还没有，缺的是 Developer ID 证书和公证那一套。
 #
 # # 为什么不签名
 #
@@ -27,6 +29,10 @@ on:
       version:
         description: "版本号，形如 v27.0.1"
         required: true
+      dry_run:
+        description: "只打包不发布（验证打包这一段，不动 release）"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -34,23 +40,29 @@ permissions:
 
 jobs:
   build:
-    name: ${{ matrix.app }}
-    runs-on: windows-latest
+    name: ${{ matrix.app }} (${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }})
+    runs-on: ${{ matrix.os }}
     strategy:
-      # 一个挂了其余三个照打，一次看全问题。
+      # 一个挂了其余的照打，一次看全问题。
       fail-fast: false
+      # 两个平台 × 四个客户端 = 八个包。
+      #
+      # 没有单独的 product 维度：产品名（audio-for-can 之类）已经在 tauri
+      # 打出来的文件名里，这里只需要一个**互不相同**的 artifact 名字——
+      # 两个平台上传同名 artifact 会互相覆盖。
       matrix:
-        include:
-          - app: controller
-            product: audio-for-can
-          - app: atis
-            product: atis-for-can
-          - app: xpc
-            product: xpc-for-can
-          - app: msfs
-            product: msfs-for-can
+        os: [windows-latest, ubuntu-latest]
+        app: [controller, atis, xpc, msfs]
     steps:
       - uses: actions/checkout@v7
+      # Linux 上 Tauri 要一串系统库，理由见 ci.yml 里 linux 那个 job 的注释。
+      - if: runner.os == 'Linux'
+        run: >
+          sudo apt-get update && sudo apt-get install -y
+          libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev
+          librsvg2-dev libxdo-dev libssl-dev
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -71,9 +83,10 @@ jobs:
       - run: bun run tauri build
         working-directory: apps/${{ matrix.app }}
 
-      # NSIS 和 MSI 都出。装不上 MSI 的机器不少（组策略、旧的 Windows
-      # Installer），而 NSIS 那个双击就装。
-      - name: 收集产物
+      # Windows 上 NSIS 和 MSI 都出：装不上 MSI 的机器不少（组策略、旧的
+      # Windows Installer），而 NSIS 那个双击就装。
+      - name: 收集产物（Windows）
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $out = "dist-out"
@@ -82,14 +95,28 @@ jobs:
           Get-ChildItem -Path $bundle -Recurse -Include *.exe,*.msi |
             ForEach-Object { Copy-Item $_.FullName $out }
           Get-ChildItem $out
+      # Linux 上 deb 和 AppImage 都出：deb 给 Debian/Ubuntu，AppImage 给别的
+      # 发行版——这个网络的成员装什么发行版我们不知道，只发 deb 等于把一半人
+      # 挡在外面。
+      - name: 收集产物（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist-out
+          bundle="apps/${{ matrix.app }}/src-tauri/target/release/bundle"
+          find "$bundle" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+            -exec cp {} dist-out/ \;
+          ls -lh dist-out
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.product }}
+          name: ${{ matrix.app }}-${{ runner.os }}
           path: dist-out/*
           if-no-files-found: error
 
   release:
     needs: build
+    # 试跑时只打包不发布——打包那一段和编译是两条不同的路（图标那次就是这么
+    # 漏过去的），而验证它不该以切一个版本为代价。
+    if: github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -98,7 +125,8 @@ jobs:
       - name: 摊平目录
         run: |
           mkdir -p out
-          find artifacts -type f \( -name '*.exe' -o -name '*.msi' \) -exec cp {} out/ \;
+          find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' \
+            -o -name '*.AppImage' -o -name '*.rpm' \) -exec cp {} out/ \;
           ls -lh out
       - uses: softprops/action-gh-release@v2
         with:
@@ -127,7 +155,18 @@ jobs:
             | `xpc-for-can` | X-Plane 飞行员 |
             | `msfs-for-can` | MSFS 飞行员 |
 
-            `.exe` 是安装程序，`.msi` 是给有组策略的机器用的，装一个就行。
+            **Windows**：`.exe` 是安装程序，`.msi` 是给有组策略的机器用的，
+            装一个就行。
+
+            **Linux**：`.deb` 给 Debian / Ubuntu，`.AppImage` 给别的发行版
+            （下载后 `chmod +x` 直接跑）。
+
+            > **Linux 上的 PTT 只在 X11 下有效。** 全局按键监听走的是 Xlib，
+            > 而 Wayland 不允许一个普通程序监听全局按键——在 Wayland 会话里
+            > 键盘 PTT 不会响应，手柄 PTT 照常。界面上那个「按住发话」按钮
+            > 任何时候都能用。
+
+            还没有 macOS 版，缺的是签名和公证那一套。
 
             ## 已知还不行的
 

@@ -25,7 +25,13 @@ apps/atis               Tauri：通播制作客户端 atis-for-can（P4 Task 5�
 dev 端口接在网站那排 432x 后面：4330 controller、4331 atis，4332 / 4333 留给
 xpc / msfs。
 
-`apps/xpc`、`apps/msfs` 两支飞行员端**尚未开始**。
+**平台**：Windows 和 Linux 都出包（`.exe`/`.msi` 和 `.deb`/`.AppImage`），
+macOS 还没有——缺的是 Developer ID 证书和公证那一套。can-audio 现在发的四个
+客户端**只有 Windows**，所以 Linux 这一份是新能力而不是回归：X-Plane 本来就有
+Linux 版，而管制端和通播端跟模拟器无关。
+
+**Linux 上的键盘 PTT 只在 X11 下有效。** 全局按键监听走 Xlib，而 Wayland 不允许
+一个普通程序监听全局按键。手柄 PTT 和界面上那个「按住发话」按钮不受影响。
 
 ## 通播是谁出声，还没有定
 
