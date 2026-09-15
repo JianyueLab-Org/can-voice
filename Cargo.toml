@@ -5,6 +5,7 @@ members = [
     "crates/can-voice-client",
     "crates/can-voice-ptt",
     "crates/can-voice-atis",
+    "crates/can-voice-fsd",
     "crates/can-voice-token",
     "crates/can-voice-app",
 ]
