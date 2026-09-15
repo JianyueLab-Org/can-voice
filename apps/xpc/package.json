@@ -1,0 +1,26 @@
+{
+  "name": "xpc-for-can",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@jianyuelab-org/can-ui": "^0.3.5",
+    "@tauri-apps/api": "^2",
+    "vue": "^3.5.24"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@tauri-apps/cli": "^2",
+    "@vitejs/plugin-vue": "^6",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^7",
+    "vue-tsc": "^3"
+  }
+}
