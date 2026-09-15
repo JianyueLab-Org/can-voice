@@ -270,6 +270,78 @@ impl FlightPlan {
     }
 }
 
+/// 一架飞机的外形配置，`$CQ…ACC` 问、`$CR…ACC` 答，负载是一段 JSON。
+///
+/// **每一项都是 `Option`。** 对方没报过就是 `None`，渲染端据此自己猜（在地上
+/// 或低速就放起落架）；填成默认值的话，一架真的收起了起落架的飞机和一架还没
+/// 报过配置的飞机就分不开了。
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AircraftConfig {
+    pub gear_down: Option<bool>,
+    /// 0.0–1.0。线上那份是百分比（`flaps_pct`），见 [`AircraftConfig::from_json`]。
+    pub flaps: Option<f64>,
+    pub spoilers: Option<bool>,
+    pub engines_on: Option<bool>,
+    pub taxi_on: Option<bool>,
+    pub landing_on: Option<bool>,
+    pub beacon_on: Option<bool>,
+    pub strobe_on: Option<bool>,
+    pub nav_on: Option<bool>,
+}
+
+impl AircraftConfig {
+    /// 攒成 `ACC` 回复的 JSON。键名照 xPilot 那套，别的客户端认得。
+    pub fn to_json(self) -> String {
+        let b = |v: Option<bool>| v.unwrap_or(false);
+        format!(
+            concat!(
+                r#"{{"gear_down":{},"flaps_pct":{},"spoilers_out":{},"#,
+                r#""lights":{{"taxi_on":{},"landing_on":{},"beacon_on":{},"#,
+                r#""strobe_on":{},"nav_on":{}}},"#,
+                r#""engines":{{"1":{{"on":{}}}}}}}"#
+            ),
+            b(self.gear_down),
+            (self.flaps.unwrap_or(0.0) * 100.0).round(),
+            b(self.spoilers),
+            b(self.taxi_on),
+            b(self.landing_on),
+            b(self.beacon_on),
+            b(self.strobe_on),
+            b(self.nav_on),
+            self.engines_on.unwrap_or(true),
+        )
+    }
+
+    /// 从 `ACC` 的 JSON 读回来。
+    ///
+    /// **认不出的键跳过、缺的键留 `None`。** 这条路上的客户端不止我们一个，
+    /// xPilot、swift 各写各的，多一个字段不该让整份配置作废。
+    pub fn from_json(raw: &str) -> Option<Self> {
+        let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let lights = v.get("lights");
+        let light = |name: &str| lights.and_then(|l| l.get(name)).and_then(|b| b.as_bool());
+        Some(Self {
+            gear_down: v.get("gear_down").and_then(|b| b.as_bool()),
+            // 线上是百分比，这一层用 0–1。
+            flaps: v
+                .get("flaps_pct")
+                .and_then(|f| f.as_f64())
+                .map(|f| f / 100.0),
+            spoilers: v.get("spoilers_out").and_then(|b| b.as_bool()),
+            engines_on: v
+                .get("engines")
+                .and_then(|e| e.get("1"))
+                .and_then(|e| e.get("on"))
+                .and_then(|b| b.as_bool()),
+            taxi_on: light("taxi_on"),
+            landing_on: light("landing_on"),
+            beacon_on: light("beacon_on"),
+            strobe_on: light("strobe_on"),
+            nav_on: light("nav_on"),
+        })
+    }
+}
+
 /// 督导频道。FSD 里 `*S` 是一个**收件人**而不是一条命令：客户端把 `.wallop`
 /// 翻成发往这个地址的普通 `#TM`，服务端认出它再转给所有在线督导。
 pub const WALLOP_RECIPIENT: &str = "*S";

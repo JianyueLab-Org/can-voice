@@ -34,6 +34,10 @@ const PLUGIN_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_TRAFFIC: usize = 64;
 /// 超出这个距离的不往插件送——画不出来的飞机白占 TCAS 的位置。
 const MAX_RANGE_NM: f64 = 200.0;
+/// 多久去问一轮机型和配置。
+const ASK_INTERVAL: Duration = Duration::from_secs(2);
+/// 同一架飞机的配置多久重问一次。灯和襟翼一直在变。
+const CONFIG_REFRESH: f64 = 10.0;
 
 pub struct App {
     voice: Arc<Bridge>,
@@ -164,10 +168,20 @@ async fn connect(
             concat!("XPC for CAN ", env!("CARGO_PKG_VERSION")),
         ),
         reconnect_limit: pilot_client::RECONNECT_LIMIT,
+        // 别人问起时答这个。不答的话对方只能拿通用模型画我们——
+        // 一架 A320 在别人屏幕上是 737。
+        aircraft: aircraft.trim().to_uppercase(),
+        airline: callsign
+            .trim()
+            .to_uppercase()
+            .chars()
+            .take(3)
+            .filter(|c| c.is_ascii_alphabetic())
+            .collect(),
     });
-    let _ = aircraft;
 
     spawn_traffic_reader(fsd.traffic(), app.traffic.clone());
+    spawn_asking(fsd.clone(), app.traffic.clone());
     spawn_pump(fsd.clone(), app.sim.clone(), app.voice.clone());
     spawn_plugin_feed(app.sim.clone(), app.traffic.clone());
     *app.fsd.lock().expect("fsd") = Some(fsd);
@@ -355,10 +369,56 @@ fn spawn_traffic_reader(
                 Ok(PilotEvent::TrafficGone(callsign)) => {
                     table.lock().expect("traffic").remove(&callsign);
                 }
+                Ok(PilotEvent::PlaneInfo {
+                    callsign,
+                    equipment,
+                    airline,
+                    ..
+                }) => {
+                    table.lock().expect("traffic").set_plane_info(
+                        &callsign,
+                        monotonic(),
+                        &equipment,
+                        &airline,
+                    );
+                }
+                Ok(PilotEvent::Config { callsign, config }) => {
+                    table
+                        .lock()
+                        .expect("traffic")
+                        .set_config(&callsign, monotonic(), *config);
+                }
                 Ok(_) => {}
                 // 跟不上就丢了几条；下一条会补上，不必重来。
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
+            }
+        }
+    });
+}
+
+/// 定期去问别人的机型和配置。
+///
+/// **只能轮询，没有主动推送。** 不问的话所有他机永远是通用模型、全程关灯、
+/// 光杆落地——而那看起来像"模型匹配坏了"，不像"没人问过"。
+fn spawn_asking(fsd: PilotHandle, table: Arc<Mutex<TrafficTable>>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(ASK_INTERVAL);
+        loop {
+            tick.tick().await;
+            let (types, configs) = {
+                let mut table = table.lock().expect("traffic");
+                let now = monotonic();
+                (
+                    table.missing_plane_info(),
+                    table.due_for_config(now, CONFIG_REFRESH),
+                )
+            };
+            for callsign in types {
+                fsd.request_plane_info(callsign);
+            }
+            for callsign in configs {
+                fsd.request_config(callsign);
             }
         }
     });

@@ -6,7 +6,7 @@
 
 use crate::packet::{CallsignProblem, Incoming};
 use crate::pilot::{
-    self, unpack_pbh, Attitude, FlightPlan, PilotIdentity, PilotPosition, XpdrMode,
+    self, unpack_pbh, AircraftConfig, Attitude, FlightPlan, PilotIdentity, PilotPosition, XpdrMode,
 };
 use crate::session::{self, Role, SessionHandle};
 use std::collections::HashMap;
@@ -60,6 +60,19 @@ pub enum PilotEvent {
         recipient: String,
         message: String,
     },
+    /// 别人报来的机型，用于模型匹配。
+    PlaneInfo {
+        callsign: String,
+        equipment: String,
+        airline: String,
+        livery: String,
+        csl: String,
+    },
+    /// 别人报来的外形配置，用于动画。
+    Config {
+        callsign: String,
+        config: Box<AircraftConfig>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -68,17 +81,29 @@ pub struct PilotConfig {
     pub port: u16,
     pub identity: PilotIdentity,
     pub reconnect_limit: u32,
+    /// 自己的机型和航司，别人问起时答这个。
+    pub aircraft: String,
+    pub airline: String,
 }
 
 pub enum PilotCommand {
     Position(Box<PilotPosition>),
-    Text { recipient: String, message: String },
+    Text {
+        recipient: String,
+        message: String,
+    },
     FilePlan(Box<FlightPlan>),
     Ident,
     RequestAtis(String),
+    /// 问某人的机型。
+    RequestPlaneInfo(String),
+    /// 问某人的外形配置。
+    RequestConfig(String),
+    /// 换一份自己的外形配置，别人问起时照这个答。
+    SetOwnConfig(Box<AircraftConfig>),
 }
 
-struct PilotRole {
+pub(crate) struct PilotRole {
     identity: PilotIdentity,
     /// 最近一帧位置。**没有就不发包**——一个全零的位置包会把飞机放在
     /// 几内亚湾外海，而那在雷达上看着像一架真飞机。
@@ -87,6 +112,11 @@ struct PilotRole {
     events: broadcast::Sender<PilotEvent>,
     /// 别人的呼号 → 最近一次收到的位置。只用来判断"这架还在不在"。
     seen: HashMap<String, Instant>,
+    /// 自己的机型和航司，别人问起时答这个。
+    aircraft: String,
+    airline: String,
+    /// 自己的外形配置，别人问起时答这个。
+    own_config: AircraftConfig,
 }
 
 impl Role for PilotRole {
@@ -141,6 +171,13 @@ impl Role for PilotRole {
     }
 
     fn on_packet(&mut self, _incoming: &Incoming, raw: &str) -> Vec<String> {
+        // `#SB` 和 `ACC` 要回话，先处理。
+        if let Some(reply) = self.plane_info(raw) {
+            return reply;
+        }
+        if let Some(reply) = self.aircraft_config(raw) {
+            return reply;
+        }
         // 他机和管制席位不走 `packet::parse`：那一份只认这一侧**要回话**的包，
         // 而这两种是纯粹的通告。
         if let Some(t) = parse_traffic(raw) {
@@ -196,6 +233,130 @@ impl Role for PilotRole {
             }
             PilotCommand::RequestAtis(target) => {
                 vec![pilot::request_atis(&self.identity.callsign, &target)]
+            }
+            PilotCommand::RequestPlaneInfo(target) => {
+                vec![format!("#SB{}:{target}:PIR", self.identity.callsign)]
+            }
+            PilotCommand::RequestConfig(target) => {
+                vec![format!("$CQ{}:{target}:ACC", self.identity.callsign)]
+            }
+            PilotCommand::SetOwnConfig(config) => {
+                self.own_config = *config;
+                Vec::new()
+            }
+        }
+    }
+}
+
+impl PilotRole {
+    /// `#SB` —— 别人问我们机型要答，别人报机型要记下来。
+    ///
+    /// 返回 `None` 表示这不是一个 `#SB` 包。
+    fn plane_info(&mut self, raw: &str) -> Option<Vec<String>> {
+        let rest = raw.strip_prefix("#SB")?;
+        let f: Vec<&str> = rest.split(':').collect();
+        if f.len() < 3 || f[1] != self.identity.callsign {
+            return Some(Vec::new());
+        }
+        let sender = f[0];
+        match f[2] {
+            // 别人问我们。**不答的话对方只能拿通用模型画我们。**
+            "PIR" => {
+                let mut reply = format!(
+                    "#SB{}:{sender}:PI:GEN:EQUIPMENT={}",
+                    self.identity.callsign,
+                    if self.aircraft.is_empty() {
+                        "B738"
+                    } else {
+                        &self.aircraft
+                    }
+                );
+                if !self.airline.is_empty() {
+                    reply.push_str(&format!(":AIRLINE={}", self.airline));
+                }
+                Some(vec![reply])
+            }
+            "PI" if f.len() > 3 && f[3] == "GEN" => {
+                // **键值对的顺序和出现与否都不保证**（protocol.md 明说了）。
+                let (mut equipment, mut airline, mut livery, mut csl) =
+                    (String::new(), String::new(), String::new(), String::new());
+                for field in &f[4..] {
+                    let (key, value) = field.split_once('=').unwrap_or((field, ""));
+                    if value.is_empty() {
+                        continue;
+                    }
+                    match key.to_uppercase().as_str() {
+                        "EQUIPMENT" => equipment = value.to_string(),
+                        "AIRLINE" => airline = value.to_string(),
+                        "LIVERY" => livery = value.to_string(),
+                        "CSL" => csl = value.to_string(),
+                        _ => {}
+                    }
+                }
+                if !equipment.is_empty() || !csl.is_empty() {
+                    let _ = self.events.send(PilotEvent::PlaneInfo {
+                        callsign: sender.to_string(),
+                        equipment,
+                        airline,
+                        livery,
+                        csl,
+                    });
+                }
+                Some(Vec::new())
+            }
+            // 老式：`#SB发方:收方:PI:X:0:发动机类型:CSL=名字`
+            // （有的客户端写成 `~名字`）。
+            "PI" if f.len() > 3 && f[3] == "X" => {
+                for field in &f[4..] {
+                    let csl = field
+                        .strip_prefix("CSL=")
+                        .or_else(|| field.strip_prefix("csl="))
+                        .or_else(|| field.strip_prefix('~'));
+                    if let Some(csl) = csl.filter(|c| !c.is_empty()) {
+                        let _ = self.events.send(PilotEvent::PlaneInfo {
+                            callsign: sender.to_string(),
+                            equipment: String::new(),
+                            airline: String::new(),
+                            livery: String::new(),
+                            csl: csl.to_string(),
+                        });
+                    }
+                }
+                Some(Vec::new())
+            }
+            _ => Some(Vec::new()),
+        }
+    }
+
+    /// `$CQ…ACC` / `$CR…ACC` —— 外形配置。
+    fn aircraft_config(&mut self, raw: &str) -> Option<Vec<String>> {
+        let (head, rest) = match (raw.strip_prefix("$CQ"), raw.strip_prefix("$CR")) {
+            (Some(r), _) => ("CQ", r),
+            (_, Some(r)) => ("CR", r),
+            _ => return None,
+        };
+        let f: Vec<&str> = rest.split(':').collect();
+        if f.len() < 3 || f[2] != "ACC" || f[1] != self.identity.callsign {
+            return None;
+        }
+        match head {
+            // 别人问我们。不答的话对方画我们时全程关灯、光杆落地。
+            "CQ" => Some(vec![format!(
+                "$CR{}:{}:ACC:{}",
+                self.identity.callsign,
+                f[0],
+                self.own_config.to_json()
+            )]),
+            _ => {
+                // 负载里有冒号（JSON 的键值对），所以第四段之后要拼回去。
+                let payload = f[3..].join(":");
+                if let Some(config) = AircraftConfig::from_json(&payload) {
+                    let _ = self.events.send(PilotEvent::Config {
+                        callsign: f[0].to_string(),
+                        config: Box::new(config),
+                    });
+                }
+                Some(Vec::new())
             }
         }
     }
@@ -280,6 +441,21 @@ impl PilotHandle {
         self.inner.send(PilotCommand::RequestAtis(callsign.into()));
     }
 
+    pub fn request_plane_info(&self, callsign: impl Into<String>) {
+        self.inner
+            .send(PilotCommand::RequestPlaneInfo(callsign.into()));
+    }
+
+    pub fn request_config(&self, callsign: impl Into<String>) {
+        self.inner
+            .send(PilotCommand::RequestConfig(callsign.into()));
+    }
+
+    pub fn set_own_config(&self, config: AircraftConfig) {
+        self.inner
+            .send(PilotCommand::SetOwnConfig(Box::new(config)));
+    }
+
     pub async fn request_metar(&self, icao: &str, timeout: Duration) -> Option<String> {
         self.inner.request_metar(icao, timeout).await
     }
@@ -298,6 +474,9 @@ pub fn connect(config: PilotConfig) -> PilotHandle {
         ident_until: None,
         events: events.clone(),
         seen: HashMap::new(),
+        aircraft: config.aircraft,
+        airline: config.airline,
+        own_config: AircraftConfig::default(),
     };
     PilotHandle {
         inner: session::spawn(config.host, config.port, role, config.reconnect_limit),
@@ -305,8 +484,29 @@ pub fn connect(config: PilotConfig) -> PilotHandle {
     }
 }
 
+/// 两个测试模块共用的夹具。
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub(crate) fn role() -> super::PilotRole {
+        let (events, _) = broadcast::channel(16);
+        PilotRole {
+            identity: PilotIdentity::new("CES123", "1234", "pw", "R N", 1, 25, "XPC"),
+            position: None,
+            ident_until: None,
+            events,
+            seen: HashMap::new(),
+            aircraft: "A320".into(),
+            airline: "CES".into(),
+            own_config: AircraftConfig::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::tests_support::role;
     use super::*;
 
     #[test]
@@ -350,17 +550,6 @@ mod tests {
     #[test]
     fn a_short_controller_packet_is_not_a_station() {
         assert!(parse_controller("%ZSPD_TWR:27850:5").is_none());
-    }
-
-    fn role() -> PilotRole {
-        let (events, _) = broadcast::channel(16);
-        PilotRole {
-            identity: PilotIdentity::new("CES123", "1234", "pw", "R N", 1, 25, "XPC"),
-            position: None,
-            ident_until: None,
-            events,
-            seen: HashMap::new(),
-        }
     }
 
     fn a_position() -> PilotPosition {
@@ -510,5 +699,172 @@ mod tests {
             Ok(PilotEvent::Text { message, .. }) => assert_eq!(message, "climb FL350 time 12:30"),
             other => panic!("got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod exchange_tests {
+    use super::tests_support::*;
+    use super::*;
+
+    /// 别人问机型要答。**不答的话对方只能拿通用模型画我们**——
+    /// 一架 A320 在别人屏幕上是 737。
+    #[test]
+    fn a_plane_info_request_is_answered() {
+        let mut r = role();
+        let sent = r.on_packet(&Incoming::Other, "#SBCCA101:CES123:PIR");
+        assert_eq!(
+            sent,
+            vec!["#SBCES123:CCA101:PI:GEN:EQUIPMENT=A320:AIRLINE=CES"]
+        );
+    }
+
+    /// 问的不是我们就不答——服务端会把别人之间的对话也转过来。
+    #[test]
+    fn someone_elses_request_is_not_ours_to_answer() {
+        let mut r = role();
+        assert!(r
+            .on_packet(&Incoming::Other, "#SBCCA101:CSN999:PIR")
+            .is_empty());
+    }
+
+    /// **键值对的顺序和出现与否都不保证**（protocol.md 明说了）。
+    #[test]
+    fn the_key_value_pairs_can_come_in_any_order() {
+        let mut r = role();
+        let mut rx = r.events.subscribe();
+        r.on_packet(
+            &Incoming::Other,
+            "#SBCCA101:CES123:PI:GEN:AIRLINE=CCA:LIVERY=OLD:EQUIPMENT=B738",
+        );
+        match rx.try_recv() {
+            Ok(PilotEvent::PlaneInfo {
+                callsign,
+                equipment,
+                airline,
+                livery,
+                ..
+            }) => {
+                assert_eq!(callsign, "CCA101");
+                assert_eq!(equipment, "B738");
+                assert_eq!(airline, "CCA");
+                assert_eq!(livery, "OLD");
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// 老式的 `PI:X` 也要认——网上还有在跑的老客户端，认不出就等于它们全部
+    /// 退到通用模型。
+    #[test]
+    fn the_legacy_plane_info_still_yields_a_csl_name() {
+        let mut r = role();
+        let mut rx = r.events.subscribe();
+        r.on_packet(
+            &Incoming::Other,
+            "#SBCCA101:CES123:PI:X:0:1:CSL=BB_A320_CCA",
+        );
+        match rx.try_recv() {
+            Ok(PilotEvent::PlaneInfo { csl, .. }) => assert_eq!(csl, "BB_A320_CCA"),
+            other => panic!("got {other:?}"),
+        }
+        // 有的客户端写成 `~名字`。
+        r.on_packet(&Incoming::Other, "#SBCCA101:CES123:PI:X:0:1:~BB_B738");
+        match rx.try_recv() {
+            Ok(PilotEvent::PlaneInfo { csl, .. }) => assert_eq!(csl, "BB_B738"),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// 别人问配置要答。**不答的话对方画我们时全程关灯、光杆落地。**
+    #[test]
+    fn a_config_request_is_answered_with_our_own() {
+        let mut r = role();
+        r.on_command(PilotCommand::SetOwnConfig(Box::new(AircraftConfig {
+            gear_down: Some(false),
+            flaps: Some(0.25),
+            beacon_on: Some(true),
+            ..Default::default()
+        })));
+        let sent = r.on_packet(&Incoming::Other, "$CQCCA101:CES123:ACC");
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("$CRCES123:CCA101:ACC:{"), "{}", sent[0]);
+        assert!(sent[0].contains(r#""gear_down":false"#), "{}", sent[0]);
+        assert!(sent[0].contains(r#""flaps_pct":25"#), "{}", sent[0]);
+        assert!(sent[0].contains(r#""beacon_on":true"#), "{}", sent[0]);
+    }
+
+    /// **负载里有冒号**（JSON 的键值对），拼回去时不能只取一段。
+    #[test]
+    fn a_config_reply_survives_the_colons_in_its_json() {
+        let mut r = role();
+        let mut rx = r.events.subscribe();
+        let json = AircraftConfig {
+            gear_down: Some(true),
+            flaps: Some(1.0),
+            landing_on: Some(true),
+            engines_on: Some(false),
+            ..Default::default()
+        }
+        .to_json();
+        r.on_packet(&Incoming::Other, &format!("$CRCCA101:CES123:ACC:{json}"));
+        match rx.try_recv() {
+            Ok(PilotEvent::Config { callsign, config }) => {
+                assert_eq!(callsign, "CCA101");
+                assert_eq!(config.gear_down, Some(true));
+                assert_eq!(config.flaps, Some(1.0));
+                assert_eq!(config.landing_on, Some(true));
+                assert_eq!(config.engines_on, Some(false));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    /// 一份配置在线上走一个来回要还原成原样。
+    #[test]
+    fn a_configuration_round_trips_through_the_wire() {
+        let original = AircraftConfig {
+            gear_down: Some(true),
+            flaps: Some(0.5),
+            spoilers: Some(true),
+            engines_on: Some(true),
+            taxi_on: Some(false),
+            landing_on: Some(true),
+            beacon_on: Some(true),
+            strobe_on: Some(false),
+            nav_on: Some(true),
+        };
+        let back = AircraftConfig::from_json(&original.to_json()).expect("parse");
+        assert_eq!(back, original);
+    }
+
+    /// **认不出的键跳过、缺的键留 `None`。** 这条路上的客户端不止我们一个，
+    /// 多一个字段不该让整份配置作废。
+    #[test]
+    fn an_unknown_field_does_not_void_the_configuration() {
+        let c = AircraftConfig::from_json(
+            r#"{"gear_down":true,"something_new":42,"lights":{"beacon_on":true}}"#,
+        )
+        .expect("parse");
+        assert_eq!(c.gear_down, Some(true));
+        assert_eq!(c.beacon_on, Some(true));
+        // 没报过的留 None，而不是 false——"收起了起落架"和"没报过"是两件事。
+        assert_eq!(c.flaps, None);
+        assert_eq!(c.strobe_on, None);
+        assert_eq!(AircraftConfig::from_json("not json"), None);
+    }
+
+    /// 问别人的两条命令。
+    #[test]
+    fn asking_someone_uses_the_addresses_they_listen_on() {
+        let mut r = role();
+        assert_eq!(
+            r.on_command(PilotCommand::RequestPlaneInfo("CCA101".into())),
+            vec!["#SBCES123:CCA101:PIR"]
+        );
+        assert_eq!(
+            r.on_command(PilotCommand::RequestConfig("CCA101".into())),
+            vec!["$CQCES123:CCA101:ACC"]
+        );
     }
 }

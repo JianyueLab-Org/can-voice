@@ -44,6 +44,10 @@ pub fn distance_nm(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     dx.hypot(dy)
 }
 
+/// 别人报过来的外形配置。**定义在协议那一侧**——它是 `ACC` 回复的 JSON
+/// 形状，不是这一层自己的概念。
+pub use can_voice_fsd::pilot::AircraftConfig as Config;
+
 /// 网上的一架飞机。
 #[derive(Debug, Clone, Default)]
 pub struct Aircraft {
@@ -59,6 +63,10 @@ pub struct Aircraft {
     pub csl: String,
     /// 渲染端还没为这架匹配过模型。
     pub model_dirty: bool,
+    pub config: Config,
+    /// 上一次问配置的时刻。**只能轮询**——不问的话所有他机永远全程关灯、
+    /// 光杆落地。
+    pub config_asked: f64,
 }
 
 impl Aircraft {
@@ -67,6 +75,10 @@ impl Aircraft {
             callsign: callsign.to_string(),
             created: now,
             model_dirty: true,
+            // **负无穷表示"从来没问过"**，而不是"刚刚问过"。用 0.0 的话，
+            // 一个刚上线、单调时钟还在零附近的客户端会以为所有他机都问过了，
+            // 于是整场飞行全程关灯——而那正是要轮询的原因。
+            config_asked: f64::NEG_INFINITY,
             ..Default::default()
         }
     }
@@ -149,6 +161,8 @@ pub struct Entry {
     pub csl: String,
     pub model_dirty: bool,
     pub range_nm: Option<f64>,
+    #[serde(flatten)]
+    pub config: Config,
 }
 
 #[derive(Debug, Default)]
@@ -194,6 +208,40 @@ impl TrafficTable {
             entry.airline = airline.to_string();
             entry.model_dirty = true;
         }
+    }
+
+    pub fn set_config(&mut self, callsign: &str, now: f64, config: Config) {
+        let entry = self
+            .aircraft
+            .entry(callsign.to_string())
+            .or_insert_with(|| Aircraft::new(callsign, now));
+        entry.config = config;
+    }
+
+    /// 该向谁问一次配置。**只能轮询**：没有主动推送，不问的话所有他机永远
+    /// 全程关灯、光杆落地。
+    pub fn due_for_config(&mut self, now: f64, every: f64) -> Vec<String> {
+        let mut due = Vec::new();
+        for (callsign, a) in self.aircraft.iter_mut() {
+            if a.latest.is_some() && now - a.config_asked >= every {
+                a.config_asked = now;
+                due.push(callsign.clone());
+            }
+        }
+        due.sort();
+        due
+    }
+
+    /// 该向谁问一次机型。只问还没问出来的那些。
+    pub fn missing_plane_info(&self) -> Vec<String> {
+        let mut due: Vec<String> = self
+            .aircraft
+            .values()
+            .filter(|a| a.equipment.is_empty())
+            .map(|a| a.callsign.clone())
+            .collect();
+        due.sort();
+        due
     }
 
     pub fn remove(&mut self, callsign: &str) -> bool {
@@ -246,6 +294,7 @@ impl TrafficTable {
                     range_nm: origin.map(|(lat, lon)| {
                         distance_nm(lat, lon, position.latitude, position.longitude)
                     }),
+                    config: a.config,
                     position,
                 })
             })
@@ -458,5 +507,77 @@ mod tests {
             .map(|e| e.callsign)
             .collect();
         assert_eq!(names, vec!["CCA101", "CES123", "CSN999"]);
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    fn sample(time: f64) -> Sample {
+        Sample {
+            time,
+            latitude: 30.0,
+            longitude: 120.0,
+            altitude: 1000.0,
+            pitch: 0.0,
+            bank: 0.0,
+            heading: 0.0,
+            on_ground: false,
+            groundspeed: 250.0,
+        }
+    }
+
+    /// **配置的每一项都是 `Option`。** 没报过就是没报过，渲染端据此自己猜；
+    /// 填成默认值的话，一架真的收起了起落架的飞机和一架还没报过配置的飞机
+    /// 就分不开了。
+    #[test]
+    fn an_unreported_configuration_is_none_not_a_default() {
+        let mut t = TrafficTable::new();
+        t.update_position("CES123", 2000, sample(0.0));
+        let e = &t.snapshot(0.0, None, None, None)[0];
+        assert_eq!(e.config.gear_down, None);
+        assert_eq!(e.config.beacon_on, None);
+
+        t.set_config(
+            "CES123",
+            0.0,
+            Config {
+                gear_down: Some(false),
+                beacon_on: Some(true),
+                ..Default::default()
+            },
+        );
+        let e = &t.snapshot(0.0, None, None, None)[0];
+        assert_eq!(e.config.gear_down, Some(false));
+        assert_eq!(e.config.beacon_on, Some(true));
+    }
+
+    /// 配置**只能轮询**：不问的话所有他机永远全程关灯、光杆落地。
+    #[test]
+    fn a_configuration_is_asked_for_again_after_the_interval() {
+        let mut t = TrafficTable::new();
+        t.update_position("CES123", 2000, sample(0.0));
+        assert_eq!(t.due_for_config(0.0, 10.0), vec!["CES123".to_string()]);
+        // 刚问过就别再问。
+        assert!(t.due_for_config(5.0, 10.0).is_empty());
+        assert_eq!(t.due_for_config(10.0, 10.0), vec!["CES123".to_string()]);
+    }
+
+    /// 只有位置到了的才问配置——一架只知道机型、还没报过位置的飞机画都画不出来。
+    #[test]
+    fn an_aircraft_without_a_position_is_not_asked() {
+        let mut t = TrafficTable::new();
+        t.set_plane_info("CES123", 0.0, "A320", "CES");
+        assert!(t.due_for_config(0.0, 10.0).is_empty());
+    }
+
+    #[test]
+    fn only_the_aircraft_without_a_type_are_asked_for_one() {
+        let mut t = TrafficTable::new();
+        t.update_position("CES123", 2000, sample(0.0));
+        t.update_position("CCA101", 2000, sample(0.0));
+        t.set_plane_info("CCA101", 0.0, "B738", "CCA");
+        assert_eq!(t.missing_plane_info(), vec!["CES123".to_string()]);
     }
 }
