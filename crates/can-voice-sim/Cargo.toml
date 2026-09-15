@@ -8,6 +8,7 @@ rust-version.workspace = true
 can-voice-fsd = { path = "../can-voice-fsd" }
 can-voice-proto = { path = "../can-voice-proto" }
 base64 = "0.22"
+socket2 = { version = "0.5", features = ["all"] }
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true

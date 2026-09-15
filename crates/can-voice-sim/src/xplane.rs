@@ -373,3 +373,199 @@ mod tests {
         assert!(snapshot(&HashMap::new()).is_none());
     }
 }
+
+// ——— 真正的链路 ———
+
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::net::UdpSocket;
+
+/// 超过这么久没有新数据就认为断了。
+pub const STALE_AFTER: Duration = Duration::from_secs(3);
+/// 还是没有的话，重新去找一次 X-Plane。
+pub const REDISCOVER_AFTER: Duration = Duration::from_secs(15);
+/// 收到第一份信标后再等这么久，收齐其他网卡的。
+pub const BEACON_GATHER: Duration = Duration::from_secs(1);
+pub const DISCOVER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// 一条 X-Plane 链路。
+#[derive(Debug, Clone)]
+pub struct Link {
+    state: Arc<Mutex<LinkState>>,
+}
+
+#[derive(Debug, Default)]
+struct LinkState {
+    values: HashMap<&'static str, f32>,
+    connected: bool,
+    address: Option<SocketAddr>,
+}
+
+impl Link {
+    /// 起一条链路。它自己找 X-Plane、订阅、掉了再找。
+    pub fn spawn() -> Self {
+        let link = Self {
+            state: Arc::new(Mutex::new(LinkState::default())),
+        };
+        let state = link.state.clone();
+        tokio::spawn(async move { run(state).await });
+        link
+    }
+
+    pub fn connected(&self) -> bool {
+        self.state.lock().expect("link").connected
+    }
+
+    pub fn address(&self) -> Option<SocketAddr> {
+        self.state.lock().expect("link").address
+    }
+
+    /// 当前这一帧，已经换算成 FSD 要的单位。没数据返回 `None`。
+    pub fn snapshot(&self) -> Option<Snapshot> {
+        let state = self.state.lock().expect("link");
+        snapshot(&state.values)
+    }
+}
+
+/// 听多播信标，找出 X-Plane 在哪儿。
+///
+/// **收到第一份之后再等一会儿。** 一台装了 VPN/WSL/Docker 的机器会从每块网卡
+/// 各回一份，而第一份到的往往就是虚拟网卡那份——往它发 RREF 收不到任何数据。
+/// 收齐了按 [`address_rank`] 挑。
+pub async fn discover(timeout: Duration) -> Option<SocketAddr> {
+    let socket = bind_beacon_socket()?;
+    let group: Ipv4Addr = MCAST_GROUP.parse().ok()?;
+    socket
+        .join_multicast_v4(group, Ipv4Addr::UNSPECIFIED)
+        .ok()?;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut found: Vec<SocketAddr> = Vec::new();
+    let mut gather_until: Option<tokio::time::Instant> = None;
+    let mut buf = [0u8; 1024];
+
+    loop {
+        let until = match gather_until {
+            Some(g) => g.min(deadline),
+            None => deadline,
+        };
+        let left = until.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(left, socket.recv_from(&mut buf)).await {
+            Ok(Ok((n, from))) => {
+                if let Some(port) = parse_beacon(&buf[..n]) {
+                    let addr = SocketAddr::new(from.ip(), port);
+                    if !found.contains(&addr) {
+                        found.push(addr);
+                    }
+                    gather_until.get_or_insert(tokio::time::Instant::now() + BEACON_GATHER);
+                }
+            }
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    found.sort_by_key(|a| address_rank(&a.ip().to_string()));
+    found.into_iter().next()
+}
+
+/// 绑信标端口，**必须开地址复用**。
+///
+/// 49707 上常常已经有别人在听：LiveTraffic、swift、另一个我们自己的实例，
+/// 甚至 X-Plane 自己。不开复用的话 bind 直接失败，而失败的表现是"永远找不到
+/// X-Plane"——和没开模拟器一模一样，没有任何线索指向端口被占。
+fn bind_beacon_socket() -> Option<UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).ok()?;
+    socket.set_reuse_address(true).ok()?;
+    // macOS/BSD 还要 SO_REUSEPORT 才允许两个进程同时收同一份多播。
+    // socket2 只在这些平台上给这个方法，所以 cfg 要按它的条件写，
+    // 不能简单地"非 Windows"。
+    #[cfg(all(unix, not(any(target_os = "solaris", target_os = "illumos"))))]
+    socket.set_reuse_port(true).ok()?;
+    socket.set_nonblocking(true).ok()?;
+    socket
+        .bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MCAST_PORT).into())
+        .ok()?;
+    UdpSocket::from_std(socket.into()).ok()
+}
+
+async fn run(state: Arc<Mutex<LinkState>>) {
+    let mut known_good: Option<SocketAddr> = None;
+    let mut last_discovered: Option<SocketAddr> = None;
+
+    loop {
+        let address = match discover(DISCOVER_TIMEOUT).await {
+            Some(a) => {
+                last_discovered = Some(a);
+                a
+            }
+            // 这一轮没收到信标。**不要无脑退回本机**：明明发现过
+            // 192.168.31.231，等 15 秒没数据（X-Plane 还在读盘）就把它扔了，
+            // 下一轮退回 127.0.0.1，再等 15 秒，来回折腾。
+            // 收过数据的地址最可信，其次是上一次发现到的。
+            None => known_good
+                .or(last_discovered)
+                .unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))),
+        };
+
+        if let Some(good) = serve(&state, address).await {
+            known_good = Some(good);
+        }
+        state.lock().expect("link").connected = false;
+    }
+}
+
+/// 订上、收数据，直到太久没动静。返回"这个地址确实给过数据"。
+async fn serve(state: &Arc<Mutex<LinkState>>, address: SocketAddr) -> Option<SocketAddr> {
+    let Ok(socket) = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).await else {
+        return None;
+    };
+    for packet in subscribe_all(UPDATE_RATE) {
+        if socket.send_to(&packet, address).await.is_err() {
+            return None;
+        }
+    }
+    state.lock().expect("link").address = Some(address);
+
+    let mut ever = false;
+    let mut last = tokio::time::Instant::now();
+    let mut buf = [0u8; 8192];
+    loop {
+        let quiet = tokio::time::Instant::now().duration_since(last);
+        let give_up = if ever {
+            REDISCOVER_AFTER
+        } else {
+            DISCOVER_TIMEOUT
+        };
+        if quiet > give_up {
+            // 退订一下再走，免得 X-Plane 一直往一个没人听的端口推。
+            for packet in subscribe_all(0) {
+                let _ = socket.send_to(&packet, address).await;
+            }
+            return ever.then_some(address);
+        }
+        match tokio::time::timeout(STALE_AFTER, socket.recv(&mut buf)).await {
+            Ok(Ok(n)) => {
+                let values = parse_values(&buf[..n]);
+                if values.is_empty() {
+                    continue;
+                }
+                ever = true;
+                last = tokio::time::Instant::now();
+                let mut state = state.lock().expect("link");
+                state.connected = true;
+                for (name, value) in values {
+                    state.values.insert(name, value);
+                }
+            }
+            Ok(Err(_)) => return ever.then_some(address),
+            Err(_) => {
+                state.lock().expect("link").connected = false;
+            }
+        }
+    }
+}
