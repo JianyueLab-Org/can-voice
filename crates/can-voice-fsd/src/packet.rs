@@ -41,6 +41,29 @@ pub const CLIENT_MINOR: u32 = 0;
 
 const CALLSIGN_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 
+/// can-fsd 的 `reservedCallsigns`。它们是协议里的**收件人**，不是谁的呼号。
+const RESERVED_CALLSIGNS: [&str; 3] = ["SERVER", "CLIENT", "FP"];
+
+/// 呼号的通用规矩：长度、字符集、保留名。通播还要再加一条后缀检查。
+pub fn check_callsign(callsign: &str) -> Result<String, CallsignProblem> {
+    let callsign = callsign.trim().to_uppercase();
+    let len = callsign.chars().count();
+    if !(2..=MAX_CALLSIGN_LENGTH).contains(&len) {
+        return Err(CallsignProblem::Length {
+            callsign,
+            len,
+            limit: MAX_CALLSIGN_LENGTH,
+        });
+    }
+    if !callsign.chars().all(|c| CALLSIGN_CHARS.contains(c)) {
+        return Err(CallsignProblem::Charset(callsign));
+    }
+    if RESERVED_CALLSIGNS.contains(&callsign.as_str()) {
+        return Err(CallsignProblem::Reserved(callsign));
+    }
+    Ok(callsign)
+}
+
 /// 呼号不合服务端规矩时说明是哪一条。
 ///
 /// 规则来自 can-fsd 的 `IsValidCallsign` / `IsATISCallsign`。
@@ -56,6 +79,9 @@ pub enum CallsignProblem {
     Charset(String),
     #[error("{0} does not end in _ATIS")]
     NotAtis(String),
+    /// `SERVER` / `CLIENT` / `FP` 是协议自己占着的地址。
+    #[error("{0} is a name the protocol reserves")]
+    Reserved(String),
 }
 
 /// 频率编码：`118.000` → `"18000"`（开头的 1 和小数点是协议隐含的）。
@@ -105,18 +131,7 @@ pub fn wrap_atis_text_to(text: &str, width: usize) -> Vec<String> {
 
 /// 呼号合规就返回 `Ok(大写形式)`。
 pub fn check_atis_callsign(callsign: &str) -> Result<String, CallsignProblem> {
-    let callsign = callsign.trim().to_uppercase();
-    let len = callsign.chars().count();
-    if !(2..=MAX_CALLSIGN_LENGTH).contains(&len) {
-        return Err(CallsignProblem::Length {
-            callsign,
-            len,
-            limit: MAX_CALLSIGN_LENGTH,
-        });
-    }
-    if !callsign.chars().all(|c| CALLSIGN_CHARS.contains(c)) {
-        return Err(CallsignProblem::Charset(callsign));
-    }
+    let callsign = check_callsign(callsign)?;
     if !callsign.ends_with("_ATIS") {
         return Err(CallsignProblem::NotAtis(callsign));
     }

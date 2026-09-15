@@ -15,3 +15,6 @@
 
 pub mod client;
 pub mod packet;
+pub mod pilot;
+pub mod pilot_client;
+pub mod session;
