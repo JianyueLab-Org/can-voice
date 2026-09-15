@@ -6,6 +6,9 @@ rust-version.workspace = true
 
 [dependencies]
 can-voice-fsd = { path = "../can-voice-fsd" }
+can-voice-proto = { path = "../can-voice-proto" }
+base64 = "0.22"
+serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

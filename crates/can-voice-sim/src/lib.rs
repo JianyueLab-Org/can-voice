@@ -13,6 +13,7 @@
 //! [`xplane`] 是 UDP（BECN 信标 + RREF 订阅），纯字节活，可以完整测试。
 //! [`msfs`] 是 SimConnect，**Windows-only 的 C API**。
 
+pub mod bridge;
 pub mod xplane;
 
 pub mod msfs;

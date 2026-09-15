@@ -206,8 +206,11 @@ dependencies = [
 name = "can-voice-sim"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "can-voice-fsd",
+ "can-voice-proto",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
