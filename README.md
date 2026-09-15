@@ -8,6 +8,8 @@ Cerulean Aviation Network 的语音层：QUIC 语音服务端与客户端核心�
 server/                 Go：语音服务端（P2，Task 1–11 已落地）
 crates/can-voice-proto  Rust：线协议。与 Go 侧共测 server/testdata/wire-golden.json
 crates/can-voice-client Rust：客户端核心库（P3）
+crates/can-voice-ptt    Rust：PTT（键盘 / 鼠标侧键 / 手柄），四个桌面端共用
+crates/can-voice-atis   Rust：服务端通播机器人（P4 Task 8）
 probe/                  P1 的一次性连通性探针，结论产出后删除
 ```
 
@@ -97,3 +99,35 @@ cargo run -p can-voice-client --example canvoice-cli -- \
 **夹具里的 token 有效期 5 分钟**（`auth.maxTokenLifetime` 是 10 分钟，短有效期是
 这套设计里唯一的吊销机制）。隔一会儿再跑要重新 `go run ./server/cmd/can-voice-e2e-fixture`
 ——端到端测试会认出这个情况并直接告诉你该跑哪条命令。
+
+## 服务端通播机器人
+
+没有界面、没有声卡：它盯着 can-fsd 的 datafeed，为每一个 `_ATIS` 席位起一路，
+音频由 TTS 合成后经 `push_audio` 注入——走的是和麦克风**完全相同**的那条路
+（成帧、序号、首尾帧、扇出）。
+
+```bash
+cargo run -p can-voice-atis
+```
+
+外部依赖两个，都要在 PATH 上：**TTS 命令**（默认 `edge-tts`）和 **ffmpeg**
+（把合成出来的 mp3 转成 48 kHz 单声道 PCM）。Python 版的部署本来就要求 ffmpeg。
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `ATIS_CID` / `ATIS_PASSWORD` | 必需 | **一个真实成员账号。** 没有任何绕过账号的捷径，`no_shortcut_for_any_account` 钉着 |
+| `CAN_API_ORIGIN` | `https://api.ceruleanavi.net` | 换票的地方（`POST /api/v1/voice/token`） |
+| `CAN_VOICE_SERVER` | `audio.ceruleanavi.net:64738` | 语音服务端 |
+| `CAN_FSD_DATAFEED` | `https://data.ceruleanavi.net/v1/data.json` | 席位从哪来 |
+| `ATIS_TTS_ARGV` | `edge-tts --voice {voice} --text {text} --write-media {out}` | 合成命令模板 |
+| `ATIS_VOICE_EN` / `ATIS_VOICE_ZH` | `en-US-AriaNeural` / `zh-CN-XiaoxiaoNeural` | 两种语言的嗓子 |
+| `ATIS_POLL_SECS` | `30` | 多久看一次 datafeed |
+
+三条和四个桌面客户端**相反**的规矩，都写在代码里：
+
+- **不设有界重连。** 桌面端掉线三次就下线；一支给三次机会就放弃的机队，会在一次
+  网络抖动之后让全网 ATIS 悄无声息地下线，而没有任何人在看着它。
+- **死掉的那一路要重新拉起。** 判据是"那个任务还活着吗"，不是"在不在表里"——
+  只查在不在表里的话，一次瞬时故障就让这个席位永远停播，而管理器还以为它好好的、
+  每 30 秒给它更新一次文本。
+- **取不到 datafeed 不停播。** 正在播的照常，报文停在最后一次取到的那份。
