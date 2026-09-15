@@ -1,0 +1,20 @@
+[package]
+name = "can-voice-atis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "can-voice-atis"
+path = "src/main.rs"
+
+[dependencies]
+can-voice-client = { path = "../can-voice-client" }
+can-voice-proto = { path = "../can-voice-proto" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "process", "sync"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
