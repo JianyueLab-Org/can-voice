@@ -1,0 +1,39 @@
+# can-voice 语音服务端。
+#
+#     cp .env.example .env     # 填好里面三项
+#     docker compose up -d
+#     docker compose logs -f
+#
+# 配置全在 .env 里，没有配置文件——缺任何必需项启动即失败，而不是用一个默认值
+# 悄悄跑起来。
+
+services:
+  can-voice:
+    image: ghcr.io/jianyuelab-org/can-voice:latest
+    # **必须写。** 一个同时声明了 image 和 build 的服务，在本地没有镜像时会
+    # **安静地从源码构建**，于是部署上去的东西和 CI 产出的不是同一个。这里没有
+    # build，但把策略写明白，免得哪天有人加上。
+    pull_policy: always
+    container_name: can-voice
+    restart: always
+    # QUIC 走 UDP。**/udp 不能漏**——漏了的症状是握手超时，和"这个网络封了
+    # QUIC"长得一模一样，而那正是最难排查的一类。
+    ports:
+      - "${CAN_VOICE_PORT:-64738}:64738/udp"
+    volumes:
+      # 只读挂整个 letsencrypt：live/ 下是软链，指向 archive/，只挂 live 那一层
+      # 会得到一堆断掉的链接。
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    environment:
+      CAN_VOICE_ADDR: ":64738"
+      CAN_VOICE_TLS_CERT: "/etc/letsencrypt/live/${CAN_VOICE_DOMAIN}/fullchain.pem"
+      CAN_VOICE_TLS_KEY: "/etc/letsencrypt/live/${CAN_VOICE_DOMAIN}/privkey.pem"
+      CAN_VOICE_API_PUBKEY: "${CAN_VOICE_API_PUBKEY}"
+      CAN_VOICE_FSD_FEED: "${CAN_VOICE_FSD_FEED:-https://data.ceruleanavi.net/v1/events}"
+      CAN_VOICE_MAX_RX: "${CAN_VOICE_MAX_RX:-32}"
+      CAN_VOICE_DEBUG: "${CAN_VOICE_DEBUG:-}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
