@@ -44,7 +44,7 @@ const CALLSIGN_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
 /// 呼号不合服务端规矩时说明是哪一条。
 ///
 /// 规则来自 can-fsd 的 `IsValidCallsign` / `IsATISCallsign`。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize)]
 pub enum CallsignProblem {
     #[error("{callsign} is {len} characters; it must be between 2 and {limit}")]
     Length {

@@ -35,7 +35,7 @@ pub const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// 统一的含义。
 pub const RECONNECT_LIMIT: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum FsdState {
     Connecting,
     Online,
@@ -49,7 +49,7 @@ pub enum FsdState {
 
 /// 为什么。**是枚举不是字符串**：同一条原因在中英两种界面下要说两种话，
 /// 而这一层不该知道现在是哪一种。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum Reason {
     Callsign(CallsignProblem),
     Connecting {
@@ -80,7 +80,7 @@ pub enum Reason {
     Stopped,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FsdEvent {
     pub state: FsdState,
     pub reason: Reason,

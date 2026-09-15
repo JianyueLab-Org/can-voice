@@ -175,6 +175,7 @@ dependencies = [
 name = "can-voice-fsd"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
