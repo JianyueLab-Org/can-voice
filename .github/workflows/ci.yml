@@ -167,3 +167,52 @@ jobs:
       - run: cargo test -p can-voice-client --test e2e
         env:
           CAN_VOICE_E2E: '1'
+
+  apps:
+    name: apps (前端类型检查 + 构建)
+    runs-on: ubuntu-latest
+    # **这个 job 存在的理由是 workspace 把 apps/ 排除掉了。**
+    #
+    # 根 Cargo.toml 写着 `exclude = ["apps"]`（两个 Tauri 端各自拖着 wry/webkit
+    # 一整棵树，进来的话 `cargo test --workspace` 每次都要构建一个 GUI 工具链），
+    # 所以上面那个 rust job **一行客户端代码都不编**。没有这一条的话，两支已经
+    # 发出去的客户端在 CI 里是完全没有门的。
+    #
+    # 这里只跑前端那一半，理由不是偷懒：Rust 侧在 Linux 上要 webkit2gtk 一串
+    # 系统库，而它真正要跑的平台是 macOS 和 Windows —— 那件事属于 Task 9 的
+    # 三平台打包，和签名一起做才有意义。前端这一半没有系统依赖，而它守着的正是
+    # **跨语言那份约定**：`types.ts` 里照着 "Online"、
+    # {"Refused":"ProtoUnsupported"} 这些串写判断，改一个 Rust 侧的变体名，
+    # Rust 那边照样编译、照样过测试，而界面会安静地落到兜底分支上。
+    permissions:
+      contents: read
+      # **必须显式写。** 工作流顶上的 `permissions: contents: read` 会把
+      # GITHUB_TOKEN 的其它权限全部收掉，包括默认有的 packages: read ——
+      # 而 can-ui 装在 GitHub Packages 上。缺了就是 401，报的是下载地址，
+      # 不是"少了个权限"。
+      packages: read
+    strategy:
+      # 一支红了要能看见另一支是什么状态。它们互不相干，没有理由互相打断。
+      fail-fast: false
+      matrix:
+        app: [controller, atis]
+    defaults:
+      run:
+        working-directory: apps/${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # --frozen-lockfile：CI 不该顺手升级依赖。锁文件对不上就该红，而不是装
+      # 一套和本地不同的东西然后通过。
+      #
+      # GITHUB_TOKEN 是给 can-ui 用的：GitHub 的 npm registry **即使是公开包
+      # 也要求带令牌**。.npmrc 里写的是 `_authToken=${GITHUB_TOKEN}`，那个变量
+      # 在安装时才从环境里读，Actions 不会自动把它放进 env。
+      - run: bun install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # `build` 就是 `vue-tsc --noEmit && vite build`。类型检查那一半是重点：
+      # 没有它，一个只在模板里出现的类型错误要等到有人打开那个窗口才发现。
+      - run: bun run build
