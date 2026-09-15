@@ -158,8 +158,12 @@ jobs:
             **Windows**：`.exe` 是安装程序，`.msi` 是给有组策略的机器用的，
             装一个就行。
 
-            **Linux**：`.deb` 给 Debian / Ubuntu，`.AppImage` 给别的发行版
-            （下载后 `chmod +x` 直接跑）。
+            **Linux**：`.deb` 给 Debian / Ubuntu，`.rpm` 给 Fedora / openSUSE，
+            `.AppImage` 给别的发行版（下载后 `chmod +x` 直接跑）。
+
+            > **AppImage 有 77 MB，deb 和 rpm 只有 5 MB。** 差别是 AppImage 把
+            > 整个 webkit 运行时打了进去；deb/rpm 用系统自己的。**发行版对得上
+            > 就装 deb 或 rpm**，不要因为 AppImage 看起来省事就下那个。
 
             > **Linux 上的 PTT 只在 X11 下有效。** 全局按键监听走的是 Xlib，
             > 而 Wayland 不允许一个普通程序监听全局按键——在 Wayland 会话里
