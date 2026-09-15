@@ -41,7 +41,7 @@ pub const CLOSE_PROTOCOL_VIOLATION: u64 = 3;
 /// `Reconnecting` 意味着链路还活着，**不要丢掉对象引用**；
 /// `Offline` 意味着它彻底没了。`Evicted` 是 `Offline` 的一种，
 /// 但要单独告诉用户"账号在别处登录了"。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum LinkState {
     Connecting,
     Online,
@@ -51,7 +51,7 @@ pub enum LinkState {
 }
 
 /// 握手被拒的原因。四个串都是服务端**专门为客户端造的**，有测试钉住它们稳定。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum RefusedReason {
     /// token 本身没问题，只是过期了。**唯一可恢复的一条。**
     TokenExpired,
@@ -368,7 +368,17 @@ pub async fn connect(
     });
     write_msg(&mut send, &hello).await?;
 
-    match read_one(&mut recv).await? {
+    // 读握手回复时的错误**先问关闭码**，再当成 I/O 错误。
+    //
+    // 服务端拒绝握手时同时发 BYE 和 CONNECTION_CLOSE 的原因串，而**后者才是权威**
+    // ——BYE 走控制流，一个还没开始读的客户端收不到它。只认 BYE 的话，
+    // BYE 丢了就退化成一条没有原因的 I/O 错误，而"没有理由的失败"正是这一整套
+    // 原因串存在的理由。
+    let reply = match read_one(&mut recv).await {
+        Ok(m) => m,
+        Err(e) => return Err(handshake_error(classify_close_of(&conn), e)),
+    };
+    match reply {
         Message::Ready(r) => {
             tracing::info!(session = r.session, server = %r.server, "voice session established");
             Ok(Link {
@@ -382,6 +392,27 @@ pub async fn connect(
         }
         Message::Bye(b) => Err(Error::Refused(RefusedReason::parse(&b.reason))),
         other => Err(Error::UnexpectedReply(format!("{other:?}"))),
+    }
+}
+
+/// 连接已经带着关闭码没了吗。没有关闭码时返回 `None`。
+fn classify_close_of(conn: &quinn::Connection) -> Option<Disposition> {
+    conn.close_reason().as_ref().map(classify)
+}
+
+/// 握手期读失败时，把关闭码翻译成一条说得出原因的错误。
+///
+/// 纯函数，因为它是这条路径上唯一一处判断，而制造一个"BYE 丢了"的真实场景
+/// 需要一个会说谎的服务端。
+fn handshake_error(disposition: Option<Disposition>, fallback: Error) -> Error {
+    match disposition {
+        Some(Disposition::Refused(reason)) => Error::Refused(reason),
+        Some(Disposition::Evicted) => Error::Refused(RefusedReason::Other("evicted".into())),
+        Some(Disposition::ProtocolViolation(v)) => {
+            Error::UnexpectedReply(format!("protocol violation: {v:?}"))
+        }
+        // 码 0 或者传输层错误：那就是普通的掉线，原样回去。
+        Some(Disposition::Reconnect) | None => fallback,
     }
 }
 
@@ -796,5 +827,58 @@ mod tests {
             "the stream should be desynchronised — if this ever passes cleanly, \
              the cancel-safety hazard has changed and spawn_control_reader's rationale needs rechecking"
         );
+    }
+    // ——— 握手期的错误要说得出原因 ———
+
+    /// **BYE 会丢，关闭码不会。** 服务端拒绝握手时同时发两样，而原因串是和关闭码
+    /// 原子地一起送达的；BYE 走控制流，一个还没开始读的客户端收不到它。
+    ///
+    /// 只认 BYE 的实现会在 BYE 丢掉时退化成一条没有原因的 I/O 错误——而
+    /// "没有理由的失败"正是这一整套原因串存在的理由，也是上层决定"换张票再试"
+    /// 还是"别试了"的唯一依据。
+    #[test]
+    fn a_lost_bye_still_leaves_the_reason_in_the_close_code() {
+        let io = || Error::Io(std::io::Error::other("stream closed"));
+
+        let e = handshake_error(
+            Some(Disposition::Refused(RefusedReason::TokenExpired)),
+            io(),
+        );
+        assert!(
+            matches!(e, Error::Refused(RefusedReason::TokenExpired)),
+            "got {e:?}"
+        );
+
+        let e = handshake_error(
+            Some(Disposition::Refused(RefusedReason::ProtoUnsupported)),
+            io(),
+        );
+        assert!(
+            matches!(e, Error::Refused(RefusedReason::ProtoUnsupported)),
+            "got {e:?}"
+        );
+    }
+
+    /// 被顶号也要说得出口：上层据此告诉用户"账号在别处登录了"，
+    /// 而不是让他去查密码。
+    #[test]
+    fn eviction_during_the_handshake_is_not_a_bare_io_error() {
+        let e = handshake_error(
+            Some(Disposition::Evicted),
+            Error::Io(std::io::Error::other("x")),
+        );
+        assert!(!matches!(e, Error::Io(_)), "got {e:?}");
+    }
+
+    /// 普通掉线没有可说的原因，原样回去——**不要编一个**。
+    #[test]
+    fn an_ordinary_drop_keeps_its_own_error() {
+        let e = handshake_error(
+            Some(Disposition::Reconnect),
+            Error::Io(std::io::Error::other("x")),
+        );
+        assert!(matches!(e, Error::Io(_)), "got {e:?}");
+        let e = handshake_error(None, Error::Io(std::io::Error::other("x")));
+        assert!(matches!(e, Error::Io(_)), "got {e:?}");
     }
 }

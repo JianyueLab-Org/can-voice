@@ -1,0 +1,16 @@
+[package]
+name = "can-voice-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+can-voice-client = { path = "../can-voice-client" }
+can-voice-proto = { path = "../can-voice-proto" }
+can-voice-ptt = { path = "../can-voice-ptt" }
+can-voice-token = { path = "../can-voice-token" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.52", features = ["rt", "sync", "macros"] }

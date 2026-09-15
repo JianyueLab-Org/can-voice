@@ -1,0 +1,26 @@
+[package]
+name = "atis-for-can"
+version = "3.0.0"
+edition = "2021"
+rust-version = "1.80"
+description = "Cerulean Aviation Network 通播制作客户端"
+
+# **产品名是固定白名单里的四个之一**（can-api 的下载中转、更新检查、发行资产），
+# 改名意味着那边要一起改。见 apps/controller 那份里的同一段。
+
+[lib]
+name = "atis_for_can_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+can-voice-atis = { path = "../../../crates/can-voice-atis" }
+can-voice-fsd = { path = "../../../crates/can-voice-fsd" }
+tauri = { version = "2", features = [] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

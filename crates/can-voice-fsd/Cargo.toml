@@ -1,0 +1,11 @@
+[package]
+name = "can-voice-fsd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.52", features = ["rt", "net", "io-util", "time", "sync", "macros"] }

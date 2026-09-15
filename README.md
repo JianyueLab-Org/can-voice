@@ -9,9 +9,32 @@ server/                 Go：语音服务端（P2，Task 1–11 已落地）
 crates/can-voice-proto  Rust：线协议。与 Go 侧共测 server/testdata/wire-golden.json
 crates/can-voice-client Rust：客户端核心库（P3）
 crates/can-voice-ptt    Rust：PTT（键盘 / 鼠标侧键 / 手柄），四个桌面端共用
-crates/can-voice-atis   Rust：服务端通播机器人（P4 Task 8）
+crates/can-voice-token  Rust：拿凭据换短期票，四个桌面端共用
+crates/can-voice-app    Rust：四个桌面端共用的快照 / 更新检查 / 命令面
+crates/can-voice-fsd    Rust：FSD 协议客户端那一侧，通播端与飞行员端共用
+crates/can-voice-atis   Rust：通播的逻辑（报文 / 模板 / 读法）＋服务端通播机器人
+apps/controller         Tauri：管制语音客户端 audio-for-can（P4 Task 4）
+apps/atis               Tauri：通播制作客户端 atis-for-can（P4 Task 5）
 probe/                  P1 的一次性连通性探针，结论产出后删除
 ```
+
+**桌面端不在 workspace 里**（根 `Cargo.toml` 的 `exclude = ["apps"]`）：它们各自
+拖着 wry/webkit 一整棵树，进来的话 `cargo test --workspace` 每次都要构建一个 GUI
+工具链，而核心库那几个 crate 的测试本来是秒级的。各自在 `apps/<name>/src-tauri`
+里构建。
+
+dev 端口接在网站那排 432x 后面：4330 controller、4331 atis，4332 / 4333 留给
+xpc / msfs。
+
+`apps/xpc`、`apps/msfs` 两支飞行员端**尚未开始**。
+
+## 通播是谁出声，还没有定
+
+服务端机队播的是 datafeed 里每一个 `_ATIS` 席位，而席位之所以在 datafeed 里，
+正是因为有人开着 `atis-for-can` 把它挂上了 FSD。所以只要桌面那一支自己也出声，
+同一个频率上就有两个声音，**而且念的还不是同一份稿子**——机队手上只有
+`text_atis`，念的是电码原文的读法；本地合成念的是模板渲染出来的语音形态。
+详见 `crates/can-voice-atis/src/lib.rs` 的模块头。在此之前 `apps/atis` 只做稿子。
 
 `probe/` 的代码已齐、**尚未部署**——剩下的部署、发放、收数与判定见
 `probe/deploy/README-部署.md`，给测试用户的说明是 `probe/README-测试说明.md`。

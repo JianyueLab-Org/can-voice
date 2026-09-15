@@ -8,62 +8,17 @@
 //! （`test_there_is_no_shortcut_for_any_account`）防止它被加回来；这里的对应物是
 //! `no_shortcut_for_any_account`。
 //!
-//! [`TokenSource`] 只有一个构造函数，它要凭据。**没有一个入口能直接塞一张票进来**
-//! ——这不是纪律，是类型层面的事实。
+//! `can-voice-token` 的 `TokenSource` 只有一个构造函数，它要凭据。
+//! **没有一个入口能直接塞一张票进来**——这不是纪律，是类型层面的事实。
 
-pub mod datafeed;
-pub mod fleet;
-pub mod readback;
-pub mod station;
-pub mod tts;
+//! 模块本身在 `lib.rs`——这个 crate 也是一个库，桌面通播客户端
+//! （`apps/atis`）从那边取同一套 METAR / 模板 / 读法逻辑。
 
-use fleet::{Action, Running};
+use can_voice_atis::fleet::{Action, Running};
+use can_voice_atis::{datafeed, fleet, station, tts};
+use can_voice_token::TokenSource;
 use std::collections::HashMap;
 use std::time::Duration;
-
-/// 换票的地方。
-///
-/// **只能用凭据换。** 没有 `from_token`，没有 `with_token`，配置里也没有 token 字段
-/// ——一支机队要是能被塞一张长期票，那张票就成了一个没人管的凭据。
-#[derive(Debug, Clone)]
-pub struct TokenSource {
-    endpoint: String,
-    cid: String,
-    password: String,
-    http: reqwest::Client,
-}
-
-#[derive(serde::Deserialize)]
-struct TokenReply {
-    token: String,
-}
-
-impl TokenSource {
-    pub fn new(endpoint: String, cid: String, password: String, http: reqwest::Client) -> Self {
-        Self {
-            endpoint,
-            cid,
-            password,
-            http,
-        }
-    }
-
-    /// 换一张票。
-    ///
-    /// 每次连接都现换：票的有效期是 60 秒，攒着没有意义。
-    pub async fn fetch(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let reply = self
-            .http
-            .post(&self.endpoint)
-            .json(&serde_json::json!({ "cid": self.cid, "password": self.password }))
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<TokenReply>()
-            .await?;
-        Ok(reply.token)
-    }
-}
 
 struct Task {
     handle: tokio::task::JoinHandle<()>,
@@ -93,10 +48,7 @@ async fn main() {
     let cid = require("ATIS_CID");
     let password = require("ATIS_PASSWORD");
     let tokens = TokenSource::new(
-        format!(
-            "{}/api/v1/voice/token",
-            env("CAN_API_ORIGIN", "https://api.ceruleanavi.net")
-        ),
+        &env("CAN_API_ORIGIN", "https://api.ceruleanavi.net"),
         cid,
         password,
         http.clone(),

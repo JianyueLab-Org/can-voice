@@ -3,7 +3,7 @@
 use crate::rx::decode::SAMPLE_RATE;
 
 /// 一个音频设备。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DeviceInfo {
     pub id: String,
     pub name: String,

@@ -5,7 +5,17 @@ members = [
     "crates/can-voice-client",
     "crates/can-voice-ptt",
     "crates/can-voice-atis",
+    "crates/can-voice-fsd",
+    "crates/can-voice-token",
+    "crates/can-voice-app",
 ]
+
+# Tauri 应用不进 workspace。
+#
+# 它们各自拖着 wry/webkit 一整棵树，进来的话 `cargo test --workspace` 每次都要
+# 构建一个 GUI 工具链——而核心库那几个 crate 的测试本来是秒级的，CI 也是。
+# 应用自己在 apps/<name>/src-tauri 里构建。
+exclude = ["apps"]
 
 [workspace.package]
 version = "0.1.0"
