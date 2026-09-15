@@ -43,6 +43,18 @@ chmod 640      /etc/letsencrypt/live/probe.ceruleanavi.net/privkey.pem
 
 ### 3. 二进制与单元
 
+**二到五这几步**串成了一个脚本（第一步的 A 记录要先加好，脚本没法替你做——
+certbot 的 standalone 校验当场就要解析得到这台机器）：
+
+```bash
+probe/deploy/install.sh root@<host> probe.ceruleanavi.net
+```
+
+串成脚本的理由只有一条：域名要出现在五个地方（证书申请、两条权限、单元文件里的两条
+路径、最后的外网验证），手敲五遍里错一遍的症状是"握手超时"——和"QUIC 在这个网络被封
+了"长得一模一样，而那正是本次实验要测的东西。脚本做的事和下面这几段一字不差，
+想一步步来就照着下面手动执行。
+
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o can-voice-probe-server ./probe/server
 scp can-voice-probe-server            <host>:/usr/local/bin/
@@ -58,6 +70,10 @@ ssh <host> 'systemctl daemon-reload && systemctl enable --now can-voice-probe'
 放行 **UDP 64739**。这一条最容易漏，因为漏了的症状不是"端口不通"而是**握手超时**，
 看起来和"QUIC 在这个网络被封了"一模一样——而那正是本次实验要测的东西。
 先自己从外网验一次（下一步），再发给任何人。
+
+**云厂商的安全组是第二层，脚本看不见它。** `install.sh` 只认得机器上的 ufw 和
+firewalld；阿里云/腾讯云/AWS 控制台里那一层要自己去放行 UDP 64739，而漏了它的症状
+和上面一模一样。
 
 ### 5. 从外网验证一次
 
@@ -97,6 +113,47 @@ ssh <host> 'systemctl daemon-reload && systemctl enable --now can-voice-probe'
 | 校园网或企业网 | ≥ 1 | 同上 |
 | 操作系统 | ≥ 2 种 | 同上 |
 
+### 招募文案
+
+可以直接贴的一段（Discord/群），和 `README-测试说明.md` 一起发：
+
+> **帮个忙：两分钟的语音连通性测试**
+>
+> 我们在给 CAN 做新的语音系统，用的传输方式（QUIC / UDP）和现在的不一样，所以要先确认
+> 它在大家的网络里通不通。想请你跑一个小工具，**大约两分钟**，跑完会生成一个文本文件，
+> 发回给我就行。
+>
+> 它**不上传任何东西**，文件里没有 IP、没有用户名、没有任何个人信息，你可以先打开看一遍
+> 再决定发不发。
+>
+> 特别需要这几类网络的样本：**中国移动 / 中国联通 / 中国电信各来几份**，还有**校园网**和
+> **公司网络**。如果你能在不同网络下各跑一次（家里、公司、手机热点），帮助最大。
+>
+> **连不上也请把文件发回来**——连不上本身就是我们最想知道的结果之一。
+>
+> 下载和操作说明见附件。
+
+招募时要说清楚的三件事，缺一件就会掉样本：**两分钟**（不说时长没人点开）、
+**不上传**（这是让人肯跑一个没签名的二进制的前提）、**失败也要发**
+（不说这一句，失败的人会默默关掉窗口，而那恰好是最有价值的那份数据）。
+
+### 收样本的过程中随时看构成
+
+```bash
+go run ./probe/client analyse probe/reports
+```
+
+样本不够时它照样会先印一段 `coverage`：
+
+```
+coverage (for recruiting — compare against the table in README-部署.md):
+  - 5 session(s) across 3 network(s): 中国电信 ×3、中国移动 ×1、校园网 ×1
+  - operating systems: windows ×3、darwin ×1、linux ×1
+```
+
+"还差 3 份"和"还差 3 份、而且联通一个都没有"是完全不同的两件事，而下面那张表的后三行
+代码管不了。构成是**给招募看的，不驱动判定**，所以它和 `diagnostics` 分开印。
+
 前两行是**硬的**：`Verdict` 在样本不足时拒绝出结论，而不是给一个看起来有依据的答案。
 用 6 个人的数据决定一个要维护多年的传输层，比没有数据更危险。
 
@@ -117,8 +174,9 @@ ssh <host> 'systemctl daemon-reload && systemctl enable --now can-voice-probe'
 go run ./probe/client analyse probe/reports
 ```
 
-输出分三块，**它们的份量不一样，别混着读**：
+输出分四块，**它们的份量不一样，别混着读**：
 
+- `coverage` —— 样本构成，**给招募看的，不驱动判定**；
 - `diagnostics` —— 样本量与排除情况，**信息性的，不驱动判定**；
 - `thresholds crossed` —— 真正越线、驱动 `NeedFallback` 的理由；
 - `SEPARATE FINDINGS` —— 越线了但**不构成回退通道的理由**的发现。
