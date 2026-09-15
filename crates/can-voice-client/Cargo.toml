@@ -1,0 +1,24 @@
+[package]
+name = "can-voice-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+audiopus = "0.2"
+audiopus_sys = { version = "0.1", default-features = false, features = ["static"] }
+bytes = "1.12.1"
+can-voice-proto = { path = "../can-voice-proto" }
+cpal = "0.15"
+quinn = "0.11.9"
+rustls = { version = "0.23.44", default-features = false, features = ["ring", "std"] }
+rustls-pki-types = "1.15.1"
+rustls-platform-verifier = "0.7"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,0 +1,15 @@
+[package]
+name = "can-voice-ptt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# 键盘与鼠标：**只监听，不拦截**。吞掉事件意味着那个键在其它所有程序里都失灵，
+# 而它在模拟器里通常还有别的用途。
+rdev = "0.5"
+# 手柄：要轮询。它**不依赖 SDL**，所以 can-audio 那条"SDL 隐藏窗口"的陷阱不适用。
+gilrs = "0.11"

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/can-voice-proto",
+    "crates/can-voice-client",
+    "crates/can-voice-ptt",
+    "crates/can-voice-atis",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"

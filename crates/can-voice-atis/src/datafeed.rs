@@ -1,0 +1,217 @@
+//! 从 can-fsd 的 datafeed 取正在播的 ATIS。
+//!
+//! 消费的是 `atis[].callsign`、`.frequency` 和 `.text_atis` 三个字段。
+//! can-fsd 保证 `text_atis` 是一个字符串数组、永不为 null，并且只有呼号以
+//! `_ATIS` 结尾的席位才会出现在 `atis[]` 里——但这一侧照样自己判一次，
+//! 因为判错的后果是在一个管制席位的频率上播通播。
+
+use serde_json::Value;
+
+/// 取 datafeed 时用的 User-Agent。
+///
+/// **数据源前面挡着 Cloudflare，非浏览器形态的 UA 一律 403。** Python 版为此写了
+/// 一整段注释：`requests` 的默认 UA（`python-requests/x.y`）就在被拒之列。
+/// reqwest 的默认 UA 是同一类东西，所以这个头是必须的而不是礼貌——
+/// 而 403 看起来像"datafeed 挂了"。
+pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; CanATIS/3.0)";
+
+/// `frequency` 为这个值时表示"**没设频率**"，不是一个频率。
+///
+/// 拿它去订阅会在一个谁也不在的频率上播一整天，而日志里一切正常。
+const NO_FREQUENCY_MHZ: f64 = 199.998;
+
+/// 浮点比较的容差。上游给的可能是 `199.998`、`199.9980` 或 `199.998000`。
+const FREQ_EPSILON: f64 = 0.001;
+
+/// 一个正在播的通播席位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Station {
+    pub callsign: String,
+    pub freq_khz: u32,
+    /// 整段报文，行与行之间用**一个空格**连接——换行读出来是一次停顿，
+    /// 而报文的断行只是终端宽度，不是句读。
+    pub text: String,
+}
+
+/// 从一份 datafeed 文档里取出所有该播的席位。
+///
+/// **单条坏数据只跳过那一条。** 一个缺字段的上游不该让整个机队崩掉——
+/// 那会让全网的 ATIS 一起下线，而这正是这支机队存在的理由。
+pub fn stations_from(feed: &Value) -> Vec<Station> {
+    let Some(list) = feed.get("atis").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    list.iter().filter_map(station_from).collect()
+}
+
+fn station_from(entry: &Value) -> Option<Station> {
+    let callsign = entry.get("callsign")?.as_str()?.trim();
+    if !callsign.ends_with("_ATIS") {
+        return None;
+    }
+    let mhz: f64 = entry.get("frequency")?.as_str()?.trim().parse().ok()?;
+    if (mhz - NO_FREQUENCY_MHZ).abs() < FREQ_EPSILON {
+        tracing::debug!(callsign, "skipping the no-frequency placeholder");
+        return None;
+    }
+    let lines = entry.get("text_atis")?.as_array()?;
+    let text = lines
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    Some(Station {
+        callsign: callsign.to_string(),
+        freq_khz: (mhz * 1000.0).round() as u32,
+        text,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn feed(atis: serde_json::Value) -> serde_json::Value {
+        json!({ "atis": atis, "pilots": [], "controllers": [], "general": {} })
+    }
+
+    fn one(callsign: &str, frequency: &str, text: &[&str]) -> serde_json::Value {
+        json!({ "callsign": callsign, "frequency": frequency, "text_atis": text })
+    }
+
+    #[test]
+    fn a_station_comes_through_with_its_frequency_in_khz() {
+        let s = stations_from(&feed(json!([one(
+            "ZSSS_ATIS",
+            "132.250",
+            &["ZSSS ATIS A"]
+        )])));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].callsign, "ZSSS_ATIS");
+        assert_eq!(s[0].freq_khz, 132_250);
+    }
+
+    /// 行用**一个空格**连起来，不是换行。换行读出来是一次停顿，
+    /// 而报文的断行只是终端宽度，不是句读。
+    #[test]
+    fn the_lines_are_joined_with_a_single_space() {
+        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "132.250", &["A B", "C D"])])));
+        assert_eq!(s[0].text, "A B C D");
+    }
+
+    /// **`199.998` 的意思是"没设频率"，不是一个频率。** 拿它去订阅会在一个
+    /// 谁也不在的频率上播一整天，而日志里一切正常。
+    #[test]
+    fn the_no_frequency_placeholder_is_skipped() {
+        let s = stations_from(&feed(json!([
+            one("ZSSS_ATIS", "199.998", &["x"]),
+            one("ZBAA_ATIS", "127.800", &["y"]),
+        ])));
+        assert_eq!(s.len(), 1, "only the real frequency should survive: {s:?}");
+        assert_eq!(s[0].callsign, "ZBAA_ATIS");
+    }
+
+    /// 判据是**近似相等**，不是字符串相等：上游给的可能是 `199.998`、
+    /// `199.9980` 或者 `199.998000`。
+    #[test]
+    fn the_placeholder_is_matched_numerically_not_textually() {
+        for raw in ["199.998", "199.9980", "199.998000"] {
+            let s = stations_from(&feed(json!([one("ZSSS_ATIS", raw, &["x"])])));
+            assert!(s.is_empty(), "{raw} should have been skipped");
+        }
+    }
+
+    /// 只有 `_ATIS` 结尾的才是通播席位。can-fsd 保证了这一点，
+    /// 但这一侧照样判——它是"要不要开一路去播"的判据，判错就是在一个
+    /// 管制席位的频率上播通播。
+    #[test]
+    fn only_atis_callsigns_are_broadcast() {
+        let s = stations_from(&feed(json!([
+            one("ZSSS_TWR", "118.500", &["x"]),
+            one("ZSSS_ATIS", "132.250", &["y"]),
+        ])));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].callsign, "ZSSS_ATIS");
+    }
+
+    #[test]
+    fn a_station_with_no_text_is_skipped() {
+        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "132.250", &[])])));
+        assert!(s.is_empty(), "there is nothing to say");
+    }
+
+    /// can-fsd 保证 `text_atis` 是数组、不是 null，但一个缺字段的上游
+    /// **不该让整个机队崩掉**——那会让全网 ATIS 一起下线。
+    #[test]
+    fn a_malformed_entry_is_skipped_rather_than_fatal() {
+        let s = stations_from(&feed(json!([
+            json!({ "callsign": "ZSSS_ATIS" }),
+            json!({ "frequency": "127.800", "text_atis": ["x"] }),
+            json!("not even an object"),
+            one("ZBAA_ATIS", "127.800", &["y"]),
+        ])));
+        assert_eq!(
+            s.len(),
+            1,
+            "the one good entry must still come through: {s:?}"
+        );
+    }
+
+    #[test]
+    fn a_feed_without_an_atis_array_yields_nothing() {
+        assert!(stations_from(&json!({ "pilots": [] })).is_empty());
+        assert!(stations_from(&json!({ "atis": null })).is_empty());
+        assert!(stations_from(&json!("nonsense")).is_empty());
+    }
+
+    #[test]
+    fn a_frequency_that_is_not_a_number_is_skipped() {
+        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "N/A", &["x"])])));
+        assert!(s.is_empty());
+    }
+
+    /// **数据源前面挡着 Cloudflare，非浏览器形态的 User-Agent 一律 403。**
+    /// Python 版为此写了一整段注释：`requests` 的默认 UA
+    /// （`python-requests/x.y`）就在被拒之列，不带这个头取不到任何数据——
+    /// 而 403 看起来像"datafeed 挂了"。
+    #[test]
+    fn the_user_agent_does_not_look_like_a_library_default() {
+        assert!(USER_AGENT.starts_with("Mozilla/"), "got {USER_AGENT}");
+        for banned in ["reqwest", "python-requests", "curl", "Go-http-client"] {
+            assert!(
+                !USER_AGENT.contains(banned),
+                "{banned} is on Cloudflare's reject list"
+            );
+        }
+    }
+    /// 拿仓库里那份**真实的 datafeed 样本**过一遍。
+    ///
+    /// 它是 `server/internal/fsdfeed` 的测试夹具，也就是服务端那一侧读同一份
+    /// 文档时用的东西——所以这条测试同时钉住"两边读的是同一个契约"。
+    /// 自造的 JSON 证明不了这件事：它只证明我们和自己一致。
+    #[test]
+    fn the_repositorys_real_datafeed_sample_parses() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../server/testdata/datafeed_sample.json"
+        );
+        let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let feed: serde_json::Value = serde_json::from_slice(&raw).expect("parse the sample");
+
+        let s = stations_from(&feed);
+        assert_eq!(s.len(), 1, "the sample carries one ATIS station: {s:?}");
+        assert_eq!(s[0].callsign, "ZSSS_ATIS");
+        assert_eq!(s[0].freq_khz, 132_250);
+        assert!(s[0].text.starts_with("ZSSS ATIS A 1200Z"), "{}", s[0].text);
+        assert!(
+            !s[0].text.contains('\n'),
+            "lines are joined with a space, not a newline"
+        );
+    }
+}

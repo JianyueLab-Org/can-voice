@@ -109,3 +109,61 @@ jobs:
       # 调度）说的都是服务端的事。
       - run: go build ./probe/...
       - run: go test ./probe/... -race
+
+  rust:
+    name: rust (fmt + clippy + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # **两样构建前置，缺哪个报的错都指不到原因。**
+      #
+      # autotools：audiopus_sys 从源码构建 libopus 并静态链接，build.rs 走的是
+      # `sh autogen.sh && sh configure && make`。缺了报 "Failed to autogen Opus"。
+      #
+      # libasound2-dev：cpal 在 Linux 上走 ALSA，缺了报的是
+      # "failed to run custom build command for `alsa-sys`"——而 macOS 上 cpal 走
+      # CoreAudio，所以这一条**在开发机上永远不会露头**，只有 Linux 才会。
+      # 这正是这个 job 第一次跑就抓到的东西。
+      #
+      # X11 + udev：`can-voice-ptt` 的 rdev 在 Linux 上走 Xlib、gilrs 走 udev。
+      # 同样是"只在 Linux 露头"的那一类，所以照上一条的教训一次装齐。
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # 三样拆成三步，理由和上面几个 Go job 拆开是同一条：红的时候要一眼看出
+      # 是格式、静态检查，还是逻辑。
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  e2e:
+    name: e2e (rust client against the real server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # **这是唯一能发现各层拼接错误的测试**，而两半都在这个仓库里，所以它是
+      # 能在 CI 跑的。它已经当场抓到过一个：客户端的信任根没接上——编译通过、
+      # 单测全绿，只有真的去打一个自签服务端才会露头。
+      #
+      # 夹具（两级证书链、Ed25519 密钥对、一张有效 token 和一张过期的）由
+      # 那个 fixture 工具一条命令产出，不需要 openssl。
+      - run: mkdir -p target/e2e
+      - run: go build -o target/e2e/can-voice ./server/cmd/can-voice
+      - run: go run ./server/cmd/can-voice-e2e-fixture
+      - run: cargo test -p can-voice-client --test e2e
+        env:
+          CAN_VOICE_E2E: '1'
