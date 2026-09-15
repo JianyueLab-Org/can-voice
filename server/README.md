@@ -227,7 +227,86 @@ RX 灯在这条会话剩下的时间里一直亮着。尾帧买到的是**及时
   会话**授权后**的 TX 集合里同时包含两个频率时才生效，被 `max_tx` 拒掉的频率不算。
   它和 `rejected` 不重叠，差集公式也管不到它——耦合对不在 `rx`/`tx` 里。
 
-## 运行
+## 部署
+
+五步。**第一步一辈子做一次**（换密钥就要 can-api 和这边同时改，在两边都改完
+之前全网连不上），其余四步是换台机器就重做一遍的例行动作。
+
+### 一、密钥对（两边各一半）
+
+在 **can-api** 那个仓库里跑一次：
+
+    go run ./cmd/voice-keygen
+
+它一次印出两半，每一半已经标好该放进哪个变量：
+
+| 这一半 | 放哪儿 | 干什么 |
+|---|---|---|
+| 私钥（seed） | can-api 的 `VOICE_TOKEN_KEY` | **签**票。它就是全部的权限 |
+| 公钥 | 本服务的 `CAN_VOICE_API_PUBKEY` | **验**票。泄露无所谓 |
+
+**两半很容易放反**，而放反的表现是所有人都连不上、日志里写
+`token signature does not verify` —— 读起来像"密钥错了"，而不像"拿反了"。
+`voice-keygen` 把标签直接印在每一半前面，就是为了让这件事难犯。
+
+公钥必须是**裸 32 字节**的 base64。`openssl pkey -pubout` 导出的是 DER 包装
+的（以 `MCowBQYDK2Vw` 开头，44 字节），本服务收到会在启动时就报错。转换见
+《排障》。
+
+### 二、域名和证书
+
+    certbot certonly --standalone -d audio.ceruleanavi.net
+
+`--standalone` 要占 80 端口，被占住的话 certbot 报的是一句含糊的校验失败，
+所以先 `ss -lntp | grep ':80 '` 看一眼。
+
+**走 Docker 就不用做 `chgrp ssl-cert` / `chmod 640` 那两条。** 容器里以 root
+读一个只读挂载的证书目录，`DynamicUser` 读不到 0600 私钥那个坑整个不存在
+——那个坑不会在测试里出现，只会在**续期那天**出现（见《排障》最后一条）。
+
+### 三、起服务
+
+    cd server
+    cp .env.example .env        # 填 CAN_VOICE_DOMAIN 和 CAN_VOICE_API_PUBKEY
+    docker compose up -d
+    docker compose logs -f
+
+`.env` 里只有两项必填，别的都有默认值。镜像由 CI 构建并推到 GHCR
+（`ghcr.io/jianyuelab-org/can-voice`，`latest` 加一个 `sha-<commit>`，
+amd64 + arm64）。
+
+> 镜像里**没有 shell**（distroless static），看日志用 `docker compose logs`，
+> 不要指望 `docker exec` 进去。
+
+启动成功的样子：日志里有一行监听地址，**没有**任何 `CAN_VOICE_* is required`。
+缺任何必需项它会直接退出，而不是用一个默认值悄悄跑起来。
+
+### 四、放行 UDP
+
+    ufw allow 64738/udp        # 或 firewall-cmd --add-port=64738/udp --permanent
+
+**云厂商的安全组是第二层。** 阿里云/腾讯云/AWS 控制台里那一层要单独放行，
+而漏了它的症状是握手超时——和"这个网络封了 QUIC"长得一模一样。
+
+### 五、验一次
+
+拿命令行客户端从**另一台机器**打一次（不要在服务器本机验，那样连防火墙都没
+经过）：
+
+    cargo run -p can-voice-client --example canvoice-cli -- \
+        --server audio.ceruleanavi.net:64738 --token "$TOKEN"
+
+`$TOKEN` 从 can-api 的 `/api/v1/voice/token` 拿。**不要带 `--insecure`**
+——那个开关根本不存在，而且不会有：这条链路上跑的是成员的网络密码。
+
+### 换一台机器要做什么
+
+**第一步不要重做。** `.env` 里的公钥照抄过去——重新生成一对就要同时改
+can-api 的 `VOICE_TOKEN_KEY`，而在两边都改完之前全网连不上。
+
+二到五重做一遍：新域名或新 A 记录、certbot、compose、放行端口、从外面验一次。
+
+## 不用 Docker 的话
 
     go build -o can-voice ./server/cmd/can-voice
     CAN_VOICE_ADDR=:64738 \
@@ -235,6 +314,9 @@ RX 灯在这条会话剩下的时间里一直亮着。尾帧买到的是**及时
     CAN_VOICE_TLS_KEY=/etc/letsencrypt/live/audio.ceruleanavi.net/privkey.pem \
     CAN_VOICE_API_PUBKEY=$(cat /etc/can-voice/api.pub) \
     ./can-voice
+
+`deploy/can-voice.service` 是对应的 systemd 单元。走这条路就要自己处理私钥权限，
+见《排障》最后一条。
 
 ## 排障
 
@@ -258,7 +340,19 @@ RX 灯在这条会话剩下的时间里一直亮着。尾帧买到的是**及时
 
       openssl pkey -pubin -in api.pub.pem -outform DER | tail -c 32 | base64
 
-- **`Restart=always` 反复重启且日志里是权限错误**：读不到私钥。Let's Encrypt 在
+- **`docker compose up` 起来就退，日志里是 `CAN_VOICE_... is required`**：
+  `.env` 没填全，或者 `.env` 不在 `docker compose` 的工作目录里（compose 只读
+  **当前目录**的 `.env`，不会往上找）。`docker compose config` 会把展开后的环境
+  打出来，一眼能看出哪一项是空的。
+- **容器起来了但日志里是 `no such file or directory` 指着证书**：`CAN_VOICE_DOMAIN`
+  和 certbot 申请时用的域名对不上，或者挂的是 `live/` 那一层。
+  **要挂整个 `/etc/letsencrypt`**：`live/` 下面是软链，指向 `archive/`，只挂
+  `live` 会得到一堆断掉的链接。
+- **外面连不上但容器里一切正常**：端口映射漏了 `/udp`，或者云厂商的安全组没放行。
+  `docker compose ps` 里那一行应当是 `0.0.0.0:64738->64738/udp`；写成 `tcp`
+  的话 QUIC 一个包都进不来，而症状是握手超时——和"这个网络封了 QUIC"一模一样。
+- **`Restart=always` 反复重启且日志里是权限错误**：读不到私钥。**这一条只在
+  不用 Docker 那条路上会遇到**——容器里以 root 读只读挂载，没有这个问题。Let's Encrypt 在
   Debian 上默认把 `live/*/privkey.pem` 放成 `root:root 0600`，而单元里的
   `DynamicUser=yes` 拿到的是一个动态 uid。要么把私钥给 `ssl-cert` 组
   （`chgrp ssl-cert` + `chmod 640`，并让 certbot 的 deploy hook 每次续期后重做），
