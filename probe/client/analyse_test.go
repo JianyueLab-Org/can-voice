@@ -395,3 +395,59 @@ func TestNormaliseCarrierMergesWhitespaceAndCaseVariants(t *testing.T) {
 		}
 	}
 }
+
+// 样本构成要在**样本还不够的时候**就看得见——那正是最需要它的时刻。
+//
+// 只说"还差 3 份"和说清楚"还差 3 份、而且联通一个都没有"，对招募是两件
+// 完全不同的事，而 README-部署.md 那张表里"大陆三家运营商各 ≥ 1"这一行
+// 代码管不了，只能靠人对着看。
+func TestCoverageIsReportedEvenWhenTheSampleIsTooSmall(t *testing.T) {
+	rs := []Report{
+		{OS: "windows", Carrier: "中国电信", Handshake: HandshakeResult{OK: true}},
+		{OS: "windows", Carrier: " 中国电信 ", Handshake: HandshakeResult{OK: true}},
+		{OS: "darwin", Carrier: "校园网", Handshake: HandshakeResult{OK: true}},
+	}
+	v := Verdict(rs)
+	if v.Conclusive {
+		t.Fatalf("3 sessions is below the threshold; Verdict must refuse")
+	}
+	if len(v.Coverage) != 2 {
+		t.Fatalf("coverage must carry a network line and an os line, got %v", v.Coverage)
+	}
+	joined := strings.Join(v.Coverage, " | ")
+	// 大小写和前后空白不同不该数成两个网络——那会让人以为覆盖面比实际更宽。
+	if !strings.Contains(joined, "中国电信 ×2") {
+		t.Fatalf("carriers differing only by whitespace must be one group, got %q", joined)
+	}
+	if !strings.Contains(joined, "2 network(s)") {
+		t.Fatalf("expected 2 networks, got %q", joined)
+	}
+	if !strings.Contains(joined, "windows ×2") || !strings.Contains(joined, "darwin ×1") {
+		t.Fatalf("expected an os breakdown, got %q", joined)
+	}
+}
+
+// 构成是给招募看的，**不驱动判定**——所以它和 Notes 分开装，
+// 一个干净且足量的样本仍然不该有任何 Notes。
+func TestCoverageDoesNotLeakIntoTheDiagnostics(t *testing.T) {
+	var rs []Report
+	for i := 0; i < 9; i++ {
+		rs = append(rs, Report{
+			OS:        "windows",
+			Carrier:   []string{"电信", "移动", "联通"}[i%3],
+			Handshake: HandshakeResult{OK: true},
+			Datagram:  RoundResult{Sent: 3000, Received: 3000, FirstLossAtSecond: -1},
+			Stream:    RoundResult{Sent: 3000, Received: 3000, FirstLossAtSecond: -1},
+		})
+	}
+	v := Verdict(rs)
+	if !v.Conclusive {
+		t.Fatalf("this sample is adequate; notes=%v", v.Notes)
+	}
+	if len(v.Notes) != 0 {
+		t.Fatalf("coverage must not be filed as a diagnostic, got notes=%v", v.Notes)
+	}
+	if len(v.Coverage) != 2 {
+		t.Fatalf("coverage must still be filled on the conclusive path, got %v", v.Coverage)
+	}
+}

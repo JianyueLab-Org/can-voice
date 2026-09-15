@@ -68,6 +68,58 @@ func normaliseCarrier(s string) string {
 	return strings.ToLower(strings.TrimSpace(s))
 }
 
+// coverage 统计样本构成：每个网络、每个操作系统各几份。
+//
+// 按归一化后的键分组，但**印出来的是用户实际填的那个写法**——" 中国电信 "
+// 和 "中国电信" 会合成一组，而招募的人要看的是自己认得的那几个字。
+// 同一组里出现过不同写法时，取第一个见到的。
+func coverage(rs []Report) []string {
+	type group struct {
+		label string
+		n     int
+	}
+	nets := map[string]*group{}
+	oses := map[string]*group{}
+	add := func(m map[string]*group, key, label string) {
+		if key == "" {
+			key, label = "(未填)", "(未填)"
+		}
+		if g, ok := m[key]; ok {
+			g.n++
+			return
+		}
+		m[key] = &group{label: label, n: 1}
+	}
+	for _, r := range rs {
+		add(nets, normaliseCarrier(r.Carrier), strings.TrimSpace(r.Carrier))
+		add(oses, r.OS, r.OS)
+	}
+
+	render := func(m map[string]*group) string {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		// 多的排前面，一样多的按名字——招募时最想先看到的是"哪一类还差着"。
+		sort.Slice(keys, func(i, j int) bool {
+			if m[keys[i]].n != m[keys[j]].n {
+				return m[keys[i]].n > m[keys[j]].n
+			}
+			return keys[i] < keys[j]
+		})
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s ×%d", m[k].label, m[k].n))
+		}
+		return strings.Join(parts, "、")
+	}
+
+	return []string{
+		fmt.Sprintf("%d session(s) across %d network(s): %s", len(rs), len(nets), render(nets)),
+		fmt.Sprintf("operating systems: %s", render(oses)),
+	}
+}
+
 // VerdictResult 是 Verdict 的返回值。
 //
 // 终审发现旧版本把四种不同角色的信息揉进一个 (bool, bool, []string)：
@@ -107,6 +159,18 @@ type VerdictResult struct {
 	// 出来——这份输出会被原样抄进最终留存的文档，握手失败的发现绝不能
 	// 被读成"需要回退通道"的证据。
 	Findings []string
+
+	// Coverage 是样本构成：每个网络、每个操作系统各几份。
+	//
+	// **它是给招募用的，不是给判定用的**，所以和 Notes 分开装。代码只管得了
+	// 两道门槛（会话数 ≥ 8、网络数 ≥ 3）；README-部署.md 那张表后三行
+	// ——大陆三家运营商各 ≥ 1、校园网或企业网 ≥ 1、操作系统 ≥ 2 种——
+	// 写着"招募的时候自己盯"，而在这之前要盯只能一个一个打开 JSON 看。
+	//
+	// 样本不够时 Verdict 会提前返回，那恰恰是最需要看这份构成的时刻：
+	// "还差两份"和"还差两家运营商"是完全不同的两件事，而原来的输出
+	// 只说得出前者。所以它在每一条返回路径上都填。
+	Coverage []string
 }
 
 // Verdict 判定是否必须实现 stream 回退通道。
@@ -117,8 +181,9 @@ type VerdictResult struct {
 // 否则"少于 8 个会话/少于 3 个网络就拒绝判定"这条门槛会被排除路径
 // 悄悄绕过去。
 func Verdict(rs []Report) VerdictResult {
+	cov := coverage(rs)
 	if len(rs) < minSessions {
-		return VerdictResult{Notes: []string{fmt.Sprintf(
+		return VerdictResult{Coverage: cov, Notes: []string{fmt.Sprintf(
 			"sample too small: %d sessions, need at least %d", len(rs), minSessions)}}
 	}
 	carriers := map[string]bool{}
@@ -129,11 +194,11 @@ func Verdict(rs []Report) VerdictResult {
 		// 措辞是"networks"不是"carriers"：Carrier 是自由文本，"校园网"/
 		// "公司网络"/"家里的wifi"这类完全不指名运营商的填法一样会通过
 		// 这道门槛，把这里叫"运营商数"会让人以为覆盖面比实际更具体。
-		return VerdictResult{Notes: []string{fmt.Sprintf(
+		return VerdictResult{Coverage: cov, Notes: []string{fmt.Sprintf(
 			"sample too narrow: %d networks, need at least %d", len(carriers), minCarriers)}}
 	}
 
-	var res VerdictResult
+	res := VerdictResult{Coverage: cov}
 	cross := func(format string, args ...any) {
 		res.Crossed = append(res.Crossed, fmt.Sprintf(format, args...))
 	}
@@ -313,6 +378,16 @@ func analyseMain(args []string) {
 
 	v := Verdict(rs)
 	fmt.Printf("%d reports\n", len(rs))
+
+	if len(v.Coverage) > 0 {
+		// 招募用的，不驱动判定。代码只管得了会话数和网络数两道门槛，
+		// 运营商种类、校园网/企业网、操作系统那三行要人自己对着
+		// README-部署.md 的表看。
+		fmt.Println("\ncoverage (for recruiting — compare against the table in README-部署.md):")
+		for _, c := range v.Coverage {
+			fmt.Printf("  - %s\n", c)
+		}
+	}
 
 	if len(v.Notes) > 0 {
 		fmt.Println("\ndiagnostics (sample size / exclusions — informational, do not drive the verdict):")
