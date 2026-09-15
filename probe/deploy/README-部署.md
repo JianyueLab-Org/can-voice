@@ -66,11 +66,14 @@ docker run -d --name can-voice-probe --restart always \
 镜像由 `.github/workflows/probe-image.yml` 在 main 上构建并推到 GHCR，
 `latest` 和一个 `sha-<commit>` 两个标签，`linux/amd64` + `linux/arm64`。
 
-> **仓库是私有的，所以这个包默认也是私有的。** 拉之前要先
-> `echo <PAT> | docker login ghcr.io -u <你的用户名> --password-stdin`
-> （PAT 需要 `read:packages`）。想免登录拉取，就去
-> `github.com/orgs/JianyueLab-Org/packages` 把 `can-voice-probe`
-> 这个包的可见性改成 public —— **改的是包，不是仓库**，仓库可以继续私有。
+> **包是公开的，直接拉，不用 `docker login`。仓库本身仍然是私有的。**
+> 两者的可见性是分开的：包在
+> `github.com/orgs/JianyueLab-Org/packages/container/can-voice-probe/settings`
+> 里单独设成了 public，源码没有跟着外流。
+>
+> 这一项**只能在 Web UI 改**：REST 的 `PATCH …/packages/container/<name>` 和
+> `…/visibility` 都是 404，GraphQL 的 Mutation 里也只有 `deletePackageVersion`。
+> 哪天要改回去，路径是同一个页面底部的 Danger Zone。
 
 ### 3'. 二进制与单元（不想用 Docker 时）
 
