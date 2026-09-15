@@ -326,11 +326,11 @@ pub type SimConnectSource = Unavailable;
 mod ffi {
     //! SimConnect 的 C API 绑定。
     //!
-    //! # 这一段在这个仓库的 CI 里**从来没有被编译过**
+    //! # 编译期不依赖 SimConnect SDK
     //!
-    //! CI 跑在 Linux 上，开发机是 macOS，而 `SimConnect.dll` 只有 Windows 有。
-    //! 上面那一整层（SimVar 表、单位换算、[`super::snapshot`]）是纯函数、到处都
-    //! 能测，**这一段不是**——它必须在 Windows 上编一次、连一次真实模拟器才算数。
+    //! DLL 是**运行时**加载的，所以编译这一段不需要那份不能随仓库分发的 SDK
+    //! ——CI 的 Windows runner 因此能真的编译它。**但"编得过"不等于"对"**：
+    //! 函数签名、结构体布局、常量取值这些只有连上一次真实模拟器才验得了。
     //!
     //! 调用顺序照微软的文档：
     //!
@@ -383,42 +383,120 @@ mod ffi {
         // 之后紧跟着 define_count 个 f64。
     }
 
-    #[link(name = "SimConnect")]
+    // **运行时加载 SimConnect.dll，不在链接期依赖它。**
+    //
+    // 写成 `#[link(name = "SimConnect")]` 的话，编译这个 crate 就需要
+    // SimConnect SDK 的 .lib —— 而那份 SDK 不能随仓库分发，于是 CI 编不了，
+    // 于是这一整段代码在合并之前没有任何东西看过它。运行时加载把编译期依赖
+    // 变成零：**CI 的 Windows runner 现在会真的编译这一段**，而 DLL 由用户
+    // 机器上的 MSFS 提供（模拟器装好就有）。
+    //
+    // 代价是每个函数要自己声明一次类型并 GetProcAddress 一次。名字取不到时
+    // 说得出是哪一个，而不是笼统的"打不开"。
+
+    type FnOpen = unsafe extern "system" fn(
+        *mut Handle,
+        *const c_char,
+        *mut c_void,
+        c_ulong,
+        *mut c_void,
+        c_ulong,
+    ) -> c_int;
+    type FnClose = unsafe extern "system" fn(Handle) -> c_int;
+    type FnAddToDataDefinition = unsafe extern "system" fn(
+        Handle,
+        c_ulong,
+        *const c_char,
+        *const c_char,
+        c_int,
+        f32,
+        c_ulong,
+    ) -> c_int;
+    type FnRequestDataOnSimObject = unsafe extern "system" fn(
+        Handle,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+    ) -> c_int;
+    type FnGetNextDispatch =
+        unsafe extern "system" fn(Handle, *mut *mut Recv, *mut c_ulong) -> c_int;
+
     extern "system" {
-        fn SimConnect_Open(
-            handle: *mut Handle,
-            name: *const c_char,
-            window: *mut c_void,
-            user_event: c_ulong,
-            event: *mut c_void,
-            config_index: c_ulong,
-        ) -> c_int;
-        fn SimConnect_Close(handle: Handle) -> c_int;
-        fn SimConnect_AddToDataDefinition(
-            handle: Handle,
-            define_id: c_ulong,
-            datum_name: *const c_char,
-            units_name: *const c_char,
-            datum_type: c_int,
-            epsilon: f32,
-            datum_id: c_ulong,
-        ) -> c_int;
-        fn SimConnect_RequestDataOnSimObject(
-            handle: Handle,
-            request_id: c_ulong,
-            define_id: c_ulong,
-            object_id: c_ulong,
-            period: c_ulong,
-            flags: c_ulong,
-            origin: c_ulong,
-            interval: c_ulong,
-            limit: c_ulong,
-        ) -> c_int;
-        fn SimConnect_GetNextDispatch(
-            handle: Handle,
-            data: *mut *mut Recv,
-            size: *mut c_ulong,
-        ) -> c_int;
+        fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    /// SimConnect.dll 里我们用到的那几个入口。
+    struct Api {
+        open: FnOpen,
+        close: FnClose,
+        add_to_data_definition: FnAddToDataDefinition,
+        request_data_on_sim_object: FnRequestDataOnSimObject,
+        get_next_dispatch: FnGetNextDispatch,
+    }
+
+    impl Api {
+        /// 加载一次。**DLL 由模拟器提供**：MSFS 装好就在 PATH 上找得到，
+        /// 没装的话这里就是"找不到 SimConnect.dll"——那正是要对用户说的话。
+        fn load() -> Result<&'static Api, String> {
+            use std::sync::OnceLock;
+            static API: OnceLock<Result<Api, String>> = OnceLock::new();
+            match API.get_or_init(Api::load_once) {
+                Ok(api) => Ok(api),
+                Err(e) => Err(e.clone()),
+            }
+        }
+
+        fn load_once() -> Result<Api, String> {
+            let name = std::ffi::CString::new("SimConnect.dll").expect("static");
+            let module = unsafe { LoadLibraryA(name.as_ptr()) };
+            if module.is_null() {
+                return Err(
+                    "could not load SimConnect.dll; is Microsoft Flight Simulator installed?"
+                        .into(),
+                );
+            }
+            // 取一个入口。**取不到要说出是哪一个**——一个笼统的"打不开"会让人
+            // 去查模拟器有没有开，而实际问题是 DLL 版本太老、少了这个导出。
+            fn symbol(module: *mut c_void, name: &str) -> Result<*mut c_void, String> {
+                let c = std::ffi::CString::new(name).map_err(|e| e.to_string())?;
+                let address = unsafe { GetProcAddress(module, c.as_ptr()) };
+                if address.is_null() {
+                    return Err(format!("SimConnect.dll has no {name}; it is too old"));
+                }
+                Ok(address)
+            }
+            unsafe {
+                Ok(Api {
+                    open: std::mem::transmute::<*mut c_void, FnOpen>(symbol(
+                        module,
+                        "SimConnect_Open",
+                    )?),
+                    close: std::mem::transmute::<*mut c_void, FnClose>(symbol(
+                        module,
+                        "SimConnect_Close",
+                    )?),
+                    add_to_data_definition: std::mem::transmute::<*mut c_void, FnAddToDataDefinition>(
+                        symbol(module, "SimConnect_AddToDataDefinition")?,
+                    ),
+                    request_data_on_sim_object: std::mem::transmute::<
+                        *mut c_void,
+                        FnRequestDataOnSimObject,
+                    >(symbol(
+                        module,
+                        "SimConnect_RequestDataOnSimObject",
+                    )?),
+                    get_next_dispatch: std::mem::transmute::<*mut c_void, FnGetNextDispatch>(
+                        symbol(module, "SimConnect_GetNextDispatch")?,
+                    ),
+                })
+            }
+        }
     }
 
     fn ok(result: c_int) -> bool {
@@ -436,10 +514,11 @@ mod ffi {
 
     impl SimVarSource for SimConnectSource {
         fn open(&mut self) -> Result<(), String> {
-            let name = std::ffi::CString::new("xpc-for-can").map_err(|e| e.to_string())?;
+            let api = Api::load()?;
+            let name = std::ffi::CString::new("msfs-for-can").map_err(|e| e.to_string())?;
             let mut handle: Handle = std::ptr::null_mut();
             unsafe {
-                if !ok(SimConnect_Open(
+                if !ok((api.open)(
                     &mut handle,
                     name.as_ptr(),
                     std::ptr::null_mut(),
@@ -453,7 +532,7 @@ mod ffi {
                 for (_, simvar, units) in all_simvars() {
                     let name = std::ffi::CString::new(simvar).map_err(|e| e.to_string())?;
                     let units = std::ffi::CString::new(units).map_err(|e| e.to_string())?;
-                    if !ok(SimConnect_AddToDataDefinition(
+                    if !ok((api.add_to_data_definition)(
                         handle,
                         DEF_ID,
                         name.as_ptr(),
@@ -462,11 +541,11 @@ mod ffi {
                         0.0,
                         u32::MAX,
                     )) {
-                        SimConnect_Close(handle);
+                        (api.close)(handle);
                         return Err(format!("the simulator does not know the SimVar {simvar}"));
                     }
                 }
-                if !ok(SimConnect_RequestDataOnSimObject(
+                if !ok((api.request_data_on_sim_object)(
                     handle,
                     REQ_ID,
                     DEF_ID,
@@ -477,7 +556,7 @@ mod ffi {
                     0,
                     0,
                 )) {
-                    SimConnect_Close(handle);
+                    (api.close)(handle);
                     return Err("the simulator refused the data request".into());
                 }
             }
@@ -489,14 +568,14 @@ mod ffi {
             if self.handle.is_null() {
                 return Err("not connected".into());
             }
+            let api = Api::load()?;
             let names: Vec<&'static str> =
                 all_simvars().into_iter().map(|(name, _, _)| name).collect();
             let mut out = HashMap::new();
             loop {
                 let mut data: *mut Recv = std::ptr::null_mut();
                 let mut size: c_ulong = 0;
-                let result =
-                    unsafe { SimConnect_GetNextDispatch(self.handle, &mut data, &mut size) };
+                let result = unsafe { (api.get_next_dispatch)(self.handle, &mut data, &mut size) };
                 if !ok(result) || data.is_null() {
                     // 队列空了就是空了，不是错误。
                     return Ok(out);
@@ -523,10 +602,13 @@ mod ffi {
         }
 
         fn close(&mut self) {
-            if !self.handle.is_null() {
-                unsafe { SimConnect_Close(self.handle) };
-                self.handle = std::ptr::null_mut();
+            if self.handle.is_null() {
+                return;
             }
+            if let Ok(api) = Api::load() {
+                unsafe { (api.close)(self.handle) };
+            }
+            self.handle = std::ptr::null_mut();
         }
     }
 
