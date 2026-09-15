@@ -64,6 +64,8 @@ pub struct Aircraft {
     /// 渲染端还没为这架匹配过模型。
     pub model_dirty: bool,
     pub config: Config,
+    /// 匹配好的 CSL 模型文件路径。渲染端认这个。
+    pub object: String,
     /// 上一次问配置的时刻。**只能轮询**——不问的话所有他机永远全程关灯、
     /// 光杆落地。
     pub config_asked: f64,
@@ -160,6 +162,8 @@ pub struct Entry {
     pub livery: String,
     pub csl: String,
     pub model_dirty: bool,
+    /// 匹配好的 CSL 模型文件路径。空的表示还没匹配上。
+    pub object: String,
     pub range_nm: Option<f64>,
     #[serde(flatten)]
     pub config: Config,
@@ -291,6 +295,7 @@ impl TrafficTable {
                     livery: a.livery.clone(),
                     csl: a.csl.clone(),
                     model_dirty: a.model_dirty,
+                    object: a.object.clone(),
                     range_nm: origin.map(|(lat, lon)| {
                         distance_nm(lat, lon, position.latitude, position.longitude)
                     }),
@@ -317,6 +322,21 @@ impl TrafficTable {
             entries.truncate(limit);
         }
         entries
+    }
+
+    /// 记下匹配好的模型文件，并清掉标记。
+    ///
+    /// 和 [`TrafficTable::mark_model_clean`] 同一条规矩：**带上匹配时用的
+    /// 机型/航司**，对不上就什么都不做，下一帧再匹配一次。
+    pub fn set_model(&mut self, callsign: &str, equipment: &str, airline: &str, object: &str) {
+        let Some(a) = self.aircraft.get_mut(callsign) else {
+            return;
+        };
+        if a.equipment != equipment || a.airline != airline {
+            return;
+        }
+        a.object = object.to_string();
+        a.model_dirty = false;
     }
 
     /// 渲染端匹配过模型之后回来清标记。

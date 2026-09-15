@@ -19,6 +19,7 @@
 use can_voice_app::Bridge;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
+use can_voice_sim::csl::ModelSet;
 use can_voice_sim::traffic::{Entry, Sample, TrafficTable};
 use can_voice_sim::{bridge, xplane, Snapshot};
 use can_voice_token::TokenSource;
@@ -44,6 +45,7 @@ pub struct App {
     sim: xplane::Link,
     fsd: Mutex<Option<PilotHandle>>,
     traffic: Arc<Mutex<TrafficTable>>,
+    csl: Arc<Mutex<ModelSet>>,
     http: reqwest::Client,
     ptt: Mutex<Option<can_voice_ptt::PttWatcher>>,
 }
@@ -55,6 +57,9 @@ impl App {
             sim: xplane::Link::spawn(),
             fsd: Mutex::new(None),
             traffic: Arc::new(Mutex::new(TrafficTable::new())),
+            // CSL 在**后台**加载：几个 GB 的包扫一遍要几十秒，放在这里会让
+            // 窗口几十秒打不开，而用户看到的是程序卡死。
+            csl: Arc::new(Mutex::new(ModelSet::default())),
             http: reqwest::Client::builder()
                 .user_agent(concat!("xpc-for-can/", env!("CARGO_PKG_VERSION")))
                 .build()
@@ -62,6 +67,16 @@ impl App {
             ptt: Mutex::new(None),
         }
     }
+}
+
+/// CSL 包放在哪儿。
+///
+/// 默认是 X-Plane 那套插件的老地方；装在别处（几个 GB 的包常常在另一块盘上）
+/// 就用 `CAN_XPC_CSL_DIR` 指过去。
+fn csl_root() -> std::path::PathBuf {
+    std::env::var_os("CAN_XPC_CSL_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("Resources/plugins/CSL"))
 }
 
 impl Default for App {
@@ -183,7 +198,7 @@ async fn connect(
     spawn_traffic_reader(fsd.traffic(), app.traffic.clone());
     spawn_asking(fsd.clone(), app.traffic.clone());
     spawn_pump(fsd.clone(), app.sim.clone(), app.voice.clone());
-    spawn_plugin_feed(app.sim.clone(), app.traffic.clone());
+    spawn_plugin_feed(app.sim.clone(), app.traffic.clone(), app.csl.clone());
     *app.fsd.lock().expect("fsd") = Some(fsd);
     Ok(())
 }
@@ -462,7 +477,11 @@ fn spawn_pump(fsd: PilotHandle, sim: xplane::Link, voice: Arc<Bridge>) {
 }
 
 /// 每 50 ms 往插件推一帧。比位置上报快，插值才有意义。
-fn spawn_plugin_feed(sim: xplane::Link, table: Arc<Mutex<TrafficTable>>) {
+fn spawn_plugin_feed(
+    sim: xplane::Link,
+    table: Arc<Mutex<TrafficTable>>,
+    csl: Arc<Mutex<ModelSet>>,
+) {
     tokio::spawn(async move {
         let Ok(socket) = tokio::net::UdpSocket::bind("127.0.0.1:0").await else {
             tracing::warn!("could not open the plugin socket; traffic will not be drawn");
@@ -478,6 +497,23 @@ fn spawn_plugin_feed(sim: xplane::Link, table: Arc<Mutex<TrafficTable>>) {
             let entries = {
                 let mut table = table.lock().expect("traffic");
                 table.prune(now);
+                let entries = table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM));
+                // 匹配还没匹配过的。**放在这里而不是收到机型那一刻**：
+                // 只给要画的那几架匹配，一屏之外的不花这个钱。
+                let models = csl.lock().expect("csl");
+                for e in entries.iter().filter(|e| e.model_dirty) {
+                    if let Some((m, level)) = models.match_model(&e.equipment, &e.airline, &e.csl) {
+                        tracing::debug!(callsign = %e.callsign, ?level, model = %m.name, "matched");
+                        table.set_model(
+                            &e.callsign,
+                            &e.equipment,
+                            &e.airline,
+                            &m.path.to_string_lossy(),
+                        );
+                    }
+                }
+                // 匹配之后再取一次，这一份才带得上刚填好的模型路径。
+                drop(models);
                 table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM))
             };
             let message = serde_json::json!({ "traffic": entries });
@@ -489,13 +525,30 @@ fn spawn_plugin_feed(sim: xplane::Link, table: Arc<Mutex<TrafficTable>>) {
     });
 }
 
+/// 在后台把 CSL 扫进来。几个 GB 的包要几十秒，不能挡着窗口。
+fn spawn_csl_load(csl: Arc<Mutex<ModelSet>>) {
+    std::thread::spawn(move || {
+        let root = csl_root();
+        let loaded = can_voice_sim::csl::load(&root);
+        if loaded.is_empty() {
+            tracing::warn!(
+                root = %root.display(),
+                "no CSL models found; other aircraft will not be drawn.                  set CAN_XPC_CSL_DIR if the packages live elsewhere"
+            );
+        }
+        *csl.lock().expect("csl") = loaded;
+    });
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(env_or("RUST_LOG", "info"))
         .init();
 
+    let app = App::new();
+    spawn_csl_load(app.csl.clone());
     tauri::Builder::default()
-        .manage(App::new())
+        .manage(app)
         .invoke_handler(tauri::generate_handler![
             connect,
             disconnect,

@@ -394,6 +394,66 @@ pub fn parse_manifest(directory: &Path, text: &str) -> Vec<Model> {
     models
 }
 
+/// 在一个目录树里找所有 CSL 包（含 `xsb_aircraft.txt` 的目录）。
+///
+/// **必须跟着符号链接走。** CSL 包动辄几个 GB，"放在另一块盘、在
+/// `Resources/plugins` 下留个链接"是 X-Plane 这边最常见的安置方式——不跟，
+/// 整套 CSL 一个包都扫不到，而现象只是他机不显示。Windows 的目录联接
+/// （junction）也算链接。
+///
+/// 代价是要自己防环：跟着链接走可能绕回上层目录。按规范化路径记账，进过的
+/// 目录不再进。
+pub fn find_packages(root: &Path) -> Vec<PathBuf> {
+    let mut packages = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        let real = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+        if !seen.insert(real) {
+            continue; // 绕回来了
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut children = Vec::new();
+        let mut is_package = false;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // `file_type()` 不跟链接走，`metadata()` 跟——这里要跟。
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                children.push(path);
+            } else if path.file_name().is_some_and(|n| n == "xsb_aircraft.txt") {
+                is_package = true;
+            }
+        }
+        if is_package {
+            // 包里面不会再套包，这一枝不用往下走。
+            packages.push(dir);
+        } else {
+            queue.extend(children);
+        }
+    }
+    packages.sort();
+    packages
+}
+
+/// 把一个目录下所有 CSL 包读进来。
+pub fn load(root: &Path) -> ModelSet {
+    let mut models = Vec::new();
+    for package in find_packages(root) {
+        let manifest = package.join("xsb_aircraft.txt");
+        match std::fs::read_to_string(&manifest) {
+            Ok(text) => models.extend(parse_manifest(&package, &text)),
+            Err(e) => tracing::warn!(path = %manifest.display(), error = %e, "cannot read"),
+        }
+    }
+    tracing::info!(models = models.len(), root = %root.display(), "loaded CSL models");
+    ModelSet::new(models)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +645,86 @@ ICAO A320
         assert_eq!(category_of("ZZZZ"), "");
         assert_eq!(generic_for("B77W"), "B738");
         assert_eq!(generic_for("ZZZZ"), DEFAULT_TYPE);
+    }
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("can-voice-csl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).expect("mkdir");
+        p
+    }
+
+    fn package(root: &Path, name: &str, icao: &str) {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(
+            dir.join("xsb_aircraft.txt"),
+            format!("EXPORT_NAME {name}\nOBJ8_AIRCRAFT {icao}_X\nOBJ8 SOLID YES {icao}.obj\nICAO {icao}\n"),
+        )
+        .expect("write");
+    }
+
+    #[test]
+    fn packages_are_found_anywhere_under_the_root() {
+        let root = temp_dir("nested");
+        package(&root, "BB_Airbus", "A320");
+        package(&root.join("deep").join("deeper"), "BB_Boeing", "B738");
+        let found = find_packages(&root);
+        assert_eq!(found.len(), 2, "{found:?}");
+
+        let set = load(&root);
+        assert_eq!(set.len(), 2);
+        let (m, _) = set.match_model("A320", "", "").expect("match");
+        assert_eq!(m.icao, "A320");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 包里面不会再套包，扫到一个就不往下走——一个 CSL 包里有几千个子目录。
+    #[test]
+    fn a_package_is_not_descended_into() {
+        let root = temp_dir("nodescend");
+        package(&root, "BB", "A320");
+        package(&root.join("BB").join("inner"), "INNER", "B738");
+        let found = find_packages(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// **必须跟着符号链接走。** CSL 包动辄几个 GB，"放在另一块盘、留个链接"
+    /// 是最常见的安置方式——不跟，整套 CSL 一个包都扫不到，而现象只是他机
+    /// 不显示。
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_package_is_found() {
+        let root = temp_dir("symlink");
+        let elsewhere = temp_dir("symlink-target");
+        package(&elsewhere, "BB_Far", "B77W");
+        std::os::unix::fs::symlink(elsewhere.join("BB_Far"), root.join("BB_Far")).expect("symlink");
+        assert_eq!(find_packages(&root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// 跟着链接走可能绕回上层目录。绕回来要停，不能无限转。
+    #[cfg(unix)]
+    #[test]
+    fn a_loop_does_not_hang_the_scan() {
+        let root = temp_dir("loop");
+        package(&root, "BB", "A320");
+        std::os::unix::fs::symlink(&root, root.join("back")).expect("symlink");
+        assert_eq!(find_packages(&root).len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_root_is_empty_not_a_panic() {
+        assert!(find_packages(Path::new("/definitely/not/here")).is_empty());
+        assert!(load(Path::new("/definitely/not/here")).is_empty());
     }
 }

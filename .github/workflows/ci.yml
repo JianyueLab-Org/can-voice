@@ -119,6 +119,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # X-Plane 插件跑在 X-Plane 自己的 Python 里，所以分帧那件事两边各有一份
+      # 实现，而**只有 Rust 那一侧有单元测试**。两边一旦对不上，表现是插件从
+      # 某一帧起再也收不到任何数据、整个天空清空——can-audio 就是这么坏过一次。
+      #
+      # 放在这个 job 而不是单开一个：金文件是上一步 `cargo test` 生成的，
+      # 拆开就要把它提交上来再比对，多一层没必要的间接。
+      - name: 插件的分帧要和 Rust 那一侧对得上
+        run: python3 apps/xpc/plugin/test_bridge.py
 
   e2e:
     name: e2e (rust client against the real server)
