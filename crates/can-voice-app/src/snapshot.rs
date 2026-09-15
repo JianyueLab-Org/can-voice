@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// 这条链路是怎么结束的。`None` 表示还没结束。
 ///
 /// **三种要分得开**，因为对人说的话完全不一样。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum Ended {
     /// 普通下线。
     Offline,
@@ -28,7 +28,7 @@ pub enum Ended {
 }
 
 /// 链路健康。掉线那一行要带着它一起打出来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Health {
     pub rtt_ms: u32,
     pub sent: u64,
@@ -37,7 +37,7 @@ pub struct Health {
 }
 
 /// 界面要显示的一切。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Snapshot {
     pub link: LinkState,
     pub ended: Option<Ended>,
@@ -380,5 +380,57 @@ mod tests {
             lost: 1,
         });
         assert_eq!(s.health.as_ref().map(|h| h.rtt_ms), Some(42));
+    }
+
+    /// **快照的 JSON 形状是一份跨语言契约，这里把它钉住。**
+    ///
+    /// 四个 Tauri 客户端的界面照着这些串写判断——`"Online"`、`"Evicted"`、
+    /// `{"Refused":"ProtoUnsupported"}`。改一个变体名，Rust 这边照样编译、
+    /// 照样通过所有别的测试，而界面会安静地落到"连接被拒"那条兜底分支上：
+    /// 一个版本太旧的用户于是去查密码，而不是去更新客户端。
+    ///
+    /// 特别钉住两件容易在重构里丢掉的事：`receiving` 的整数键被 serde_json
+    /// 写成**字符串**（前端因此必须用 `String(khz)` 去查），以及
+    /// `denied_xc` 的 `[u32; 2]` 是一个**二元数组**而不是对象。
+    #[test]
+    fn the_snapshot_json_is_the_shape_the_ui_reads() {
+        let mut s = online();
+        s.apply(&Event::RxStart {
+            freq_khz: 121_800,
+            speaker: 7,
+        });
+        s.apply(&Event::XcDenied {
+            a_khz: 121_800,
+            b_khz: 124_550,
+            reason: String::new(),
+        });
+        let v = serde_json::to_value(&s).expect("serialize");
+
+        assert_eq!(v["link"], serde_json::json!("Online"));
+        assert_eq!(v["ended"], serde_json::Value::Null);
+        // 整数键是字符串键。
+        assert_eq!(v["receiving"]["121800"], serde_json::json!([7]));
+        // 二元数组，不是 {a,b}。
+        assert_eq!(v["denied_xc"], serde_json::json!([[121_800, 124_550]]));
+
+        // 三种终态各自的串——界面对它们说三句不同的话。
+        for (ended, want) in [
+            (Ended::Offline, serde_json::json!("Offline")),
+            (Ended::Evicted, serde_json::json!("Evicted")),
+            (
+                Ended::Refused(RefusedReason::ProtoUnsupported),
+                serde_json::json!({ "Refused": "ProtoUnsupported" }),
+            ),
+            (
+                Ended::Refused(RefusedReason::TokenExpired),
+                serde_json::json!({ "Refused": "TokenExpired" }),
+            ),
+            (
+                Ended::Refused(RefusedReason::Other("mystery".into())),
+                serde_json::json!({ "Refused": { "Other": "mystery" } }),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&ended).expect("serialize"), want);
+        }
     }
 }

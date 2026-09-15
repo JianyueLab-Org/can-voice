@@ -6,3 +6,10 @@ can-voice-probe-*.json
 
 # Rust 构建产物（P3 起）。Go 那半边没有对应物，所以此前不需要这一条。
 /target/
+
+# Tauri 客户端（P4 起）。三种产物，三个位置：
+# 前端的 node_modules/dist、Rust 侧的 target。`bun.lock` 要提交。
+apps/*/node_modules/
+apps/*/dist/
+apps/*/src-tauri/target/
+apps/*/src-tauri/gen/

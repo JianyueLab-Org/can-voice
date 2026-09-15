@@ -41,7 +41,7 @@ pub const CLOSE_PROTOCOL_VIOLATION: u64 = 3;
 /// `Reconnecting` 意味着链路还活着，**不要丢掉对象引用**；
 /// `Offline` 意味着它彻底没了。`Evicted` 是 `Offline` 的一种，
 /// 但要单独告诉用户"账号在别处登录了"。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum LinkState {
     Connecting,
     Online,
@@ -51,7 +51,7 @@ pub enum LinkState {
 }
 
 /// 握手被拒的原因。四个串都是服务端**专门为客户端造的**，有测试钉住它们稳定。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum RefusedReason {
     /// token 本身没问题，只是过期了。**唯一可恢复的一条。**
     TokenExpired,

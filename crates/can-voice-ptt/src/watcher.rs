@@ -52,6 +52,14 @@ impl PttWatcher {
         self.transmitting.load(Ordering::Relaxed)
     }
 
+    /// 把那一位借出去，让上层用自己的节奏去读。
+    ///
+    /// 借的是**同一个**原子量而不是一份拷贝：拷贝会让"松手"这件事在两处各判一次，
+    /// 而它们迟早会不一致——一次没对上就是麦克风常开。
+    pub fn transmitting_flag(&self) -> Arc<AtomicBool> {
+        self.transmitting.clone()
+    }
+
     /// 换一组绑定。**不会停掉任何已经起来的监听**（rdev 停不了），
     /// 但会把新需要的那些起起来。
     pub fn set_bindings(&self, bindings: Vec<Binding>) {

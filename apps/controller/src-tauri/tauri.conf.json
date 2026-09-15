@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "audio-for-can",
+  "version": "3.0.0",
+  "identifier": "net.ceruleanavi.audio-for-can",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:4330",
+    "beforeDevCommand": "bun run dev",
+    "beforeBuildCommand": "bun run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "audio-for-can",
+        "width": 720,
+        "height": 560,
+        "minWidth": 520,
+        "minHeight": 360
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": "all" }
+}
