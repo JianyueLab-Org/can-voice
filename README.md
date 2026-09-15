@@ -40,7 +40,8 @@ apt install autoconf automake libtool libasound2-dev        # Debian/Ubuntu
 
 缺了的话报的是一条看不出所以然的 `Failed to autogen Opus`。
 
-**Linux 还要 `libasound2-dev`**：cpal 在那边走 ALSA，缺了报的是
+**Linux 还要 `libx11-dev libxi-dev libxtst-dev libudev-dev`**（`can-voice-ptt` 的
+rdev 走 Xlib、gilrs 走 udev），以及 `libasound2-dev`：cpal 在那边走 ALSA，缺了报的是
 `failed to run custom build command for \`alsa-sys\``。macOS 上 cpal 走 CoreAudio，
 所以这一条**在 mac 开发机上永远不会露头**——CI 的 Linux runner 第一次跑就抓到了它。
 

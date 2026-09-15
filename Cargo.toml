@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/can-voice-proto", "crates/can-voice-client"]
+members = ["crates/can-voice-proto", "crates/can-voice-client", "crates/can-voice-ptt"]
 
 [workspace.package]
 version = "0.1.0"

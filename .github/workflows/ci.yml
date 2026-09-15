@@ -124,7 +124,13 @@ jobs:
       # "failed to run custom build command for `alsa-sys`"——而 macOS 上 cpal 走
       # CoreAudio，所以这一条**在开发机上永远不会露头**，只有 Linux 才会。
       # 这正是这个 job 第一次跑就抓到的东西。
-      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool libasound2-dev
+      #
+      # X11 + udev：`can-voice-ptt` 的 rdev 在 Linux 上走 Xlib、gilrs 走 udev。
+      # 同样是"只在 Linux 露头"的那一类，所以照上一条的教训一次装齐。
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -143,7 +149,10 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - run: sudo apt-get update && sudo apt-get install -y autoconf automake libtool libasound2-dev
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          autoconf automake libtool libasound2-dev
+          libx11-dev libxi-dev libxtst-dev libudev-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # **这是唯一能发现各层拼接错误的测试**，而两半都在这个仓库里，所以它是
