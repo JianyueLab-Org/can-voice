@@ -278,6 +278,16 @@ amd64 + arm64）。
 > 镜像里**没有 shell**（distroless static），看日志用 `docker compose logs`，
 > 不要指望 `docker exec` 进去。
 
+> **仓库是私有的，所以这个包默认也是私有的**，拉之前要先在那台机器上登录一次：
+>
+>     echo <PAT> | docker login ghcr.io -u <你的用户名> --password-stdin
+>
+> PAT 需要 `read:packages`。想免登录拉取，去
+> `github.com/orgs/JianyueLab-Org/packages/container/can-voice/settings`
+> 把可见性改成 public —— **改的是包，不是仓库**，源码不会跟着外流。
+> 这一项**只能在 Web UI 改**：REST 的 `PATCH …/packages/container/<name>` 是
+> 404，GraphQL 的 Mutation 里也只有 `deletePackageVersion`。
+
 启动成功的样子：日志里有一行监听地址，**没有**任何 `CAN_VOICE_* is required`。
 缺任何必需项它会直接退出，而不是用一个默认值悄悄跑起来。
 
