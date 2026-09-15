@@ -181,6 +181,10 @@ jobs:
           workspaces: apps/${{ matrix.app }}/src-tauri
       # tauri 的 build.rs 要 frontendDist 存在才肯跑，而这个 job 不构建前端。
       # 给它一个空目录就够——这里验的是 Rust 那一半。
+      #
+      # 图标那一头不用在这里补：`icons/icon.ico` 是提交在仓库里的。Windows 上
+      # tauri-build 要拿它生成资源文件，**没有就直接编译失败**，而在 Linux 和
+      # macOS 上它压根不看这个文件——这个 job 第一次跑就是被这一条挡下来的。
       - run: New-Item -ItemType Directory -Force -Path ../dist | Out-Null
         shell: pwsh
       - run: cargo check --all-targets
