@@ -15,7 +15,6 @@ crates/can-voice-fsd    Rust：FSD 协议客户端那一侧，通播端与飞行
 crates/can-voice-atis   Rust：通播的逻辑（报文 / 模板 / 读法）＋服务端通播机器人
 apps/controller         Tauri：管制语音客户端 audio-for-can（P4 Task 4）
 apps/atis               Tauri：通播制作客户端 atis-for-can（P4 Task 5）
-probe/                  P1 的一次性连通性探针，结论产出后删除
 ```
 
 **桌面端不在 workspace 里**（根 `Cargo.toml` 的 `exclude = ["apps"]`）：它们各自
@@ -36,8 +35,11 @@ xpc / msfs。
 `text_atis`，念的是电码原文的读法；本地合成念的是模板渲染出来的语音形态。
 详见 `crates/can-voice-atis/src/lib.rs` 的模块头。在此之前 `apps/atis` 只做稿子。
 
-`probe/` 的代码已齐、**尚未部署**——剩下的部署、发放、收数与判定见
-`probe/deploy/README-部署.md`，给测试用户的说明是 `probe/README-测试说明.md`。
+## 传输只有 datagram，没有 stream 回退
+
+P2 Task 12（stream 回退通道）**定为不做**，P1 的连通性探针也随之删掉：
+网络可达性不在这个项目的考虑范围内。语音走 QUIC 不可靠 datagram 一条路，
+UDP 不通就是不通，客户端不会退到别的通道上去。
 
 ## 服务端（Go）
 
