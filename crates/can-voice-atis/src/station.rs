@@ -39,12 +39,12 @@ pub struct Station {
     pub text: tokio::sync::watch::Receiver<String>,
 }
 
-/// 连语音服务端要的东西。**没有 token 字段**——见 [`crate::TokenSource`]。
+/// 连语音服务端要的东西。**没有 token 字段**——票只从 `TokenSource` 来。
 #[derive(Debug, Clone)]
 pub struct VoiceSettings {
     pub server: String,
     pub server_name: String,
-    pub tokens: crate::TokenSource,
+    pub tokens: can_voice_token::TokenSource,
 }
 
 /// 跑一路，直到被取消。
@@ -64,22 +64,25 @@ pub async fn run(station: Station) {
 }
 
 async fn cycle(station: &Station) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // **每次连接都现换一张票。** token 的有效期是 60 秒，攒着没有意义；
-    // 而且重连走的是票不是密码，不消耗登录限流的配额。
-    let token = station.voice.tokens.fetch().await?;
-
-    let client = VoiceClient::connect(Config {
-        server: station.voice.server.clone(),
-        server_name: station.voice.server_name.clone(),
-        token,
-        client_id: concat!("can-voice-atis/", env!("CARGO_PKG_VERSION")).into(),
-        follow: String::new(),
-        input_device: None,
-        output_device: None,
-        // 没有声卡：这台机器上没有麦克风，音频是 TTS 合成出来的。
-        audio_devices: false,
-        extra_roots: Vec::new(),
-    })
+    // **每次连接都现换一张票，过期了就再换一张试一次**（`can_voice_token::connect`）。
+    // token 的有效期是 60 秒，攒着没有意义；而且重连走的是票不是密码，
+    // 不消耗登录限流的配额。
+    let client = can_voice_token::connect(
+        Config {
+            server: station.voice.server.clone(),
+            server_name: station.voice.server_name.clone(),
+            // 这个值会被 `can_voice_token::connect` 覆盖；票只从 TokenSource 来。
+            token: String::new(),
+            client_id: concat!("can-voice-atis/", env!("CARGO_PKG_VERSION")).into(),
+            follow: String::new(),
+            input_device: None,
+            output_device: None,
+            // 没有声卡：这台机器上没有麦克风，音频是 TTS 合成出来的。
+            audio_devices: false,
+            extra_roots: Vec::new(),
+        },
+        &station.voice.tokens,
+    )
     .await?;
 
     client.set_subscription(can_voice_proto::control::Sub {

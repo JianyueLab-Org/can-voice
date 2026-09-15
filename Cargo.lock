@@ -124,6 +124,7 @@ version = "0.1.0"
 dependencies = [
  "can-voice-client",
  "can-voice-proto",
+ "can-voice-token",
  "reqwest",
  "serde",
  "serde_json",
@@ -172,6 +173,19 @@ dependencies = [
  "rdev",
  "serde",
  "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-token"
+version = "0.1.0"
+dependencies = [
+ "can-voice-client",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
