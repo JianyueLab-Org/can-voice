@@ -1,0 +1,12 @@
+[package]
+name = "can-voice-sim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+can-voice-fsd = { path = "../can-voice-fsd" }
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { version = "1.52", features = ["rt", "net", "time", "sync", "macros"] }

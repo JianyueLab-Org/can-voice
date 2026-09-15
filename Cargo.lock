@@ -203,6 +203,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-sim"
+version = "0.1.0"
+dependencies = [
+ "can-voice-fsd",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "can-voice-token"
 version = "0.1.0"
 dependencies = [
