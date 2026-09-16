@@ -250,10 +250,7 @@ mod tests {
             !msg.contains("could not reach"),
             "401 报成了网络问题: {msg}"
         );
-        assert!(
-            msg.contains("password"),
-            "401 该说到密码: {msg}"
-        );
+        assert!(msg.contains("password"), "401 该说到密码: {msg}");
     }
 
     /// 而 can-api 自己坏了要看得出来是它坏了，不要归到密码上。

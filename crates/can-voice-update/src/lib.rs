@@ -276,17 +276,16 @@ mod tests {
     async fn a_newer_build_comes_back_as_an_update() {
         let (origin, req) = serve_once("200 OK", reply("27.1.0", true, true).to_string()).await;
 
-        let got = check(
-            &reqwest::Client::new(),
-            &origin,
-            "audio-for-can",
-            "27.0.3",
-        )
-        .await
-        .expect("a newer build must be reported");
+        let got = check(&reqwest::Client::new(), &origin, "audio-for-can", "27.0.3")
+            .await
+            .expect("a newer build must be reported");
 
         assert_eq!(got.version, "27.1.0");
-        assert!(got.download.contains("clients/download"), "{}", got.download);
+        assert!(
+            got.download.contains("clients/download"),
+            "{}",
+            got.download
+        );
 
         // 问的是 can-api 那条已发布的路径，而且带上了自己是谁、现在是哪一版：
         // 少了 client 参数的话 can-api 不知道该拿哪个包的版本来比。
@@ -358,7 +357,9 @@ mod tests {
     /// 回包不该能让客户端去打开一个本地文件或者一个自定义协议处理器。
     #[test]
     fn only_an_https_url_is_opened() {
-        assert!(is_openable("https://api.ceruleanavi.net/api/v1/clients/download/xpc-for-can"));
+        assert!(is_openable(
+            "https://api.ceruleanavi.net/api/v1/clients/download/xpc-for-can"
+        ));
         assert!(!is_openable("http://api.ceruleanavi.net/x"));
         assert!(!is_openable("file:///etc/passwd"));
         assert!(!is_openable("javascript:alert(1)"));
