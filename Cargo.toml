@@ -10,6 +10,7 @@ members = [
     "crates/can-voice-settings",
     "crates/can-voice-token",
     "crates/can-voice-update",
+    "crates/can-voice-log",
     "crates/can-voice-app",
 ]
 

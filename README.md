@@ -10,12 +10,23 @@ crates/can-voice-proto  Rust：线协议。与 Go 侧共测 server/testdata/wire
 crates/can-voice-client Rust：客户端核心库（P3）
 crates/can-voice-ptt    Rust：PTT（键盘 / 鼠标侧键 / 手柄），四个桌面端共用
 crates/can-voice-token  Rust：拿凭据换短期票，四个桌面端共用
-crates/can-voice-app    Rust：四个桌面端共用的快照 / 更新检查 / 命令面
+crates/can-voice-app    Rust：四个桌面端共用的快照 / 会话监管 / 命令面
+crates/can-voice-settings Rust：设置读写。单独一个 crate，见下
+crates/can-voice-update Rust：更新检查（问 can-api，只报告不动手）。同上
+crates/can-voice-log    Rust：日志落盘（4 份 × 1 MiB）、panic 钩子、回传。同上
 crates/can-voice-fsd    Rust：FSD 协议客户端那一侧，通播端与飞行员端共用
+crates/can-voice-sim    Rust：两个飞行员客户端共用——模拟器链路、他机表、
+                        在线席位表、文字消息记录
 crates/can-voice-atis   Rust：通播的逻辑（报文 / 模板 / 读法）＋服务端通播机器人
 apps/controller         Tauri：管制语音客户端 audio-for-can（P4 Task 4）
 apps/atis               Tauri：通播制作客户端 atis-for-can（P4 Task 5）
+apps/xpc / apps/msfs    Tauri：两个飞行员客户端 xpc-for-can / msfs-for-can
 ```
+
+`can-voice-settings` 和 `can-voice-update` 各自一个 crate 而不是
+`can-voice-app` 里的两个模块，是同一条理由：**通播制作客户端不该为了读一个 JSON
+文件、或者查一次更新，把 `can-voice-ptt` 拉进来**——那条路上挂着 rdev/gilrs，
+Linux 上要 libx11 和 libudev，而它连 PTT 都没有。
 
 **桌面端不在 workspace 里**（根 `Cargo.toml` 的 `exclude = ["apps"]`）：它们各自
 拖着 wry/webkit 一整棵树，进来的话 `cargo test --workspace` 每次都要构建一个 GUI
