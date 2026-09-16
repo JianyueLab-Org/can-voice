@@ -1,0 +1,31 @@
+# 服务端通播机队的镜像。
+#
+# 构建上下文是仓库根（Cargo workspace 在那儿）：
+#     docker build -f server/Dockerfile.atis -t can-voice-atis .
+#
+# **它和语音服务端是两个镜像，不是一个。** 服务端是纯 Go、静态、distroless
+# ——没有 shell、没有包管理器。机队要 Python（edge-tts）和 ffmpeg，把它们塞进
+# 服务端那个镜像，就是为了一个每 30 秒跑一次的合成任务，给一个转发着所有人
+# 语音的进程加上一个 Python 运行时和一整套 Debian 依赖。
+
+FROM rust:1-bookworm AS build
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+# apps/ 不拷：它们是 Tauri 客户端，各自有自己的 workspace。
+RUN cargo build --release --locked -p can-voice-atis --bin can-voice-atis
+
+# 运行时要 ffmpeg 和 edge-tts，所以不能是 distroless。
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates ffmpeg python3 python3-pip \
+    && pip3 install --no-cache-dir --break-system-packages edge-tts \
+    && apt-get purge -y python3-pip \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/can-voice-atis /usr/local/bin/can-voice-atis
+# 合成走临时文件（一台机器上会有好几路同时在合成，文件名带 pid 和自增号）。
+# 不用 root：这个进程只读 datafeed、写 /tmp、往外发 UDP，没有一样要特权。
+RUN useradd --create-home --uid 10001 atis
+USER atis
+ENTRYPOINT ["/usr/local/bin/can-voice-atis"]

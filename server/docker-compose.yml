@@ -1,11 +1,17 @@
-# can-voice 语音服务端。
+# can-voice 语音服务端，外加服务端通播机队。
 #
-#     cp .env.example .env     # 填好里面三项
+#     cp .env.example .env     # 填好里面几项
 #     docker compose up -d
 #     docker compose logs -f
 #
 # 配置全在 .env 里，没有配置文件——缺任何必需项启动即失败，而不是用一个默认值
 # 悄悄跑起来。
+#
+# **两个服务，不是一个。** can-voice 转发语音，can-voice-atis 把 datafeed 里
+# 每一个 _ATIS 席位念出来。机队是语音服务端的一个**普通客户端**——它拿真实成员
+# 账号换票、走和所有人一样的那条路，服务端不认识它。这不是为了好看：服务端
+# 一个 Opus 依赖都没有（`server/internal/router/fanout.go` 有测试钉着"服务端
+# 永远不碰音频"），而合成语音必然要编码音频。
 
 services:
   can-voice:
@@ -32,6 +38,38 @@ services:
       CAN_VOICE_FSD_FEED: "${CAN_VOICE_FSD_FEED:-https://data.ceruleanavi.net/v1/events}"
       CAN_VOICE_MAX_RX: "${CAN_VOICE_MAX_RX:-32}"
       CAN_VOICE_DEBUG: "${CAN_VOICE_DEBUG:-}"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # 服务端通播机队。**没有它，全网通播是哑的**——桌面那支 atis-for-can 只挂
+  # FSD 席位、发文字，声音不归它管。
+  can-voice-atis:
+    image: ghcr.io/jianyuelab-org/can-voice-atis:latest
+    pull_policy: always
+    container_name: can-voice-atis
+    restart: always
+    # 不映射端口：它只往外连（datafeed、can-api、语音服务端），没有人连它。
+    depends_on:
+      - can-voice
+    environment:
+      # 一个**真实成员账号**。没有保留账号旁路，也没有办法直接塞一张票进来
+      # ——`can-voice-token` 的 TokenSource 只有一个要凭据的构造函数，
+      # 这是类型层面的事实而不是纪律。
+      ATIS_CID: "${ATIS_CID}"
+      ATIS_PASSWORD: "${ATIS_PASSWORD}"
+      CAN_API_ORIGIN: "${CAN_API_ORIGIN:-https://api.ceruleanavi.net}"
+      # **连的是外面那个地址，不是 can-voice:64738。** 票是按域名签的，
+      # 而且这样机队走的路和成员完全一样——它连不上的时候，成员也连不上。
+      CAN_VOICE_SERVER: "${CAN_VOICE_SERVER:-audio.ceruleanavi.net:64738}"
+      CAN_VOICE_SERVER_NAME: "${CAN_VOICE_SERVER_NAME:-audio.ceruleanavi.net}"
+      CAN_FSD_DATAFEED: "${CAN_FSD_DATAFEED:-https://data.ceruleanavi.net/v1/data.json}"
+      ATIS_POLL_SECS: "${ATIS_POLL_SECS:-30}"
+      ATIS_VOICE_EN: "${ATIS_VOICE_EN:-en-US-AriaNeural}"
+      ATIS_VOICE_ZH: "${ATIS_VOICE_ZH:-zh-CN-XiaoxiaoNeural}"
+      RUST_LOG: "${ATIS_LOG:-info}"
     logging:
       driver: json-file
       options:
