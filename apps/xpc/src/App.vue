@@ -137,14 +137,14 @@ const send = () =>
       class="rounded border border-red-400 px-3 py-2 text-xs text-red-600"
     >
       X-Plane 插件的协议版本是 {{ view.plugin.version }}，和本客户端对不上。
-      它会丢掉每一帧，天上不会有任何飞机——请把插件更新到和客户端同一个版本。
+      它会丢掉每一帧，天上不会有任何飞机——到下面「设置 → X-Plane 他机插件」点一下重新安装。
     </p>
     <p
       v-else-if="!view?.plugin"
       class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
     >
       没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——
-      请确认已装 XPPython3 和 PI_XpcTraffic.py，并且 X-Plane 正在运行。
+      到下面「设置 → X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。
     </p>
 
     <section v-if="!online" class="grid grid-cols-5 gap-2">

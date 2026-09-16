@@ -120,6 +120,43 @@ export interface Settings {
   input_device: string | null;
   output_device: string | null;
   inject: boolean;
+  /** 上次装插件用的 X-Plane 目录。 */
+  xplane_root: string;
+}
+
+/** 他机插件装好了没有。取值和 Rust 那边的 `install::State` 一一对应。 */
+export type InstallState = "NoRoot" | "NotXplane" | "Missing" | "Outdated" | "Current";
+
+export interface InstallStatus {
+  /** 看的是哪个目录。空的表示一个都没找到。 */
+  root: string;
+  state: InstallState;
+  /** XPPython3 在不在。**不在的话插件装了也不会跑**，而那是另一个包。 */
+  xppython3: boolean;
+  installed_protocol: number | null;
+  bundled_protocol: number;
+  path: string;
+  /** 装着的那份和这个客户端不是同一种话。 */
+  protocol_mismatch: boolean;
+  can_install: boolean;
+}
+
+/** 插件现状对人怎么说。 */
+export function installText(s: InstallStatus | null): string {
+  switch (s?.state) {
+    case "NoRoot":
+      return "没找到 X-Plane。请在下面填它装在哪。";
+    case "NotXplane":
+      return "这个目录不像 X-Plane 装的地方——里面没有 Resources/plugins。";
+    case "Missing":
+      return "还没装。";
+    case "Outdated":
+      return "装着的那份和这个客户端带的不一样，建议更新。";
+    case "Current":
+      return "已经是最新的。";
+    default:
+      return "正在看…";
+  }
 }
 
 /**

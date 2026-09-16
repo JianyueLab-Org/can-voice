@@ -16,6 +16,8 @@
 //! 这里每一帧读 [`Snapshot::com1`]，变了就换订阅。**COM1 电门关着时退订**
 //! ——关了电门还在频率上说话，对管制来说是个幽灵。
 
+mod install;
+
 use can_voice_app::Bridge;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
@@ -69,6 +71,10 @@ pub struct Settings {
     /// 不是从此闭嘴**——下一版照样提示。
     #[serde(default)]
     pub skipped_update: String,
+    /// 上次装插件用的 X-Plane 目录。记着是因为自动探测**经常什么也探不到**
+    /// （绿色版、搬过目录、装在另一块盘上），那种人每次开窗口都要重填一遍。
+    #[serde(default)]
+    pub xplane_root: String,
 }
 
 fn yes() -> bool {
@@ -877,6 +883,42 @@ fn open_download(url: String) -> Result<(), String> {
     can_voice_update::open_in_browser(&url)
 }
 
+// ——— X-Plane 插件 ———
+
+/// 看哪个目录：界面上填的优先，其次是上次记住的，都没有才去自动探测。
+///
+/// 空白当作没填——一个被清空的输入框不该把人锁在旧目录上。
+fn chosen_root(typed: Option<String>, remembered: &str) -> Option<String> {
+    typed
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| (!remembered.is_empty()).then(|| remembered.to_string()))
+}
+
+/// 自动探测到的 X-Plane 目录。可能一个都没有，那时界面靠手填那一栏。
+#[tauri::command]
+fn xplane_installs() -> Vec<String> {
+    install::find_installs()
+}
+
+/// 插件装了没有、是不是最新、协议号对不对得上。
+#[tauri::command]
+fn plugin_install_status(app: tauri::State<'_, App>, root: Option<String>) -> install::Status {
+    let remembered = app.settings_snapshot().xplane_root;
+    let root = chosen_root(root, &remembered);
+    install::inspect(root.as_deref().map(std::path::Path::new))
+}
+
+/// 装（或者覆盖）插件，返回它落在哪。
+///
+/// 装成功才记住这个目录：填错了路径的人不该在下次开窗口时还看着那一条。
+#[tauri::command]
+fn install_plugin(app: tauri::State<'_, App>, root: String) -> Result<String, String> {
+    let path = install::install(std::path::Path::new(&root))?;
+    app.update_settings(|s| s.xplane_root = root);
+    Ok(path.display().to_string())
+}
+
 // ——— 日志 ———
 
 /// 当前这份日志在哪。界面上显示给用户，让他知道要发的是哪个文件。
@@ -923,6 +965,9 @@ pub fn run() {
             check_update,
             skip_update,
             open_download,
+            xplane_installs,
+            plugin_install_status,
+            install_plugin,
             connect,
             disconnect,
             view,
@@ -1037,6 +1082,26 @@ mod tests {
         assert_eq!(v.messages[0].from, "CCA1501");
         assert_eq!(v.messages[0].to, "ZSPD_TWR");
         assert_eq!(v.messages[0].text, "request pushback");
+    }
+
+    /// 看哪个目录：界面上填的优先，其次是上次记住的，都没有才去自动探测。
+    ///
+    /// **记住的那个必须能被覆盖**：搬过目录、装了第二份 X-Plane 的人，界面上填了
+    /// 新路径却还在看旧的，是那种"点了没反应"的故障。空白当作没填——一个被清空
+    /// 的输入框不该把人锁在旧目录上。
+    #[test]
+    fn the_typed_root_wins_over_the_remembered_one() {
+        assert_eq!(
+            chosen_root(Some("/games/XP12".into()), "/old"),
+            Some("/games/XP12".to_string())
+        );
+        assert_eq!(
+            chosen_root(Some("   ".into()), "/old"),
+            Some("/old".to_string())
+        );
+        assert_eq!(chosen_root(None, "/old"), Some("/old".to_string()));
+        // 两个都没有：交给自动探测，而不是拿一个空路径去看。
+        assert_eq!(chosen_root(None, ""), None);
     }
 
     /// **COM1 电门关着就退订。** 关了电门还在频率上说话，对管制来说是个幽灵。

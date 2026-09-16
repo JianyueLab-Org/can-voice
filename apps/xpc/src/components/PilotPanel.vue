@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import LogPanel from "./LogPanel.vue";
+import InstallWizard from "./InstallWizard.vue";
 
 /// 已经存下来的 CAN 号，寄日志时预填，省得再打一遍。
 const props = defineProps<{ cid?: string }>();
@@ -186,6 +187,8 @@ async function remove(i: number) {
         </p>
         <p v-if="!mouseOk" class="opacity-70">本系统不支持鼠标侧键作 PTT。</p>
       </div>
+
+      <InstallWizard />
 
       <LogPanel :cid="props.cid" />
     </div>
