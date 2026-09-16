@@ -22,6 +22,9 @@ const outputs = ref<string[]>([]);
 const input = ref("");
 const output = ref("");
 const inject = ref(true);
+const chime = ref(true);
+const chimeAll = ref(false);
+const chimeVolume = ref(100);
 const packagesDir = ref("");
 const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
@@ -40,6 +43,9 @@ onMounted(async () => {
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
   inject.value = s.inject;
+  chime.value = s.message_sound;
+  chimeAll.value = s.message_sound_all;
+  chimeVolume.value = s.message_sound_volume;
   packagesDir.value = s.packages_dir;
   plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
@@ -57,6 +63,25 @@ const applyDevices = () =>
 
 const applyInject = () => invoke("set_injection", { on: inject.value });
 
+const applyChime = () => invoke("set_message_sound", { on: chime.value });
+const applyChimeAll = () => invoke("set_message_sound_all", { on: chimeAll.value });
+
+/** 夹过的那个数要回填：填 9999 之后该看到 200。 */
+async function applyChimeVolume() {
+  chimeVolume.value = await invoke<number>("set_message_sound_volume", {
+    percent: Math.round(chimeVolume.value),
+  });
+}
+
+/**
+ * 试听。**用当前选着的设备和音量**，不是已经存下来的那份——用户多半正是刚换了
+ * 耳机才来点这一下。所以先把设备和音量应用下去，再放。
+ */
+async function previewChime() {
+  await applyDevices();
+  await applyChimeVolume();
+  await invoke("preview_chime");
+}
 /** 改完立刻重扫。不重扫的话，填对了路径的人做的这件事看起来毫无反应。 */
 const applyPackagesDir = () => invoke("set_packages_dir", { dir: packagesDir.value });
 
@@ -172,6 +197,32 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">换设备立刻生效。</p>
+
+      <label class="flex items-center gap-2">
+        <input v-model="chime" type="checkbox" @change="applyChime" />
+        <span>收到管制消息时播放提示音</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <input v-model="chimeAll" type="checkbox" @change="applyChimeAll" />
+        <span>频率上的每条消息都提示</span>
+        <span class="opacity-60">默认只有点到你呼号的才响；私聊一定会响</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">提示音量</span>
+        <input
+          v-model.number="chimeVolume"
+          type="range"
+          min="0"
+          max="200"
+          class="flex-1"
+          @change="applyChimeVolume"
+        />
+        <span class="w-10 text-right opacity-70">{{ chimeVolume }}%</span>
+        <button class="rounded border px-2 py-1" @click="previewChime">试听</button>
+      </label>
+      <p class="opacity-60">
+        提示音走上面选的那块耳机，不是系统默认设备。试听没声音就说明设备选错了。
+      </p>
 
       <!-- 扫不到机模的表现是"他机都是同一架小飞机"，和没装机模、和机型码
            对不上长得差不多，所以三个数都要显示出来。 -->

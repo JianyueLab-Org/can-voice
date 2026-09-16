@@ -154,6 +154,20 @@ pub struct Settings {
     /// 现在关不掉，而注入是最吃帧数的那一部分。
     #[serde(default = "yes")]
     pub inject: bool,
+    /// 收到管制消息时播放提示音。**默认开**：飞行员盯着的是窗外，
+    /// 消息区多出来的那一行谁也看不见。
+    #[serde(default = "yes")]
+    pub message_sound: bool,
+    /// 频率上的**每一条**都提示。默认关——默认只有点到你呼号的才响。
+    #[serde(default)]
+    pub message_sound_all: bool,
+    /// 提示音音量，百分比，和上面那两根滑条同一个量纲（0–200）。
+    ///
+    /// **默认值要用具名函数**，不能写裸的 `#[serde(default)]`：老的设置文件里
+    /// 没有这一项，反序列化拿到 0 等于一次升级把所有人的提示音静音。而 0 本身
+    /// 是合法取值（用户明确要静音），事后分不出是"没设过"还是"设成了 0"。
+    #[serde(default = "default_alert_volume")]
+    pub message_sound_volume: u32,
     /// MSFS 的包目录。空的表示自己去找（先读 `UserCfg.opt`，再退到猜路径）。
     #[serde(default)]
     pub packages_dir: String,
@@ -165,6 +179,102 @@ pub struct Settings {
 
 fn yes() -> bool {
     true
+}
+
+fn default_alert_volume() -> u32 {
+    100
+}
+
+/// 和麦克风那两根滑条同一个量纲。**0 是合法的**（静音），所以只夹上界。
+fn clamp_alert_volume(percent: u32) -> u32 {
+    percent.min(200)
+}
+
+/// 提示音要用到的那几个值。
+///
+/// 和 `inject` / `traffic_range` 一样做成原子量：收包那条路径不该为了三个开关
+/// 去抢设置的锁。
+#[derive(Default)]
+struct Chimer {
+    enabled: std::sync::atomic::AtomicBool,
+    every: std::sync::atomic::AtomicBool,
+    volume: std::sync::atomic::AtomicU32,
+    device: Mutex<Option<String>>,
+    /// 正在连着的那条 FSD 的呼号。**设置里存的那份可能是上一次连的**，
+    /// 拿它去判"有没有点到我"会在刚换过呼号的那一次响错。
+    callsign: Mutex<String>,
+    gate: Mutex<can_voice_chime::Gate>,
+}
+
+impl Chimer {
+    fn new(s: &Settings) -> Self {
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        Self {
+            enabled: AtomicBool::new(s.message_sound),
+            every: AtomicBool::new(s.message_sound_all),
+            volume: AtomicU32::new(clamp_alert_volume(s.message_sound_volume)),
+            device: Mutex::new(s.output_device.clone()),
+            callsign: Mutex::new(String::new()),
+            gate: Mutex::new(can_voice_chime::Gate::new()),
+        }
+    }
+
+    fn set_callsign(&self, callsign: &str) {
+        if let Ok(mut c) = self.callsign.lock() {
+            callsign.clone_into(&mut c);
+        }
+    }
+
+    /// 来了一条文字消息。
+    fn on_text(self: &Arc<Self>, sender: &str, recipient: &str, body: &str) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let callsign = match self.callsign.lock() {
+            Ok(c) => c.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        if can_voice_sim::chat::wants_alert(
+            &callsign,
+            sender,
+            recipient,
+            body,
+            self.every.load(Relaxed),
+        ) {
+            self.fire(false);
+        }
+    }
+
+    /// 试听：用户自己点的，不看开关也不受最短间隔限制。
+    fn preview(self: &Arc<Self>) {
+        self.fire(true);
+    }
+
+    fn fire(self: &Arc<Self>, force: bool) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let volume = self.volume.load(Relaxed);
+        let enabled = self.enabled.load(Relaxed);
+        {
+            let mut gate = match self.gate.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if !gate.allow(monotonic(), force, enabled, volume) {
+                return;
+            }
+        }
+        let device = match self.device.lock() {
+            Ok(d) => d.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        let me = Arc::clone(self);
+        // **自己的 OS 线程，从开流到放完都在上面**：`cpal::Stream` 在 macOS 上是
+        // `!Send`。放不出来也绝不能影响收消息本身，所以这里不等它、不看返回值。
+        std::thread::spawn(move || {
+            can_voice_chime::play_blocking(device.as_deref(), volume);
+            if let Ok(mut g) = me.gate.lock() {
+                g.finished();
+            }
+        });
+    }
 }
 
 pub struct App {
@@ -181,6 +291,7 @@ pub struct App {
     /// 收发过的文字消息。**攒在这里而不是靠事件推**：窗口重开之前
     /// 管制员说过的话，靠事件流是收不到的。
     chat: Arc<Mutex<ChatLog>>,
+    chime: Arc<Chimer>,
     /// 在线管制席位。
     controllers: Arc<Mutex<ControllerTable>>,
     http: reqwest::Client,
@@ -195,6 +306,8 @@ impl App {
     pub fn new() -> Self {
         let store = can_voice_settings::Store::for_product("msfs-for-can");
         let settings: Settings = store.load();
+        // 在 settings 被移进结构体之前建好。
+        let chime = Arc::new(Chimer::new(&settings));
         Self {
             voice: Arc::new(Bridge::new()),
             sim: SimLink::spawn(),
@@ -205,6 +318,7 @@ impl App {
             settings: Mutex::new(settings),
             traffic: Arc::new(Mutex::new(TrafficTable::new())),
             chat: Arc::new(Mutex::new(ChatLog::default())),
+            chime,
             hangar: Arc::new(Mutex::new(can_voice_sim::msfs_hangar::Hangar::default())),
             hangar_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             controllers: Arc::new(Mutex::new(ControllerTable::default())),
@@ -388,6 +502,7 @@ async fn connect(
         app.traffic.clone(),
         app.chat.clone(),
         app.controllers.clone(),
+        app.chime.clone(),
     );
     spawn_asking(fsd.clone(), app.traffic.clone());
     spawn_pump(fsd.clone(), app.sim.clone(), app.voice.clone());
@@ -398,6 +513,8 @@ async fn connect(
         app.hangar.clone(),
     );
     *app.fsd.lock().expect("fsd") = Some(fsd);
+    // 判"有没有点到我"要用正在连着的这个呼号，不是设置里存的那个。
+    app.chime.set_callsign(&callsign);
     // 上线成功才记住这一组：连不上的那一组多半有一项是打错的。
     app.update_settings(|s| {
         s.cid = cid;
@@ -414,6 +531,7 @@ async fn disconnect(app: tauri::State<'_, App>) -> Result<(), String> {
         fsd.stop();
     }
     *app.link.lock().expect("link") = None;
+    app.chime.set_callsign("");
     app.voice.disconnect().await;
     app.traffic.lock().expect("traffic").prune(f64::MAX);
     Ok(())
@@ -452,11 +570,50 @@ fn set_injection(app: tauri::State<'_, App>, on: bool) {
 #[tauri::command]
 fn set_audio_devices(app: tauri::State<'_, App>, input: Option<String>, output: Option<String>) {
     app.voice.set_audio_devices(input.clone(), output.clone());
+    // 提示音也走这块设备——它存在的全部理由就是不响在系统默认输出上。
+    if let Ok(mut d) = app.chime.device.lock() {
+        d.clone_from(&output);
+    }
     app.update_settings(|s| {
         s.input_device = input;
         s.output_device = output;
     });
 }
+
+#[tauri::command]
+fn set_message_sound(app: tauri::State<'_, App>, on: bool) {
+    app.chime
+        .enabled
+        .store(on, std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.message_sound = on);
+}
+
+#[tauri::command]
+fn set_message_sound_all(app: tauri::State<'_, App>, on: bool) {
+    app.chime
+        .every
+        .store(on, std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.message_sound_all = on);
+}
+
+/// 返回夹过的那个数：界面上填 9999 之后该看到 200。
+#[tauri::command]
+fn set_message_sound_volume(app: tauri::State<'_, App>, percent: u32) -> u32 {
+    let percent = clamp_alert_volume(percent);
+    app.chime
+        .volume
+        .store(percent, std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.message_sound_volume = percent);
+    percent
+}
+
+/// 试听。**用当前选着的设备和音量**，不是已经存下来的那份——用户多半正是
+/// 刚换了耳机才来点这一下的。点了没声音就说明设备选错了，这正是这个按钮的意义。
+#[tauri::command]
+fn preview_chime(app: tauri::State<'_, App>) {
+    app.chime.preview();
+}
+
 
 /// 一个绑定加上它给界面看的短标识。`token()` 只有 Rust 侧一份。
 #[derive(Debug, serde::Serialize)]
@@ -718,17 +875,29 @@ fn spawn_traffic_reader(
     table: Arc<Mutex<TrafficTable>>,
     chat: Arc<Mutex<ChatLog>>,
     controllers: Arc<Mutex<ControllerTable>>,
+    chime: Arc<Chimer>,
 ) {
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(e) => can_voice_sim::feed::absorb(
-                    monotonic(),
-                    e,
-                    &mut table.lock().expect("traffic"),
-                    &mut chat.lock().expect("chat"),
-                    &mut controllers.lock().expect("controllers"),
-                ),
+                Ok(e) => {
+                    // 提示音在 absorb 之前判：那一步会把事件吃掉。
+                    if let PilotEvent::Text {
+                        sender,
+                        recipient,
+                        message,
+                    } = &e
+                    {
+                        chime.on_text(sender, recipient, message);
+                    }
+                    can_voice_sim::feed::absorb(
+                        monotonic(),
+                        e,
+                        &mut table.lock().expect("traffic"),
+                        &mut chat.lock().expect("chat"),
+                        &mut controllers.lock().expect("controllers"),
+                    );
+                }
                 // 跟不上就丢了几条；下一条会补上，不必重来。
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
@@ -1104,6 +1273,10 @@ pub fn run() {
             set_injection,
             set_packages_dir,
             set_audio_devices,
+            set_message_sound,
+            set_message_sound_all,
+            set_message_sound_volume,
+            preview_chime,
             keyboard_ptt_supported,
             ptt_bindings,
             audio_devices,

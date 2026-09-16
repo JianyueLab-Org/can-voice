@@ -1,0 +1,14 @@
+[package]
+name = "can-voice-chime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tracing.workspace = true
+# 提示音自己开一路**只输出**的流。
+#
+# 不复用 can-voice-client 的那一条：那一条活在 voice pump 里，连上才有、断了就没，
+# 而"没连上的时候管制员发不了消息给你"并不成立——何况 `AudioIo::start` 会连输入
+# 一起开，提示音不需要麦克风。
+cpal = "0.15"

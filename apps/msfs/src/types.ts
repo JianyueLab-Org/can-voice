@@ -130,6 +130,12 @@ export interface Settings {
   input_device: string | null;
   output_device: string | null;
   inject: boolean;
+  /** 收到管制消息时播放提示音。 */
+  message_sound: boolean;
+  /** 频率上的每条消息都提示，而不是只提示点到自己呼号的。 */
+  message_sound_all: boolean;
+  /** 提示音音量，百分比，0–200。 */
+  message_sound_volume: number;
   /** MSFS 包目录。空的表示自己去找。 */
   packages_dir: string;
 }
