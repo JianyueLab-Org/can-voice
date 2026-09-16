@@ -23,7 +23,8 @@ type Router struct {
 	sessions map[SessionID]*Session
 	// rx 是频率到订阅者的倒排索引，扇出时只查这一张表。
 	rx map[uint32]map[SessionID]struct{}
-	// byCID 是成员号到当前会话的索引，只为顶号服务。
+	// byCID 是**(成员号, 席位)** 到当前会话的索引，只为顶号服务。
+	// 键由 evictionKey 拼，见那里为什么不是光一个成员号。
 	// 一个 CID 最多一条会话，所以是 SessionID 而不是集合。
 	byCID map[string]SessionID
 	// locator 是位置来源，扇出时查它。为 nil 等于永久降级：全部放行。
@@ -56,6 +57,13 @@ type SessionOpts struct {
 	// Follow 只有观察员模式填：观察员没有 FSD 连接，
 	// 位置取自它跟随的那架飞机（spec 7.3）。
 	Follow string
+	// Station 是同一个账号下的第几个席位，空串表示"就一个"。
+	//
+	// **通播机队整队共用一个 ATIS 账号**，而顶号按 CID。没有这个标记的话，
+	// 两个以上 `_ATIS` 席位时同一时刻只有一路在播：被顶掉的那一路重连、
+	// 再顶掉下一个，全队每秒互踢一轮，而两端日志都写着"成功"。
+	// 设计文档 §6 说的"普通会话，带一个 station 标记"就是这个。
+	Station string
 	// MaxTX 来自 token：最多能在几个频率上发送。
 	MaxTX int
 	// MaxRX 来自服务端配置：最多能订阅几个频率。
@@ -64,6 +72,18 @@ type SessionOpts struct {
 	Send func([]byte)
 	// Close 断开底层连接。可以为 nil（纯逻辑测试里就是）。
 	Close func()
+}
+
+// evictionKey 是顶号的键。
+//
+// **不是光一个成员号。** 通播机队整队共用一个 ATIS 账号，每一路席位一个
+// station 标记；按 CID 顶的话它们会互相踢，而按 (CID, station) 顶的时候，
+// 同一个席位重启仍然顶掉自己上一条——那正是顶号本来要解决的问题。
+//
+// 分隔符用 NUL：它不可能出现在成员号或呼号里，所以拼不出两个不同的
+// (cid, station) 撞成同一个键。
+func evictionKey(cid, station string) string {
+	return cid + "\x00" + station
 }
 
 // Add 登记一条新会话，并顶掉同一个 CID 的旧会话（如果有）。
@@ -80,6 +100,7 @@ func (r *Router) Add(o SessionOpts) *Session {
 		ID:        newSessionID(),
 		CID:       o.CID,
 		Follow:    o.Follow,
+		Station:   o.Station,
 		MaxTX:     o.MaxTX,
 		MaxRX:     o.MaxRX,
 		send:      o.Send,
@@ -92,11 +113,11 @@ func (r *Router) Add(o SessionOpts) *Session {
 	if o.CID != "" {
 		// 空 CID 不参与顶号。它不该出现（鉴权拒绝空 CID），但真出现时让所有
 		// 空 CID 会话互相顶掉，比放过去糟糕得多。
-		if prev, ok := r.byCID[o.CID]; ok {
+		if prev, ok := r.byCID[evictionKey(o.CID, o.Station)]; ok {
 			evicted = r.sessions[prev]
 			r.removeLocked(prev)
 		}
-		r.byCID[o.CID] = s.ID
+		r.byCID[evictionKey(o.CID, o.Station)] = s.ID
 	}
 	r.sessions[s.ID] = s
 	r.mu.Unlock()
@@ -144,8 +165,8 @@ func (r *Router) removeLocked(id SessionID) {
 	// 会对着它调 Close，而那个闭包捕获的是一条已经关掉的连接。
 	// 只在它确实指向这条会话时才删——顶号路径上新条目稍后才写入，
 	// 但别的顺序下这个判断是防止误删的那道闸。
-	if cur, ok := r.byCID[s.CID]; ok && cur == id {
-		delete(r.byCID, s.CID)
+	if cur, ok := r.byCID[evictionKey(s.CID, s.Station)]; ok && cur == id {
+		delete(r.byCID, evictionKey(s.CID, s.Station))
 	}
 	delete(r.sessions, id)
 }

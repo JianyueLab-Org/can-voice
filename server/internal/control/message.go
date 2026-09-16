@@ -20,12 +20,17 @@ const ProtoVersion = 1
 
 // Hello 是客户端的第一条消息。Follow 只有观察员模式用——
 // 观察员没有 FSD 连接，位置取自它跟随的那架飞机（spec 7.3）。
+//
+// Station 是同一个账号下的席位标记，只有通播机队这种"整队共用一个 CID"的
+// 客户端填。顶号按 (CID, Station) 判，所以不填的普通客户端行为和以前一样：
+// 同一个成员号第二次登录，第一条会话被断开。
 type Hello struct {
-	Type   string `json:"type"`
-	Token  string `json:"token"`
-	Client string `json:"client"`
-	Proto  int    `json:"proto"`
-	Follow string `json:"follow,omitempty"`
+	Type    string `json:"type"`
+	Token   string `json:"token"`
+	Client  string `json:"client"`
+	Proto   int    `json:"proto"`
+	Follow  string `json:"follow,omitempty"`
+	Station string `json:"station,omitempty"`
 }
 
 // Ready 是服务端对 Hello 的回应。

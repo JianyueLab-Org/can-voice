@@ -331,6 +331,23 @@ pub struct Link {
     pub max_rx: u32,
 }
 
+/// 握手时要报的身份。
+///
+/// 用结构体而不是四个相邻的 `&str`：它们类型相同，位置写反编译器一声不响，
+/// 而 `follow` 和 `station` 写反的表现最难查——两个字段都按呼号校验，所以
+/// 两边都过闸，只是射程按错误的位置算、顶号按错误的席位判。
+#[derive(Debug, Clone, Copy)]
+pub struct Identity<'a> {
+    /// can-api 签发的短期 token。
+    pub token: &'a str,
+    /// 客户端标识，只进服务端日志。
+    pub client_id: &'a str,
+    /// 观察员跟随的呼号；不是观察员时留空。
+    pub follow: &'a str,
+    /// 席位标记；整队共用一个 CID 时填，否则留空。
+    pub station: &'a str,
+}
+
 /// 建立连接并完成 HELLO/READY 握手。
 ///
 /// **它等握手真的完成才返回**，所以它的 `Err` 是有意义的：错的主机名、
@@ -339,14 +356,17 @@ pub struct Link {
 pub async fn connect(
     addr: SocketAddr,
     server_name: &str,
-    token: &str,
-    client_id: &str,
-    follow: &str,
+    id: Identity<'_>,
     roots: TrustRoots,
 ) -> Result<Link, Error> {
     // 观察员的呼号是用户手输的，先自己判一次，别拿一条 `refused` 去问用户。
-    if !follow.is_empty() && !is_valid_callsign(follow) {
-        return Err(Error::BadCallsign(follow.to_string()));
+    if !id.follow.is_empty() && !is_valid_callsign(id.follow) {
+        return Err(Error::BadCallsign(id.follow.to_string()));
+    }
+    // 席位标记走同一道闸。它不是用户手输的，但通播机队是无人值守的：
+    // 一条 `refused` 在那边的表现是这一路永远重连、永远被拒，而且没人在看。
+    if !id.station.is_empty() && !is_valid_callsign(id.station) {
+        return Err(Error::BadCallsign(id.station.to_string()));
     }
 
     let crypto = crypto_config(&roots)?;
@@ -361,10 +381,11 @@ pub async fn connect(
     let (mut send, mut recv) = conn.open_bi().await?;
 
     let hello = Message::Hello(control::Hello {
-        token: token.to_string(),
-        client: client_id.to_string(),
+        token: id.token.to_string(),
+        client: id.client_id.to_string(),
         proto: control::PROTO_VERSION,
-        follow: follow.to_string(),
+        follow: id.follow.to_string(),
+        station: id.station.to_string(),
     });
     write_msg(&mut send, &hello).await?;
 

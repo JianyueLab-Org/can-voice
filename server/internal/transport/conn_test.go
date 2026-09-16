@@ -1279,3 +1279,86 @@ func TestTransmittingWhileRangeFilteringIsDegradedSaysSo(t *testing.T) {
 	ping(t, c)
 }
 
+// 通播机队整队共用一个 CID，每一路席位靠 HELLO 里的 station 区分。
+// 这个字段要真的落到会话上：router 的顶号键读的是它，读不到就等于没有。
+func TestTheStationFieldFromHelloReachesTheSession(t *testing.T) {
+	addr, priv, r := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	conn := dial(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	b, _ := control.Encode(&control.Hello{Token: tok, Client: "test/1", Proto: 1, Station: "ZSPD_ATIS"})
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(st)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	ready, ok := m.(*control.Ready)
+	if !ok {
+		t.Fatalf("got %T, want *control.Ready", m)
+	}
+	sess, ok := r.Get(router.SessionID(ready.Session))
+	if !ok {
+		t.Fatal("the session was not registered")
+	}
+	if sess.Station != "ZSPD_ATIS" {
+		t.Fatalf("Session.Station = %q, want %q from the HELLO", sess.Station, "ZSPD_ATIS")
+	}
+}
+
+// station 进的是顶号表的键，所以和 follow 一样要先校形状——
+// 不校的话一个 6 万字节的值就那么进去了，而且每一条这样的会话都顶不掉任何人。
+func TestAStationThatIsNotACallsignIsRefused(t *testing.T) {
+	addr, priv, r := testServer(t)
+	tok, err := auth.Sign(priv, auth.Claims{
+		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	conn := dial(t, addr)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync: %v", err)
+	}
+	b, _ := control.Encode(&control.Hello{
+		Token: tok, Client: "test/1", Proto: 1,
+		Station: strings.Repeat("A", 64),
+	})
+	if err := control.WriteFrame(st, b); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+	resp, err := control.ReadFrame(st)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	m, err := control.Decode(resp)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if _, ok := m.(*control.Bye); !ok {
+		t.Fatalf("got %T, want *control.Bye for a malformed station", m)
+	}
+	if n := r.SessionCount(); n != 0 {
+		t.Fatalf("SessionCount() = %d, want 0: a refused handshake must not leave a session", n)
+	}
+}

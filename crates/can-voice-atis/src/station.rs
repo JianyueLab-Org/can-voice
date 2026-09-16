@@ -63,24 +63,39 @@ pub async fn run(station: Station) {
     }
 }
 
+/// 一路通播拿什么身份去连语音服务端。
+///
+/// **`station` 和 `follow` 都填这一路自己的呼号**，两个字段管两件不同的事：
+///
+/// - `station` 是顶号的键的后半截。整队共用一个 `ATIS_CID`，而顶号按 CID——
+///   不带席位标记的话，两路以上的机队同一时刻只有一路在播：被顶掉的那一路
+///   重连、再顶掉下一路，全队每秒互踢一轮，两端日志都写着"成功"。
+/// - `follow` 是射程过滤查位置用的键。查不到时服务端退回按 CID 查，而
+///   fsdfeed 对同一个 CID 下的多条 ATIS 只留呼号字典序最小的那一条——于是
+///   浦东的通播按北京的位置过滤。每一路报自己的呼号，这一步就回到各查各的。
+fn voice_config(voice: &VoiceSettings, callsign: &str) -> Config {
+    Config {
+        server: voice.server.clone(),
+        server_name: voice.server_name.clone(),
+        // 这个值会被 `can_voice_token::connect` 覆盖；票只从 TokenSource 来。
+        token: String::new(),
+        client_id: concat!("can-voice-atis/", env!("CARGO_PKG_VERSION")).into(),
+        follow: callsign.to_string(),
+        station: callsign.to_string(),
+        input_device: None,
+        output_device: None,
+        // 没有声卡：这台机器上没有麦克风，音频是 TTS 合成出来的。
+        audio_devices: false,
+        extra_roots: Vec::new(),
+    }
+}
+
 async fn cycle(station: &Station) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // **每次连接都现换一张票，过期了就再换一张试一次**（`can_voice_token::connect`）。
     // token 的有效期是 60 秒，攒着没有意义；而且重连走的是票不是密码，
     // 不消耗登录限流的配额。
     let client = can_voice_token::connect(
-        Config {
-            server: station.voice.server.clone(),
-            server_name: station.voice.server_name.clone(),
-            // 这个值会被 `can_voice_token::connect` 覆盖；票只从 TokenSource 来。
-            token: String::new(),
-            client_id: concat!("can-voice-atis/", env!("CARGO_PKG_VERSION")).into(),
-            follow: String::new(),
-            input_device: None,
-            output_device: None,
-            // 没有声卡：这台机器上没有麦克风，音频是 TTS 合成出来的。
-            audio_devices: false,
-            extra_roots: Vec::new(),
-        },
+        voice_config(&station.voice, &station.callsign),
         &station.voice.tokens,
     )
     .await?;
@@ -264,5 +279,37 @@ mod tests {
         let got = halves("QNH 1007");
         assert_eq!(got.len(), 1);
         assert!(!got[0].1);
+    }
+
+    fn voice_for_test() -> VoiceSettings {
+        VoiceSettings {
+            server: "voice.example:64738".into(),
+            server_name: "voice.example".into(),
+            tokens: can_voice_token::TokenSource::new(
+                "https://api.example",
+                "900",
+                "pw",
+                reqwest::Client::new(),
+            ),
+        }
+    }
+
+    /// 一路通播用自己的呼号报两个字段，两个都是必需的，修的是同一件事的两半。
+    ///
+    /// `station`：整队共用一个 `ATIS_CID`，而顶号按 CID。不带席位标记时
+    /// 两路以上的机队每秒互踢一轮，而两端日志都写着"成功"。
+    ///
+    /// `follow`：射程过滤要查这一路的位置，查不到 `follow` 就退回按 CID 查，
+    /// 而 fsdfeed 对同一个 CID 下的多条 ATIS 只留呼号字典序最小的那一条——
+    /// 于是浦东的通播按北京的位置过滤，安静地放行或者安静地挡掉。
+    #[test]
+    fn a_station_dials_with_its_own_callsign_in_both_fields() {
+        let cfg = voice_config(&voice_for_test(), "ZSPD_ATIS");
+        assert_eq!(cfg.station, "ZSPD_ATIS");
+        assert_eq!(cfg.follow, "ZSPD_ATIS");
+        // 票只从 TokenSource 来：这个字段会被 can_voice_token::connect 覆盖。
+        assert!(cfg.token.is_empty(), "{:?}", cfg.token);
+        // 这台机器上没有声卡，音频是 TTS 合成出来的。
+        assert!(!cfg.audio_devices);
     }
 }

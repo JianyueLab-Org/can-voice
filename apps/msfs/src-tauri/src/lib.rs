@@ -238,6 +238,8 @@ async fn connect(
         follow: String::new(),
         input_device: None,
         output_device: None,
+        // 一人一个账号，没有席位标记：同一个成员号第二次登录顶掉第一条。
+        station: String::new(),
         audio_devices: true,
         extra_roots: Vec::new(),
     };

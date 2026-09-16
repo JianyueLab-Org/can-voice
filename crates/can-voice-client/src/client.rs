@@ -26,6 +26,13 @@ pub struct Config {
     pub client_id: String,
     /// 观察员模式跟随的呼号；不是观察员时留空。
     pub follow: String,
+    /// 席位标记：同一个账号下的哪一路。**整队共用一个 CID 时必须填。**
+    ///
+    /// 顶号按 `(cid, station)` 判。四个桌面客户端留空——它们一人一个账号，
+    /// 留空时的行为和以前完全一样：同一个成员号第二次登录顶掉第一条。
+    /// 服务端 ATIS 机队不能留空：整队一个 `ATIS_CID`，不带席位标记的话
+    /// 每一路都在顶掉另一路，而两端日志都写着"成功"。
+    pub station: String,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     /// 要不要打开声卡。
@@ -171,9 +178,12 @@ impl VoiceClient {
         let link = conn::connect(
             addr,
             &cfg.server_name,
-            &cfg.token,
-            &cfg.client_id,
-            &cfg.follow,
+            conn::Identity {
+                token: &cfg.token,
+                client_id: &cfg.client_id,
+                follow: &cfg.follow,
+                station: &cfg.station,
+            },
             cfg.trust_roots(),
         )
         .await?;
@@ -408,6 +418,7 @@ mod tests {
             token: "t".into(),
             client_id: "test/0".into(),
             follow: String::new(),
+            station: String::new(),
             input_device: None,
             output_device: None,
             audio_devices: false,
@@ -429,6 +440,7 @@ mod tests {
             token: "t".into(),
             client_id: "test/0".into(),
             follow: "bad callsign".into(),
+            station: String::new(),
             input_device: None,
             output_device: None,
             audio_devices: false,
@@ -437,6 +449,31 @@ mod tests {
         let err = VoiceClient::connect(cfg)
             .await
             .expect_err("must reject the callsign");
+        assert!(
+            matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
+            "got {err:?}"
+        );
+    }
+
+    /// `station` 走的是同一道闸。服务端对不合规则的席位标记只回一条 `refused`，
+    /// 而通播机队是无人值守的——它会照着那条"被拒绝"一直重连下去。
+    #[tokio::test]
+    async fn an_invalid_station_fails_before_any_network_traffic() {
+        let cfg = Config {
+            server: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            token: "t".into(),
+            client_id: "test/0".into(),
+            follow: String::new(),
+            station: "not a callsign".into(),
+            input_device: None,
+            output_device: None,
+            audio_devices: false,
+            extra_roots: Vec::new(),
+        };
+        let err = VoiceClient::connect(cfg)
+            .await
+            .expect_err("must reject the station");
         assert!(
             matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
             "got {err:?}"

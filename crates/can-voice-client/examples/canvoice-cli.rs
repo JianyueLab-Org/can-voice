@@ -20,6 +20,7 @@ async fn main() {
     let mut server = String::from("127.0.0.1:64738");
     let mut token = String::new();
     let mut follow = String::new();
+    let mut station = String::new();
     let mut rx: Vec<u32> = Vec::new();
     let mut roots: Vec<Vec<u8>> = Vec::new();
     let mut audio = false;
@@ -31,6 +32,7 @@ async fn main() {
             "--server" => server = args.next().unwrap_or_default(),
             "--token" => token = args.next().unwrap_or_default(),
             "--follow" => follow = args.next().unwrap_or_default(),
+            "--station" => station = args.next().unwrap_or_default(),
             "--root" => {
                 let path = args.next().unwrap_or_default();
                 match std::fs::read(&path) {
@@ -58,6 +60,7 @@ async fn main() {
         token,
         client_id: concat!("canvoice-cli/", env!("CARGO_PKG_VERSION")).into(),
         follow,
+        station,
         input_device: None,
         output_device: None,
         audio_devices: audio,

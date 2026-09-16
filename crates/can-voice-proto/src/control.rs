@@ -29,8 +29,10 @@ pub mod notice_kind {
     pub const TX_DENIED: &str = "tx_denied";
     /// 位置快照不可用，射程过滤已降级。
     pub const RANGE_UNAVAILABLE: &str = "range_unavailable";
-    /// 声明里有东西没被接受。
-    pub const SUB_REJECTED: &str = "sub_rejected";
+    // **没有 sub_rejected，而且不该有。** 被拒的订阅走 SUBACK 的 `rejected` /
+    // `rejected_xc` 两张单子，那是 SUB 的同步答复，`on_ack` 按差集分派。
+    // 再发一条 NOTICE 是把同一件事在同一条流上说两遍，而两份报告一旦不一致就
+    // 没有哪一份可信。这个常量曾经存在、从没被发出过。
     /// 你发来的那一帧服务端解不开。
     pub const UNKNOWN_MESSAGE: &str = "unknown_message";
 }
@@ -80,6 +82,16 @@ pub struct Hello {
     /// 所以空串不上线，非空的要在发出去**之前**自己判一次（修订件 N4）。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub follow: String,
+    /// 席位标记：同一个账号下的哪一路。空串表示"就一路"。
+    ///
+    /// 顶号按 `(cid, station)` 判，所以这个字段只有"整队共用一个 CID"的客户端
+    /// 需要填——服务端 ATIS 机队就是。四个桌面客户端留空，行为和以前一样：
+    /// 同一个成员号第二次登录，第一条会话被断开。
+    ///
+    /// 和 `follow` 一样是呼号形状，服务端照 `isValidCallsign` 校验，
+    /// 所以空串不上线，非空的要在发出去之前自己判一次。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub station: String,
 }
 
 // 这里**没有** `transport` 字段，而且不是漏了（修订件 M1）。服务端的
@@ -408,6 +420,7 @@ mod tests {
             client: "can-controller/3.0.0".into(),
             proto: PROTO_VERSION,
             follow: String::new(),
+            station: String::new(),
         })
         .encode()
         .expect("encode");
@@ -427,11 +440,46 @@ mod tests {
             client: "c".into(),
             proto: PROTO_VERSION,
             follow: String::new(),
+            station: String::new(),
         })
         .encode()
         .expect("encode");
         let text = String::from_utf8(bytes).expect("utf8");
         assert!(!text.contains("follow"), "encoded as {text}");
+    }
+
+    /// 空的 `station` 同样不上线：只有通播机队这种"整队共用一个 CID"的客户端
+    /// 填它，而服务端把它当呼号校验（不合规则的直接 `refused`）。
+    #[test]
+    fn an_empty_station_is_not_put_on_the_wire() {
+        let bytes = Message::Hello(Hello {
+            token: "t".into(),
+            client: "c".into(),
+            proto: PROTO_VERSION,
+            follow: String::new(),
+            station: String::new(),
+        })
+        .encode()
+        .expect("encode");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(!text.contains("station"), "encoded as {text}");
+    }
+
+    /// 填了的 `station` 要真的上线：服务端的顶号键读的就是这个字段，
+    /// 编码时丢掉的话整队通播还是按 CID 互踢，而两边日志都写着"成功"。
+    #[test]
+    fn a_station_that_is_set_goes_on_the_wire() {
+        let bytes = Message::Hello(Hello {
+            token: "t".into(),
+            client: "c".into(),
+            proto: PROTO_VERSION,
+            follow: String::new(),
+            station: "ZSPD_ATIS".into(),
+        })
+        .encode()
+        .expect("encode");
+        let text = String::from_utf8(bytes).expect("utf8");
+        assert!(text.contains("\"station\":\"ZSPD_ATIS\""), "encoded as {text}");
     }
 
     /// `PROTO_VERSION` 是**字面值契约**：服务端判的是

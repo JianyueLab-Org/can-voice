@@ -165,9 +165,12 @@ async fn dial(cfg: &Config) -> Result<Link, conn::Error> {
     conn::connect(
         addr,
         &cfg.server_name,
-        &cfg.token,
-        &cfg.client_id,
-        &cfg.follow,
+        conn::Identity {
+            token: &cfg.token,
+            client_id: &cfg.client_id,
+            follow: &cfg.follow,
+            station: &cfg.station,
+        },
         cfg.trust_roots(),
     )
     .await

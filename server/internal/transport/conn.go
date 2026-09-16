@@ -343,6 +343,11 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	if h.Follow != "" && !isValidCallsign(h.Follow) {
 		return nil, errFollowNotACallsign
 	}
+	// Station 同样进 map 的键（router 的顶号表），同样要先校形状。
+	// 它装的是席位呼号（`ZSPD_ATIS`），和 Follow 一个形状，所以用同一条规则。
+	if h.Station != "" && !isValidCallsign(h.Station) {
+		return nil, errStationNotACallsign
+	}
 	claims, err := auth.Verify(cfg.PublicKey, h.Token, time.Now())
 	if err != nil {
 		return nil, err
@@ -367,6 +372,9 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	sess := r.Add(router.SessionOpts{
 		CID:    claims.CID,
 		Follow: h.Follow,
+		// Station 把顶号的键从 CID 变成 (CID, station)。不传下去的话通播
+		// 机队还是整队互踢——字段收下了、校验过了、然后丢掉，是最难查的那种。
+		Station: h.Station,
 		// MaxTX 来自 token（鉴权的一部分），MaxRX 来自服务端配置（资源上限）。
 		// MaxRX 必须真的传下去：只在 READY 里通告的话那个数字就只是一句建议，
 		// 一个已鉴权的会话可以声明一万个频率，每个都要在写锁里进倒排索引，
@@ -428,6 +436,9 @@ const errProtoUnsupported = helloError("the client declared a control-plane prot
 
 // errFollowNotACallsign 是"观察员跟随的那个呼号不是一个呼号"。
 const errFollowNotACallsign = helloError("the follow field is not a valid callsign")
+
+// errStationNotACallsign 是"席位标记不是一个呼号"。
+const errStationNotACallsign = helloError("the station field is not a valid callsign")
 
 // 呼号的形状，照抄 can-fsd 的 IsValidCallsign（internal/fsd/packet.go）：
 // 2–10 个字符，只许 A-Z、0-9、`-`、`_`。
