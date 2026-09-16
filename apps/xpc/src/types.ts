@@ -55,6 +55,8 @@ export interface View {
   plugin: PluginView | null;
   /** CSL 扫到了什么。 */
   csl: CslView;
+  /** 以观察员身份连着时的状况；没连、或者正常上着网是 `null`。 */
+  observer: ObserverView | null;
 }
 
 /**
@@ -74,6 +76,25 @@ export interface CslView {
 
 export function mhz(khz: number | null | undefined): string {
   return khz === null || khz === undefined ? "—" : khz.toFixed(3);
+}
+
+/** kHz 写成 `121.800`。观察员那一栏的频率是 kHz，COM1 读数是 MHz，别混用。 */
+export function khzText(khz: number | null | undefined): string {
+  return khz === null || khz === undefined ? "—" : (khz / 1000).toFixed(3);
+}
+
+/**
+ * 观察员那一侧的状况。
+ *
+ * `frequency` 是 `null` 时要说出来：没有频率的观察员连得上、灯是绿的，却什么也听不见。
+ */
+export interface ObserverView {
+  /** 跟随的呼号。 */
+  follow: string;
+  /** 语音此刻该在的频率，kHz。 */
+  frequency: number | null;
+  /** 这个频率是手输的，不是跟着 COM1 来的。 */
+  manual: boolean;
 }
 
 /** 应答机档位对人怎么说。 */
@@ -149,6 +170,12 @@ export interface Settings {
   traffic_range_nm: number;
   /** CSL 包放在哪。空的表示跟着 X-Plane 目录走。 */
   csl_dir: string;
+  /** 观察员模式（双人机组的右座）：只连语音，不上 FSD。 */
+  observer: boolean;
+  /** 观察员跟随的呼号，机长那架飞机的。 */
+  follow: string;
+  /** 观察员手输的频率，kHz。`null` = 跟随 COM1。 */
+  observer_frequency: number | null;
 }
 
 /** 他机插件装好了没有。取值和 Rust 那边的 `install::State` 一一对应。 */
