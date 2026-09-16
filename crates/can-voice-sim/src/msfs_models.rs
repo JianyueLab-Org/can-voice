@@ -102,6 +102,35 @@ pub struct Overrides {
 }
 
 impl Overrides {
+    /// 用一张现成的表建。给本机扫出来的机库用（见 [`crate::msfs_hangar`]）。
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (String, Vec<String>)>) -> Self {
+        let mut by_icao: HashMap<String, Vec<String>> = HashMap::new();
+        for (icao, titles) in pairs {
+            let icao = icao.trim().to_uppercase();
+            let titles: Vec<String> = titles.into_iter().filter(|t| !t.is_empty()).collect();
+            if icao.is_empty() || titles.is_empty() {
+                continue;
+            }
+            by_icao.entry(icao).or_default().extend(titles);
+        }
+        Self { by_icao }
+    }
+
+    /// 把另一张表并进来。**自己已有的候选排在前面。**
+    ///
+    /// 用在"手写的 `titles.json` 并上本机扫出来的机库"这一处，次序是有讲究的：
+    /// 手写的是用户明确说过的，扫出来的是推断的。
+    pub fn merge(&mut self, other: Self) {
+        for (icao, titles) in other.by_icao {
+            let slot = self.by_icao.entry(icao).or_default();
+            for title in titles {
+                if !slot.contains(&title) {
+                    slot.push(title);
+                }
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.by_icao.is_empty()
     }
@@ -196,6 +225,27 @@ pub fn candidates(icao: &str, overrides: &Overrides) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 手写的排在扫出来的前面：前者是用户明确说过的。
+    #[test]
+    fn the_hand_written_table_wins_over_the_scanned_one() {
+        let mut hand = Overrides::parse(r#"{"B738": ["手写的"]}"#);
+        hand.merge(Overrides::from_pairs([(
+            "b738".to_string(),
+            vec!["扫出来的".to_string()],
+        )]));
+        let got = candidates("B738", &hand);
+        assert_eq!(got[0], "手写的");
+        assert_eq!(got[1], "扫出来的");
+    }
+
+    /// 扫出来的表照样要落回内置的兜底：第三方包也会缺机型。
+    #[test]
+    fn a_scanned_table_still_falls_back() {
+        let scanned = Overrides::from_pairs([("B738".to_string(), vec!["某个 738".to_string()])]);
+        let got = candidates("A320", &scanned);
+        assert!(got.contains(&FALLBACK.to_string()));
+    }
 
     /// **一定非空，而且一定含兜底。** 候选链要是可能为空，调用方就得在每一处
     /// 判空；要是可能不含兜底，就会有机型一路试到底也画不出来。

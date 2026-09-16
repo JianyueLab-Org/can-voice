@@ -41,6 +41,16 @@ export type FsdState =
   | "Offline"
   | "Stopped";
 
+/** 本机机库扫的结果。 */
+export interface HangarView {
+  /** 正在扫。界面靠它区分"还在扫"和"扫完了，没有"。 */
+  loading: boolean;
+  files: number;
+  liveries: number;
+  types: number;
+  dir: string;
+}
+
 export interface View {
   sim_connected: boolean;
   sim_problem: string | null;
@@ -52,6 +62,7 @@ export interface View {
   messages: ChatMessage[];
   /** 在线管制席位，按呼号排序。 */
   controllers: ControllerEntry[];
+  hangar: HangarView;
 }
 
 export function mhz(khz: number | null | undefined): string {
@@ -125,6 +136,8 @@ export interface Settings {
   message_sound_all: boolean;
   /** 提示音音量，百分比，0–200。 */
   message_sound_volume: number;
+  /** MSFS 包目录。空的表示自己去找。 */
+  packages_dir: string;
 }
 
 /**

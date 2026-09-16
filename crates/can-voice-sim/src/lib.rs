@@ -23,6 +23,7 @@ pub mod xplane;
 
 pub mod inject;
 pub mod msfs;
+pub mod msfs_hangar;
 pub mod msfs_models;
 
 use can_voice_fsd::pilot::XpdrMode;
