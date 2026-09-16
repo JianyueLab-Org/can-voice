@@ -17,7 +17,7 @@
 //! 否则声卡拿到的是一个短缓冲，听感是咔哒声。
 
 use super::decode::{Decoder, FRAME_SAMPLES};
-use super::jitter::{Frame, JitterBuffer};
+use super::jitter::{self, Frame, JitterBuffer};
 use super::mix::{apply_quality, interfere, mix_into, NoiseGen};
 use can_voice_proto::wire::Header;
 use std::collections::HashMap;
@@ -64,6 +64,12 @@ struct RxStream {
 /// 一条连接上所有接收流的混音器。
 pub struct RxMixer {
     streams: HashMap<(u32, u32), RxStream>,
+    /// 每个 `(speaker, freq)` 上一次发言结束时的起播水位。
+    ///
+    /// **缓冲是一次发言一个，而起播只发生一次**——不记在这里的话，自适应只在
+    /// 单次发言之内向上生效，学到的东西一结束就丢，真实抖动网络上每次通话的
+    /// 前几帧都在重新学。记的是水位这一个 `usize`，不是缓冲本身。
+    learned: HashMap<(u32, u32), usize>,
     /// 每频率音量。缺省 1.0。
     gains: HashMap<u32, f32>,
     noise: NoiseGen,
@@ -82,6 +88,7 @@ impl RxMixer {
     pub fn new() -> Self {
         Self {
             streams: HashMap::new(),
+            learned: HashMap::new(),
             gains: HashMap::new(),
             // 固定种子：静噪是确定性的，测试才不会时灵时不灵。
             noise: NoiseGen::new(0x5EED),
@@ -110,8 +117,13 @@ impl RxMixer {
                     freq_khz: h.freq_khz,
                     speaker: h.speaker,
                 });
+                let depth = self
+                    .learned
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(jitter::START_DEPTH);
                 self.streams.entry(key).or_insert(RxStream {
-                    jitter: JitterBuffer::new(),
+                    jitter: JitterBuffer::with_target_depth(depth),
                     decoder,
                     qual: h.qual,
                     frames: 0,
@@ -128,6 +140,7 @@ impl RxMixer {
         // 拆开借用：下面要同时可变地用 streams、noise 和 phase。
         let Self {
             streams,
+            learned,
             gains,
             noise,
             phase,
@@ -172,7 +185,11 @@ impl RxMixer {
         for key in finished {
             // 解码器是有状态的、而且不小：一场值班下来每个说过话的人都留一个的话，
             // 内存只涨不落。
-            streams.remove(&key);
+            if let Some(stream) = streams.remove(&key) {
+                // 水位留下来，缓冲和解码器不留。一个 usize 换掉"每次通话前几帧
+                // 都在重新学"。
+                remember_depth(learned, key, stream.jitter.target_depth());
+            }
         }
 
         let mut out = vec![0i16; FRAME_SAMPLES];
@@ -200,6 +217,22 @@ impl RxMixer {
     pub fn active_streams(&self) -> usize {
         self.streams.len()
     }
+}
+
+/// 记得住多少个 `(speaker, freq)` 的水位。
+///
+/// 有上界是因为这张表**不随发言结束而缩**：一场八小时的值班里听过的发言者
+/// 全都留在里面。满了就丢一个——丢掉的那个下次从 60 ms 重新学，
+/// 代价是一次通话的前几帧，比无界增长便宜得多。
+const LEARNED_LIMIT: usize = 256;
+
+fn remember_depth(learned: &mut HashMap<(u32, u32), usize>, key: (u32, u32), depth: usize) {
+    if learned.len() >= LEARNED_LIMIT && !learned.contains_key(&key) {
+        if let Some(&victim) = learned.keys().next() {
+            learned.remove(&victim);
+        }
+    }
+    learned.insert(key, depth);
 }
 
 /// 解一帧进 `buf`。解不开时按静音处理并记一行 DEBUG。
@@ -269,6 +302,73 @@ mod tests {
             m.feed(&h, &opus);
         }
         m.tick().0
+    }
+
+    /// **上一次发言学到的水位要带进下一次。**
+    ///
+    /// 缓冲是一次发言一个，而起播只发生一次——每次 `JitterBuffer::new()` 的话，
+    /// 自适应只在单次发言之内向上生效，学到的东西发言一结束全丢。真实抖动网络上
+    /// 的表现是每次通话的前几帧都在重新学，而每一次重新学都是一次卡顿。
+    #[test]
+    fn the_water_level_learned_in_one_talkspurt_is_carried_into_the_next() {
+        let mut enc = Encoder::new().expect("encoder");
+        let mut m = RxMixer::new();
+
+        // 第一段：灌几帧，然后上游断供。缓冲被抽干，水位一路涨到上限，
+        // 静音超时收尾。
+        for seq in 0..4u16 {
+            let (h, opus) = packet(&mut enc, 121_800, 7, seq, 255, 0);
+            m.feed(&h, &opus);
+        }
+        let mut guard = 0;
+        while m.active_streams() > 0 {
+            m.tick();
+            guard += 1;
+            assert!(guard < 100, "the first talkspurt never ended");
+        }
+
+        // 第二段：同一个人、同一个频率。水位现在是 MAX_DEPTH=6 帧，
+        // 所以 5 帧还不该起播。
+        for seq in 20..25u16 {
+            let (h, opus) = packet(&mut enc, 121_800, 7, seq, 255, 0);
+            m.feed(&h, &opus);
+        }
+        let (pcm, _) = m.tick();
+        assert!(
+            rms(&pcm) == 0.0,
+            "five frames must not start playback when the learned water level is six"
+        );
+
+        let (h, opus) = packet(&mut enc, 121_800, 7, 25, 255, 0);
+        m.feed(&h, &opus);
+        let (pcm, _) = m.tick();
+        assert!(rms(&pcm) > 0.0, "the sixth frame must start it");
+    }
+
+    /// **一包就没了下文的那一路也要收得掉。**
+    ///
+    /// 只到了一两帧、尾帧又丢了（或者听众此刻飞出射程，服务端不打招呼就停发）
+    /// 时，起播前的 `pop` 永远返回 `None`：静音超时推不动，`RxEvent::End` 发不
+    /// 出来，RX 灯常亮，这条流也永不回收。mixer 自己没有时间概念——
+    /// 它的时钟就是 `tick` 本身。
+    #[test]
+    fn a_stream_that_gets_one_packet_and_nothing_more_is_reclaimed() {
+        let mut enc = Encoder::new().expect("encoder");
+        let mut m = RxMixer::new();
+        let (h, opus) = packet(&mut enc, 121_800, 7, 0, 255, FLAG_FIRST);
+        assert!(matches!(m.feed(&h, &opus), Some(RxEvent::Start { .. })));
+
+        let mut ended = false;
+        for _ in 0..100 {
+            let (pcm, events) = m.tick();
+            assert_eq!(pcm.len(), FRAME_SAMPLES, "the audio clock never skips a beat");
+            if events.iter().any(|e| matches!(e, RxEvent::End { .. })) {
+                ended = true;
+                break;
+            }
+        }
+        assert!(ended, "the talkspurt must end on its own");
+        assert_eq!(m.active_streams(), 0, "and the stream must be reclaimed");
     }
 
     #[test]

@@ -17,6 +17,21 @@
 //! **下一帧**就投给他，而那一帧没有首帧位；飞机飞进射程同理。等首帧的实现会让他
 //! 一声不响，直到对方下一次按下 PTT，而服务端日志完全正常。
 //!
+//! # 水位会涨也会落，而且跨发言携带
+//!
+//! 涨得快、落得慢：一次欠载立刻加一格（20 ms），而退一格要一整段
+//! [`SETTLED_FRAMES`] 帧没有欠载的发言。只涨不落的自适应等于没有自适应——
+//! 一次抖动把水位顶到 120 ms，此后每一句话都多等 120 ms，网络好转也回不来。
+//!
+//! **学到的水位由调用方带进下一次发言**（`rx::mixer` 的 `learned`）：缓冲是一次
+//! 发言一个，而起播只发生一次，不带的话自适应只在单次发言之内向上生效。
+//!
+//! # 起播也有超时
+//!
+//! 水位攒不满时最多等 [`START_TIMEOUT_TICKS`] 拍，然后拿手上这几帧起播。
+//! 不设这道闸的话，"只到了一两帧、尾帧又丢了"的那一路会让 `pop` 永远返回
+//! `None`：静音超时推不动，RX 灯常亮，mixer 里那条流永不回收。
+//!
 //! # 它自带静音超时
 //!
 //! `FLAG_LAST` 是尽力而为的优化，不是熄灯的机制——它走不可靠数据报会丢，而且
@@ -36,6 +51,19 @@ pub const MAX_DEPTH: usize = 6;
 
 /// 连续丢多少帧就认为这次发言结束了。3 帧 = 60 ms 没有任何东西到达。
 pub const MAX_CONSECUTIVE_LOST: usize = 3;
+
+/// 一段发言放到这么多帧（50 帧 = 1 秒）而一次没欠载，才算"网络确实好了"。
+///
+/// 短句不算数：一串"收到"会把水位一路推到下限，而下一句长的立刻欠载。
+pub const SETTLED_FRAMES: usize = 50;
+
+/// 起播前最多等这么多拍（10 拍 = 200 ms）。
+///
+/// 等不到水位也要拿现有的帧起播。**这是那条永远亮着的 RX 灯的出路**：只到了
+/// 一两帧、尾帧又丢了（或者听众此刻飞出射程，服务端不打招呼就停发）的时候，
+/// 起播前的 `pop` 会一直返回 `None`，静音超时推不动，mixer 里那条流永不回收。
+/// 帧到得这么慢的时候，多等下去也换不回一段连续的音频。
+pub const START_TIMEOUT_TICKS: usize = 10;
 
 /// 展开 16 位序号时给"比第一帧还早的迟到帧"留出的余量，
 /// 免得 `u64` 在起点附近下溢。
@@ -72,6 +100,12 @@ pub struct JitterBuffer {
     /// 因为起播只发生一次而缓冲是一次发言一个。
     target_depth: usize,
     consecutive_lost: usize,
+    /// 这一段里欠载过吗。欠载过就不许退水位——欠载正是水位被顶上去的理由。
+    underran: bool,
+    /// 这一段放了多少帧（含丢包隐藏的那些）。见 [`SETTLED_FRAMES`]。
+    played: usize,
+    /// 起播前空转了多少拍。见 [`START_TIMEOUT_TICKS`]。
+    waiting: usize,
 }
 
 impl Default for JitterBuffer {
@@ -96,6 +130,9 @@ impl JitterBuffer {
             finished: false,
             target_depth: target_depth.clamp(MIN_DEPTH, MAX_DEPTH),
             consecutive_lost: 0,
+            underran: false,
+            played: 0,
+            waiting: 0,
         }
     }
 
@@ -166,7 +203,11 @@ impl JitterBuffer {
         // 还没起播：等攒够水位。尾帧已到时不必再等 —— 那意味着不会再有更多数据了。
         if self.next.is_none() {
             if self.frames.len() < self.target_depth && self.last.is_none() {
-                return None;
+                self.waiting += 1;
+                // 等够了就拿手上这几帧起播。它们是真音频，播完自然走静音超时。
+                if self.waiting <= START_TIMEOUT_TICKS || self.frames.is_empty() {
+                    return None;
+                }
             }
             self.next = self.frames.keys().next().copied();
         }
@@ -175,14 +216,14 @@ impl JitterBuffer {
         if let Some(payload) = self.frames.remove(&next) {
             self.next = Some(next + 1);
             self.consecutive_lost = 0;
+            self.played += 1;
             return Some(Frame::Audio(payload));
         }
 
         // 尾帧已经播过了 —— 这次发言到此为止。
         if let Some(last) = self.last {
             if next > last {
-                self.finished = true;
-                return Some(Frame::End);
+                return Some(self.finish());
             }
         }
 
@@ -190,16 +231,30 @@ impl JitterBuffer {
         // 服务端**不打招呼就停发**），这就是欠载：水位不够，下一次发言攒深一点。
         if self.frames.is_empty() {
             self.target_depth = (self.target_depth + 1).min(MAX_DEPTH);
+            self.underran = true;
         }
 
         self.next = Some(next + 1);
         self.consecutive_lost += 1;
+        self.played += 1;
         if self.consecutive_lost > MAX_CONSECUTIVE_LOST {
             // 静音超时。这是 `FLAG_LAST` 丢了、或者服务端悄悄停发时唯一的出路。
-            self.finished = true;
-            return Some(Frame::End);
+            return Some(self.finish());
         }
         Some(Frame::Lost)
+    }
+
+    /// 收尾，并把这一段学到的东西结算进水位。
+    ///
+    /// **涨得快、落得慢**：一次欠载立刻加一格，而退一格要一整段（[`SETTLED_FRAMES`]
+    /// 帧）没有欠载。反过来的话，水位会在一条时好时坏的线路上来回震荡，
+    /// 而每一次调低都是下一次卡顿。
+    fn finish(&mut self) -> Frame {
+        self.finished = true;
+        if !self.underran && self.played >= SETTLED_FRAMES {
+            self.target_depth = self.target_depth.saturating_sub(1).max(MIN_DEPTH);
+        }
+        Frame::End
     }
 
     /// 当前缓存的帧数（**占用量**，不是水位）。
@@ -461,6 +516,99 @@ mod tests {
     }
 
     // ——— M10：深度自适应，以及 L2 的改名 ———
+
+    /// 只涨不落的自适应等于没有自适应：一次抖动把水位顶到 120 ms，此后每一句话
+    /// 都多等 120 ms，网络好转也回不来。一段**干净**的发言之后要退一格。
+    /// 一帧一帧地喂，一拍一拍地取——生产里就是这样：包以 50/秒到达，
+    /// `pop` 由声卡时钟每 20 ms 调一次。一口气 push 几十帧会撞上防暴涨的上限，
+    /// 测出来的就不是同一件事了。
+    fn play_talkspurt(j: &mut JitterBuffer, frames: usize) {
+        for s in 0..frames {
+            j.push(s as u16, vec![1], s == frames - 1);
+            // 起播前水位还没到，这几拍取不出东西来，正常。
+            if s >= j.target_depth() {
+                j.pop();
+            }
+        }
+        while !j.finished() && j.pop().is_some() {}
+    }
+
+    #[test]
+    fn a_clean_talkspurt_lowers_the_water_level_for_the_next_one() {
+        let mut j = JitterBuffer::with_target_depth(MAX_DEPTH);
+        play_talkspurt(&mut j, SETTLED_FRAMES + MAX_DEPTH);
+        assert!(j.finished());
+        assert_eq!(
+            j.target_depth(),
+            MAX_DEPTH - 1,
+            "a clean talkspurt must give one frame back"
+        );
+    }
+
+    /// 欠载过的那一段不退：它正是水位被顶上去的理由。
+    #[test]
+    fn a_talkspurt_that_underran_keeps_the_deeper_water_level() {
+        let mut j = JitterBuffer::with_target_depth(START_DEPTH);
+        // 够长，不是被"短句不退水位"那条挡回去的。中间有一次抖动尖峰：
+        // 连着四拍什么都没到，缓冲被抽干——**那才是欠载**（漏一帧不是：
+        // 缓冲还有货，只是缺了中间那一格）。
+        let total = SETTLED_FRAMES + START_DEPTH;
+        let spike = total / 2;
+        let mut seq = 0usize;
+        for tick in 0..total + 8 {
+            if !(spike..spike + 4).contains(&tick) && seq < total {
+                j.push(seq as u16, vec![1], seq == total - 1);
+                seq += 1;
+            }
+            if tick >= START_DEPTH {
+                j.pop();
+            }
+        }
+        while !j.finished() && j.pop().is_some() {}
+        assert!(j.finished());
+        assert!(
+            j.target_depth() > START_DEPTH,
+            "an underrun must not be rewarded with a shallower buffer, got {}",
+            j.target_depth()
+        );
+    }
+
+    /// 一句"收到"不足以判断网络好了。短发言退水位的话，水位会被一串短句
+    /// 一路推到下限，而下一句长的立刻欠载。
+    #[test]
+    fn a_short_talkspurt_does_not_lower_the_water_level() {
+        let mut j = JitterBuffer::with_target_depth(MAX_DEPTH);
+        for s in 0..5u16 {
+            j.push(s, vec![1], s == 4);
+        }
+        while j.pop().is_some() {}
+        assert!(j.finished());
+        assert_eq!(j.target_depth(), MAX_DEPTH);
+    }
+
+    /// **水位永远攒不满的那一路要自己走出来。**
+    ///
+    /// 只到了一两帧、尾帧又丢了（或者听众此刻飞出射程，服务端不打招呼就停发）
+    /// 时，起播前的 `pop` 会一直返回 `None`：静音超时推不动，RX 灯常亮，
+    /// mixer 里那条流永不回收。等够了就拿现有的这几帧起播——它们是真音频，
+    /// 播完自然走静音超时那条路。
+    #[test]
+    fn a_stream_that_never_fills_starts_anyway_and_then_ends() {
+        let mut j = JitterBuffer::with_target_depth(MAX_DEPTH);
+        j.push(0, vec![7], false);
+        for tick in 0..START_TIMEOUT_TICKS {
+            assert_eq!(j.pop(), None, "tick {tick} should still be waiting");
+        }
+        assert_eq!(j.pop(), Some(Frame::Audio(vec![7])), "it must start anyway");
+
+        // 起播之后静音超时接手，这次发言收尾，流才回收得掉。
+        let mut guard = 0;
+        while !j.finished() {
+            j.pop();
+            guard += 1;
+            assert!(guard < 100, "the talkspurt never ended");
+        }
+    }
 
     /// L2：`depth()` 是**占用量**，`target_depth()` 是**起播水位**。
     /// 原实现里一个字段叫 `depth`、一个方法也叫 `depth()`，八行里一个词两个意思。
