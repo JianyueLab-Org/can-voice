@@ -149,6 +149,7 @@ fn restore_stack(stack: &mut can_voice_client::stack::RadioStack, saved: &[Radio
         stack.set_tx(r.freq_khz, r.tx);
         stack.set_xc(r.freq_khz, r.xc);
         stack.set_gain(r.freq_khz, r.gain);
+        stack.set_muted(r.freq_khz, r.muted);
         if r.selected {
             stack.set_selected(r.freq_khz);
         }
@@ -437,6 +438,14 @@ fn set_volume(state: tauri::State<'_, App>, freq_khz: u32, gain: f32) {
     state.update_settings(|_| {});
 }
 
+/// 单频静音。**和关 RX 是两件事**：静音只是不播出来，包照收、灯照亮；
+/// 关 RX 是退订，下一次有人叫你时连灯都不亮。
+#[tauri::command]
+fn set_muted(state: tauri::State<'_, App>, freq_khz: u32, on: bool) {
+    state.bridge.set_muted(freq_khz, on);
+    state.update_settings(|_| {});
+}
+
 /// 界面上选中的那一行。**不发给服务端**——它和服务端的"主频率"是两件毫不相干
 /// 的事，字段因此叫 `selected`。
 #[tauri::command]
@@ -691,6 +700,7 @@ pub fn run() {
             remove_frequency,
             set_switch,
             set_volume,
+            set_muted,
             set_selected,
             set_transmitting,
             set_ptt_bindings,
@@ -839,6 +849,7 @@ mod tests {
                 xc: false,
                 gain: 0.5,
                 selected: false,
+                muted: false,
                 callsign: String::new(),
             },
             Radio {
@@ -848,6 +859,7 @@ mod tests {
                 xc: false,
                 gain: 1.0,
                 selected: true,
+                muted: true,
                 callsign: "ZSPD_TWR".into(),
             },
         ];

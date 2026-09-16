@@ -59,6 +59,25 @@ pub struct Snapshot {
     pub health: Option<Health>,
     /// 服务端的其它通知，最近的在最后。
     pub notices: Vec<(String, u32, String)>,
+    /// 每个频率上最近一次通话。
+    ///
+    /// **绿点只说"此刻有没有人在讲"。** 管制员真正要判断的是"这个频率还活着
+    /// 吗"——三秒前有人说过话和二十分钟没动静是两种处境，而绿点灭了之后这两者
+    /// 长得一模一样。
+    pub last_talk: BTreeMap<u32, LastTalk>,
+}
+
+/// 某个频率上最近一次通话。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LastTalk {
+    /// 说话的那个人的会话 id。
+    ///
+    /// **这不是 CAN 号，也换不出呼号来**：协议里 `speaker` 是服务端给这条会话编
+    /// 的号，客户端手上没有它到 CAN 号的映射，而那需要控制面上多一条消息。
+    /// 呼号那一半因此还欠着（issue #46）。
+    pub speaker: u32,
+    /// Unix 秒。界面自己按本地时区格式化——这一层不知道用户在哪个时区。
+    pub at: u64,
 }
 
 impl Default for Snapshot {
@@ -72,6 +91,7 @@ impl Default for Snapshot {
             denied_xc: BTreeSet::new(),
             health: None,
             notices: Vec::new(),
+            last_talk: BTreeMap::new(),
         }
     }
 }
@@ -86,7 +106,21 @@ impl Snapshot {
     }
 
     /// 把一个事件吃进来。
+    ///
+    /// 时间由 [`Snapshot::apply_at`] 那一版注入——这一版读的是系统时钟。
     pub fn apply(&mut self, event: &Event) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        self.apply_at(event, now);
+    }
+
+    /// 把一个事件吃进来，时间由调用方给。
+    ///
+    /// **时钟是参数而不是全局**：不然"最后一次通话"这件事就只能靠 sleep 来测，
+    /// 而一条靠 sleep 的测试要么慢要么不稳。
+    pub fn apply_at(&mut self, event: &Event, now_unix: u64) {
         match event {
             Event::State(state) => self.on_state(*state),
             Event::Refused { reason } => self.ended = Some(Ended::Refused(reason.clone())),
@@ -102,6 +136,15 @@ impl Snapshot {
                 if let Some(set) = self.receiving.get_mut(freq_khz) {
                     set.remove(speaker);
                 }
+                // 记的是**说完**的那一刻：开始说的时间在一段长通话里越来越不像
+                // "最近"，而管制员问的正是"多久没人说话了"。
+                self.last_talk.insert(
+                    *freq_khz,
+                    LastTalk {
+                        speaker: *speaker,
+                        at: now_unix,
+                    },
+                );
             }
             Event::TxDenied { freq_khz, .. } => {
                 self.denied_tx.insert(*freq_khz);
@@ -187,6 +230,42 @@ mod tests {
         let mut s = Snapshot::default();
         s.apply(&Event::State(LinkState::Online));
         s
+    }
+
+    /// **每一行要记得最后一次通话是什么时候。**
+    ///
+    /// 一个绿点只说"此刻有没有人在讲"。管制员真正要判断的是"这个频率还活着吗"
+    /// ——三秒前有人说过话和二十分钟没动静，是两种完全不同的处境，而绿点灭了
+    /// 之后这两者长得一模一样。
+    ///
+    /// 记的是**会话 id 不是呼号**：协议里 `speaker` 是服务端给这条会话编的号，
+    /// 客户端手上没有它到 CAN 号的映射。见 #46。
+    #[test]
+    fn a_frequency_remembers_when_somebody_last_spoke_on_it() {
+        let mut s = Snapshot::default();
+
+        s.apply_at(
+            &Event::RxStart {
+                freq_khz: 121_800,
+                speaker: 7,
+            },
+            1_700_000_000,
+        );
+        s.apply_at(
+            &Event::RxEnd {
+                freq_khz: 121_800,
+                speaker: 7,
+                frames: 200,
+                secs: 4.0,
+            },
+            1_700_000_004,
+        );
+
+        let last = s.last_talk.get(&121_800).copied().expect("recorded");
+        assert_eq!(last.speaker, 7);
+        // 记的是**说完**的那一刻：开始说的时间在一段长通话里越来越不像"最近"。
+        assert_eq!(last.at, 1_700_000_004);
+        assert!(!s.is_receiving(121_800));
     }
 
     #[test]

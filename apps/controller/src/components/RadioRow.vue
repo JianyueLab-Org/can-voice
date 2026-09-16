@@ -6,6 +6,7 @@ interface Radio {
   xc: boolean;
   gain: number;
   selected: boolean;
+  muted: boolean;
   callsign: string;
 }
 
@@ -18,20 +19,42 @@ const props = defineProps<{
   locked: boolean;
   /** 此刻允不允许发射。不在席位上时 TX / XC 是灰的。 */
   transmitAllowed: boolean;
+  /** 这一行此刻正在发射（TX 开着而且 PTT 按着）。 */
+  transmitting: boolean;
+  /** 这个频率上最近一次通话。`null` = 从挂上到现在没人在这里说过话。 */
+  lastTalk: { speaker: number; at: number } | null;
 }>();
 
 defineEmits<{
   switch: [name: "rx" | "tx" | "xc", on: boolean];
   volume: [gain: number];
+  mute: [on: boolean];
   select: [];
   remove: [];
 }>();
 
 const mhz = (khz: number) => (khz / 1000).toFixed(3);
+
+/**
+ * 最后一次通话是什么时候。
+ *
+ * 只有时刻，**没有名字**：协议里 `speaker` 是服务端给会话编的号，客户端手上
+ * 没有它到 CAN 号的映射，呼号那一半还欠着（见 issue #46）。
+ */
+const lastTalkText = (t: { at: number } | null) =>
+  t ? new Date(t.at * 1000).toLocaleTimeString() : "";
 </script>
 
 <template>
-  <div class="flex items-center gap-3 rounded border px-3 py-2" :class="radio.selected ? 'border-sky-500' : ''">
+  <!-- 正在发射的那一行要一眼看得出来：一个人同时在三个频率上开着 TX 的时候，
+       他按下 PTT 说的那句话到底进了哪几条，是要能看见的。 -->
+  <div
+    class="flex items-center gap-3 rounded border px-3 py-2"
+    :class="[
+      radio.selected ? 'border-sky-500' : '',
+      transmitting ? 'bg-red-50 ring-1 ring-red-400' : '',
+    ]"
+  >
     <!-- `selected` 是界面标记，**不发给服务端**：它和服务端的"主频率"是两件
          毫不相干的事，所以字段不叫 primary。 -->
     <button class="w-4 text-sky-600" :title="'选中这一行'" @click="$emit('select')">
@@ -73,6 +96,18 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
       {{ s }}
     </label>
 
+    <!-- 静音是一个开关，不是把音量拉到 0：拉到 0 的话，取消静音回不到用户
+         原来调的那个刻度。和关 RX 也不是一件事——那是退订，下次有人叫你时
+         连灯都不亮。 -->
+    <button
+      class="w-6 text-center"
+      :class="radio.muted ? 'text-red-600' : 'opacity-50'"
+      :title="radio.muted ? '已静音，点一下恢复' : '静音这个频率（仍然收包、仍然亮灯）'"
+      @click="$emit('mute', !radio.muted)"
+    >
+      {{ radio.muted ? "🔇" : "🔈" }}
+    </button>
+
     <input
       type="range"
       min="0"
@@ -80,8 +115,15 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
       step="0.05"
       :value="radio.gain"
       class="w-24"
+      :class="radio.muted ? 'opacity-40' : ''"
       @input="$emit('volume', Number(($event.target as HTMLInputElement).value))"
     />
+
+    <!-- 最后一次通话。绿点只说"此刻有没有人在讲"，而"多久没人说话了"才是
+         管制员判断这条频率还活着没有的依据。 -->
+    <span v-if="lastTalk" class="font-mono text-xs opacity-50" title="最后一次通话">
+      {{ lastTalkText(lastTalk) }}
+    </span>
 
     <!-- 被拒要说出来：一个设好了却不生效、又不知道为什么的开关，
          正是整个重写要逃离的那类故障。 -->

@@ -169,6 +169,29 @@ impl Bridge {
     /// 某个频率的播放音量。
     pub fn set_volume(&self, freq_khz: u32, gain: f32) {
         self.with_stack(|s| s.set_gain(freq_khz, gain));
+        self.push_gain(freq_khz);
+    }
+
+    /// 静音 / 取消静音某个频率。
+    ///
+    /// **和退订是两件事**：静音只是不播出来，包照收、灯照亮；退订（关 RX）会让
+    /// 下一次有人叫你时连灯都不亮。一个临时插话的频率要的是前者。
+    pub fn set_muted(&self, freq_khz: u32, on: bool) {
+        self.with_stack(|s| s.set_muted(freq_khz, on));
+        self.push_gain(freq_khz);
+    }
+
+    /// 把这个频率此刻**该用的**音量推给播放层。
+    ///
+    /// 推的是 `effective_gain` 而不是 `gain`：推 `gain` 的话静音就只是一个画在
+    /// 界面上的图标——声音照出，而用户以为自己把它关掉了。
+    fn push_gain(&self, freq_khz: u32) {
+        let gain = self
+            .radios()
+            .iter()
+            .find(|r| r.freq_khz == freq_khz)
+            .map(|r| r.effective_gain())
+            .unwrap_or(1.0);
         if let Ok(c) = self.inner.client.lock() {
             if let Some(c) = c.as_ref() {
                 c.set_frequency_volume(freq_khz, gain);

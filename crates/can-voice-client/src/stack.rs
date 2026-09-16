@@ -34,12 +34,32 @@ pub struct Radio {
     /// 一定会想把它们连起来。判错的代价很具体：恰好在"双订阅 + 交叉耦合"这个
     /// 情况下，音频会显示在错误的电台行上。
     pub selected: bool,
+    /// 静音。**`gain` 照旧留着**——取消静音要回到用户原来调的那个位置，
+    /// 而不是回到 1.0。静音是一个开关，不是一个音量。
+    ///
+    /// `#[serde(default)]`：老的设置文件里没有这一项。
+    #[serde(default)]
+    pub muted: bool,
     /// 这个频率上那个席位的呼号。查不到就是空的。
     ///
     /// `#[serde(default)]`：老的设置文件里没有这一项，缺了它整份电台栈就读不
     /// 回来——而读不回来的表现是"一升级，我的频率全没了"。
     #[serde(default)]
     pub callsign: String,
+}
+
+impl Radio {
+    /// 这个频率此刻该用多大音量播。静音就是 0。
+    ///
+    /// **播放层要的是这个数，不是 `gain`**：直接拿 `gain` 去播，静音就只是一个
+    /// 画在界面上的图标。
+    pub fn effective_gain(&self) -> f32 {
+        if self.muted {
+            0.0
+        } else {
+            self.gain
+        }
+    }
 }
 
 /// 一次全量声明，连同客户端自己夹掉的部分。
@@ -108,6 +128,7 @@ impl RadioStack {
             xc: false,
             gain: 1.0,
             selected,
+            muted: false,
             callsign: callsign.to_string(),
         });
     }
@@ -230,6 +251,16 @@ impl RadioStack {
     pub fn set_gain(&mut self, freq_khz: u32, gain: f32) {
         if let Some(r) = self.get_mut(freq_khz) {
             r.gain = gain.clamp(0.0, 2.0);
+        }
+    }
+
+    /// 静音 / 取消静音。**不产生任何线上效果**：包照收，只是不播出来。
+    ///
+    /// 退订才是线上的事，而那是 RX 开关。两者刻意分开：一个临时插话的频率
+    /// 静音掉就行，退订它会让下一次有人叫你时连灯都不亮。
+    pub fn set_muted(&mut self, freq_khz: u32, on: bool) {
+        if let Some(r) = self.get_mut(freq_khz) {
+            r.muted = on;
         }
     }
 
@@ -380,6 +411,26 @@ mod tests {
         assert!(!radio(&s, 118_350).tx);
         s.set_tx(118_350, true);
         assert!(radio(&s, 118_350).tx);
+    }
+
+    /// **单频静音记着原来的音量。**
+    ///
+    /// 把音量拉到 0 也能不出声，但那样取消静音就回不到原来那个位置了——
+    /// 用户得重新找一遍他调了半天的那个刻度。静音是一个开关，不是一个音量。
+    #[test]
+    fn muting_one_frequency_remembers_the_volume_it_had() {
+        let mut s = stack_with(&[118_350]);
+        s.set_gain(118_350, 0.4);
+
+        s.set_muted(118_350, true);
+        assert!(radio(&s, 118_350).muted);
+        assert_eq!(radio(&s, 118_350).effective_gain(), 0.0);
+        // 静音期间调音量，调的是解除之后要回到的那个数。
+        s.set_gain(118_350, 0.8);
+        assert_eq!(radio(&s, 118_350).effective_gain(), 0.0);
+
+        s.set_muted(118_350, false);
+        assert_eq!(radio(&s, 118_350).effective_gain(), 0.8);
     }
 
     /// 频率上那个人是谁，电台行上要认得出来。

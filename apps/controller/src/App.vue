@@ -16,6 +16,8 @@ interface Radio {
   xc: boolean;
   gain: number;
   selected: boolean;
+  /** 静音。`gain` 照旧留着——取消静音回到原来那个位置。 */
+  muted: boolean;
   /** 这个频率上那个席位的呼号。查不到就是空的。 */
   callsign: string;
 }
@@ -60,6 +62,8 @@ interface Snapshot {
   } | null;
   /** 服务端的其它通知：`[kind, freq_khz, reason]`，最近的在最后。 */
   notices: [string, number, string][];
+  /** 每个频率上最近一次通话。键是频率（kHz）的十进制写法。 */
+  last_talk: Record<string, { speaker: number; at: number }>;
 }
 
 const cid = ref("");
@@ -179,6 +183,13 @@ const locked = (khz: number) => feed.value?.duty.freq_khz === khz;
 /** 画灰与否照着台面的真相，不自己推：推出来的那份迟早和它对不上。 */
 const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
 
+/** 这一行此刻正在发射：TX 开着，而且 PTT 按着。 */
+function isTransmitting(r: Radio): boolean {
+  return pressed.value && r.tx;
+}
+function lastTalk(khz: number) {
+  return snap.value?.last_talk?.[String(khz)] ?? null;
+}
 function isReceiving(khz: number): boolean {
   return (snap.value?.receiving?.[String(khz)]?.length ?? 0) > 0;
 }
@@ -314,8 +325,11 @@ async function act(name: string, args: Record<string, unknown>) {
         :rx-denied="rxDenied(r.freq_khz)"
         @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
         @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
+        @mute="(on) => act('set_muted', { freqKhz: r.freq_khz, on })"
         @select="act('set_selected', { freqKhz: r.freq_khz })"
         :locked="locked(r.freq_khz)"
+        :transmitting="isTransmitting(r)"
+        :last-talk="lastTalk(r.freq_khz)"
         :transmit-allowed="mayTransmit"
         @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
       />
