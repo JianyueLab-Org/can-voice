@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod observer;
 pub mod snapshot;
 
 pub use bridge::Bridge;

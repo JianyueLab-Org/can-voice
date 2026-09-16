@@ -5,8 +5,9 @@ import LogPanel from "./LogPanel.vue";
 import InstallWizard from "./InstallWizard.vue";
 
 /// `cid` 是已经存下来的 CAN 号，寄日志时预填，省得再打一遍；
-/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来。
-const props = defineProps<{ cid?: string; csl?: CslView }>();
+/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来；
+/// `observer` 是观察员模式开着没有——观察员不上 FSD，拍发不了计划。
+const props = defineProps<{ cid?: string; csl?: CslView; observer?: boolean }>();
 import type { CslView, FlightPlan, Settings } from "../types";
 import { emptyFlightPlan } from "../types";
 
@@ -180,8 +181,12 @@ async function remove(i: number) {
         <input v-model="plan.remarks" class="rounded border px-2 py-1" /></label>
 
       <div class="col-span-4 flex items-center gap-2">
-        <button class="rounded border px-3 py-1" @click="file">拍发</button>
-        <span class="opacity-70">{{ filed }}</span>
+        <!-- 观察员没有 FSD 连接，计划由机长那一端拍发。 -->
+        <button class="rounded border px-3 py-1" :disabled="props.observer" @click="file">
+          拍发
+        </button>
+        <span v-if="props.observer" class="opacity-70">观察员不上网络，飞行计划由机长拍发</span>
+        <span v-else class="opacity-70">{{ filed }}</span>
       </div>
     </div>
 
