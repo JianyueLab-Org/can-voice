@@ -20,6 +20,7 @@ can-voice-client = { path = "../../../crates/can-voice-client" }
 can-voice-fsd = { path = "../../../crates/can-voice-fsd" }
 can-voice-ptt = { path = "../../../crates/can-voice-ptt" }
 can-voice-settings = { path = "../../../crates/can-voice-settings" }
+can-voice-chime = { path = "../../../crates/can-voice-chime" }
 can-voice-sim = { path = "../../../crates/can-voice-sim" }
 can-voice-token = { path = "../../../crates/can-voice-token" }
 can-voice-log = { path = "../../../crates/can-voice-log" }
