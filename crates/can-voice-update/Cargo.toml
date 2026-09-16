@@ -1,0 +1,20 @@
+[package]
+name = "can-voice-update"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# 单独一个 crate，不是 can-voice-app 里的一个模块。
+#
+# 四个客户端都要查更新，而 **atis-for-can 不该为这件事把 can-voice-app 整个拉进来**
+# ——那条路上挂着 can-voice-ptt（rdev/gilrs，Linux 上要 libx11 和 libudev），
+# 而通播制作客户端连 PTT 都没有。理由和 can-voice-settings 拆出来时一模一样。
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt", "macros", "net", "io-util"] }
