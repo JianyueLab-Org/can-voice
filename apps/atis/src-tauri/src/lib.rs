@@ -50,16 +50,36 @@ struct Running {
     wake: Arc<tokio::sync::Notify>,
 }
 
+/// 存下来的设置。
+///
+/// **只有 CAN 号。** 密码不存——它换的是一张短寿命的票，把一份长期凭据留在
+/// 磁盘上买不到任何东西；而挂五个席位要重复确认五次，那是 CAN 号的问题。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    #[serde(default)]
+    pub cid: String,
+    /// 用户说过"这一版不用再问我"的那个版本号。**跳过的是那一个版本，
+    /// 不是从此闭嘴**——下一版照样提示。
+    #[serde(default)]
+    pub skipped_update: String,
+}
+
 pub struct App {
     profiles: Mutex<ProfileSet>,
     running: Mutex<HashMap<String, Running>>,
+    store: can_voice_settings::Store,
+    settings: Mutex<Settings>,
 }
 
 impl App {
     pub fn new() -> Self {
+        let store = can_voice_settings::Store::for_product("atis-for-can");
+        let settings = store.load();
         Self {
             profiles: Mutex::new(ProfileSet::load(profile_path())),
             running: Mutex::new(HashMap::new()),
+            store,
+            settings: Mutex::new(settings),
         }
     }
 }
@@ -259,6 +279,30 @@ fn preview(
     ))
 }
 
+/// 存下来的设置。**前端一挂上就读它**，把 CAN 号填回去。
+#[tauri::command]
+fn settings(app: tauri::State<'_, App>) -> Settings {
+    match app.settings.lock() {
+        Ok(s) => s.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
+/// 记住这个 CAN 号。上线成功之后才叫，连不上的那个多半是打错了。
+fn remember_cid(app: &App, cid: &str) {
+    let mut s = match app.settings.lock() {
+        Ok(s) => s,
+        Err(p) => p.into_inner(),
+    };
+    if s.cid == cid {
+        return;
+    }
+    s.cid = cid.to_string();
+    if let Err(e) = app.store.save(&*s) {
+        tracing::warn!(error = %e, "could not save the settings");
+    }
+}
+
 // ——— 上线 / 下线 ———
 
 #[tauri::command]
@@ -343,6 +387,8 @@ fn start(
             wake,
         },
     );
+    drop(running);
+    remember_cid(&app, &cid);
     Ok(())
 }
 
@@ -490,14 +536,103 @@ async fn poll(
     l.rendered = rendered;
 }
 
+// ——— 更新检查 ———
+
+/// 查一次有没有新版。
+///
+/// **失败一律当成"没有更新"**，而且不打断正在工作的人：连着的时候一个模态框
+/// 盖在台面上比晚一次更新糟得多，跳过的那一版也不再问。
+#[tauri::command]
+async fn check_update(
+    app: tauri::State<'_, App>,
+) -> Result<Option<can_voice_update::Latest>, String> {
+    let (skipped, busy) = { let s = match app.settings.lock() {
+            Ok(s) => s.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        // 有席位在播就是"正在工作"：换版本要停播，而停播是全网听得见的。
+        let busy = !match app.running.lock() {
+            Ok(r) => r.is_empty(),
+            Err(p) => p.into_inner().is_empty(),
+        };
+        (s.skipped_update, busy) };
+    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    let Some(latest) = can_voice_update::check_once(&origin, "atis-for-can", env!("CARGO_PKG_VERSION")).await else {
+        return Ok(None);
+    };
+    let skipped = (!skipped.is_empty()).then_some(skipped);
+    Ok(can_voice_update::should_prompt(
+        &latest.version,
+        env!("CARGO_PKG_VERSION"),
+        skipped.as_deref(),
+        busy,
+    )
+    .then_some(latest))
+}
+
+/// 记住"这一版不用再问我"。**跳过的是那一个版本，不是从此闭嘴。**
+#[tauri::command]
+fn skip_update(app: tauri::State<'_, App>, version: String) {
+    let mut s = match app.settings.lock() {
+        Ok(s) => s,
+        Err(p) => p.into_inner(),
+    };
+    s.skipped_update = version;
+    if let Err(e) = app.store.save(&*s) {
+        tracing::warn!(error = %e, "could not save the settings");
+    }
+}
+
+/// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
+#[tauri::command]
+fn open_download(url: String) -> Result<(), String> {
+    can_voice_update::open_in_browser(&url)
+}
+
+// ——— 日志 ———
+
+/// 当前这份日志在哪。界面上显示给用户，让他知道要发的是哪个文件。
+#[tauri::command]
+fn log_file() -> Option<String> {
+    can_voice_log::path().map(|p| p.display().to_string())
+}
+
+/// 把日志寄回去。
+///
+/// **要 CAN 号和密码**：can-api 的 `/api/v1/logs` 认的是这一对，不是会话。
+/// 密码用完就丢，不进设置文件。
+#[tauri::command]
+async fn send_log(
+    app: tauri::State<'_, App>,
+    cid: String,
+    password: String,
+) -> Result<(), String> {
+    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    let _ = &app;
+    can_voice_log::upload_once(
+        &origin,
+        "atis-for-can",
+        env!("CARGO_PKG_VERSION"),
+        &cid,
+        &password,
+    )
+    .await
+}
+
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(env_or("RUST_LOG", "info"))
-        .init();
+    // **日志要落盘。** 打包出来的是一个没有控制台的 GUI 进程，`stdout` 写到哪里
+    // 谁也看不见；用户报"连不上"的时候手里得有一份能发出来的东西。
+    // 这一步同时装上 panic 钩子——崩溃不留记录的话，窗口没了、日志干净。
+    can_voice_log::init("atis-for-can", std::env::args().any(|a| a == "--debug"));
 
     tauri::Builder::default()
         .manage(App::new())
         .invoke_handler(tauri::generate_handler![
+            log_file,
+            send_log,
+            check_update,
+            skip_update,
+            open_download,
             profiles,
             stations,
             add_profile,
@@ -512,6 +647,7 @@ pub fn run() {
             stop,
             live,
             refresh,
+            settings,
         ])
         .run(tauri::generate_context!())
         .expect("tauri failed to start");

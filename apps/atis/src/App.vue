@@ -2,6 +2,9 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import StationEditor from "./components/StationEditor.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
+import LogPanel from "./components/LogPanel.vue";
+import NameDialog from "./components/NameDialog.vue";
 import type { Live, Rendered, Station } from "./types";
 import { callsignOf, stateText } from "./types";
 
@@ -16,6 +19,9 @@ const cid = ref("");
 const password = ref("");
 const sampleMetar = ref("ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG");
 const preview = ref<Rendered | null>(null);
+
+/** 当前打开的是哪个对话框。`null` 是没开。 */
+const asking = ref<"profile" | "rename" | "station" | null>(null);
 
 let timer: number | undefined;
 
@@ -88,10 +94,9 @@ const save = () =>
     selected.value = callsignOf(s);
   });
 
-const addStation = () =>
+const addStation = (icao: string) =>
   guard(async () => {
-    const icao = window.prompt("机场四字码");
-    if (!icao) return;
+    asking.value = null;
     const made = await invoke<Station>("add_station", { identifier: icao });
     selected.value = callsignOf(made);
   });
@@ -116,12 +121,25 @@ const start = () =>
 const stop = () => guard(() => invoke("stop", { callsign: selected.value }));
 const refresh = () => guard(() => invoke("refresh", { callsign: selected.value }));
 
-const addProfile = () =>
+const addProfile = (name: string) =>
   guard(async () => {
-    const name = window.prompt("新配置的名字");
-    if (!name) return;
+    asking.value = null;
     await invoke("add_profile", { name });
     await invoke("select_profile", { name });
+  });
+
+/** 改名。**命令一直都在**，只是没有地方按——建错名字的配置改不掉也删不掉。 */
+const renameProfile = (name: string) =>
+  guard(async () => {
+    asking.value = null;
+    await invoke("rename_profile", { old: profiles.value.active, new: name });
+  });
+
+const removeProfile = () =>
+  guard(async () => {
+    // 删掉的是一整份配置，问一句。这是这个界面上唯一不可撤销的动作。
+    if (!window.confirm(`删除配置「${profiles.value.active}」？`)) return;
+    await invoke("remove_profile", { name: profiles.value.active });
   });
 
 const pickProfile = (name: string) => guard(() => invoke("select_profile", { name }));
@@ -131,7 +149,13 @@ watch([selected, presetName, sampleMetar], () => {
   void renderPreview();
 });
 
+// 上次用的 CAN 号预填。密码不存：它换的是一张短寿命的票。
+async function loadSettings() {
+  cid.value = (await invoke<{ cid: string }>("settings")).cid;
+}
+
 onMounted(async () => {
+  await loadSettings();
   await reload();
   // 在播的那几路状态一直在变，轮询比订阅省事，也不会漏掉挂载之前发生的事。
   timer = window.setInterval(refreshLive, 1000);
@@ -150,7 +174,21 @@ onUnmounted(() => window.clearInterval(timer));
       >
         <option v-for="n in profiles.names" :key="n">{{ n }}</option>
       </select>
-      <button class="rounded border px-2 py-1 text-xs" @click="addProfile">新配置</button>
+      <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">新配置</button>
+      <button
+        class="rounded border px-2 py-1 text-xs"
+        :disabled="!profiles.active"
+        @click="asking = 'rename'"
+      >
+        改名
+      </button>
+      <button
+        class="rounded border px-2 py-1 text-xs"
+        :disabled="profiles.names.length < 2"
+        @click="removeProfile"
+      >
+        删除
+      </button>
       <div class="ml-auto flex items-center gap-2">
         <input v-model="cid" placeholder="CAN 号" class="w-24 rounded border px-2 py-1 text-xs" />
         <input
@@ -161,6 +199,8 @@ onUnmounted(() => window.clearInterval(timer));
         />
       </div>
     </header>
+
+    <UpdateBanner />
 
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
@@ -185,9 +225,17 @@ onUnmounted(() => window.clearInterval(timer));
             {{ live[callsignOf(s)].letter }}
           </span>
         </button>
-        <button class="rounded border border-dashed px-2 py-1 text-xs" @click="addStation">
+        <button class="rounded border border-dashed px-2 py-1 text-xs" @click="asking = 'station'">
           + 新席位
         </button>
+
+        <!-- 折叠着：平时不占地方，出了问题才展开。 -->
+        <details class="mt-auto rounded border px-2 py-1 text-xs">
+          <summary class="cursor-pointer opacity-70">日志</summary>
+          <div class="pt-2">
+            <LogPanel :cid="cid" />
+          </div>
+        </details>
       </aside>
 
       <!-- 编辑 -->
@@ -266,5 +314,27 @@ onUnmounted(() => window.clearInterval(timer));
         </template>
       </aside>
     </div>
+
+    <NameDialog
+      :open="asking === 'profile'"
+      title="新配置的名字"
+      placeholder="例如：浦东"
+      @confirm="addProfile"
+      @cancel="asking = null"
+    />
+    <NameDialog
+      :open="asking === 'rename'"
+      title="改配置的名字"
+      :initial="profiles.active"
+      @confirm="renameProfile"
+      @cancel="asking = null"
+    />
+    <NameDialog
+      :open="asking === 'station'"
+      title="新席位"
+      placeholder="机场四字码，例如 ZSPD"
+      @confirm="addStation"
+      @cancel="asking = null"
+    />
   </main>
 </template>
