@@ -39,6 +39,19 @@ func (r *Router) SetLocator(l Locator) {
 	r.locator = l
 }
 
+// TxDeniedError 是"这个会话没有在这个频率上声明发射"。
+//
+// 是一个类型而不是一句格式化好的话：传输层要把频率原样放进 NOTICE，
+// 而从一句话里再把它解析出来，是先把它丢掉再捡回来。
+type TxDeniedError struct {
+	Session SessionID
+	FreqKHz uint32
+}
+
+func (e *TxDeniedError) Error() string {
+	return fmt.Sprintf("session %d has not declared transmit on %d", e.Session, e.FreqKHz)
+}
+
 // Fanout 把一个上行数据包转发给订阅者，返回实际投递的份数。
 //
 // 路径（spec 8）：校验发送权 → 算出目标频率 → 查订阅者 → 逐个算 qual →
@@ -52,7 +65,7 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 	// 第一道校验：没声明在这个频率上发送就丢弃，
 	// 否则任何人都能往任意频率喊话。
 	if !r.MayTransmit(from, h.FreqKHz) {
-		return 0, fmt.Errorf("session %d has not declared transmit on %d", from, h.FreqKHz)
+		return 0, &TxDeniedError{Session: from, FreqKHz: h.FreqKHz}
 	}
 	sender, ok := r.Get(from)
 	if !ok {
@@ -192,6 +205,14 @@ func (r *Router) coupledWith(freq uint32) []uint32 {
 	// 收到的包头上写的是哪个频率，而 Go 的 map 遍历是随机的。
 	slices.Sort(out)
 	return out
+}
+
+// PositionsDegraded 报告射程过滤此刻是否降级。降级时全部放行。
+//
+// 传输层拿它告诉发言者一声：降级是正确的取舍，但它不该是一件悄悄发生的事。
+func (r *Router) PositionsDegraded() bool {
+	_, degraded := r.positions()
+	return degraded
 }
 
 func (r *Router) positions() (fsdfeed.Snapshot, bool) {

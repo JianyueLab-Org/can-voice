@@ -94,7 +94,11 @@ type Notice struct {
 const (
 	KindTxDenied         = "tx_denied"
 	KindRangeUnavailable = "range_unavailable"
-	KindSubRejected      = "sub_rejected"
+	// **没有 sub_rejected，而且不该有。** 被拒的订阅走 SUBACK 的 Rejected /
+	// RejectedXC 两张单子，那是 SUB 的同步答复，客户端按差集分派（见 Rust 侧的
+	// on_ack）。再发一条 NOTICE 是把同一件事在同一条流上说两遍，而两份报告一旦
+	// 不一致就没有哪一份可信。这个常量曾经存在、从没被发出过，删掉的理由就是
+	// 这个——一个宣称了未实现行为的字段比没有这个字段更糟。
 	// KindUnknownMessage 是"你发来的这一帧我解不开"。
 	//
 	// 服务端**不**因此断开——一个比它新一个协议版本的客户端应该降级，不该掉线，

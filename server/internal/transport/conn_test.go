@@ -14,6 +14,7 @@ import (
 	"github.com/JianyueLab-Org/can-voice/server/internal/auth"
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
+	"github.com/JianyueLab-Org/can-voice/server/internal/wire"
 	"github.com/quic-go/quic-go"
 )
 
@@ -1189,3 +1190,92 @@ func TestTheControlWriteDeadlineDoesNotFireForAHealthyClient(t *testing.T) {
 	default:
 	}
 }
+
+// TestTransmittingOnAnUndeclaredFrequencyGetsANotice 钉住"按了 PTT 没人听见"
+// 至少要换来一句话。
+//
+// 在这条测试之前服务端把这一帧丢掉，只写一行 Debug 日志。客户端 pump.rs 有一条
+// 完整的 tx_denied 接收分支，而它是死代码——服务端从来没发过。症状是一个在没有
+// 声明 TX 的频率上按住 PTT 的管制员，界面、日志、对端三处都看不出任何异常。
+func TestTransmittingOnAnUndeclaredFrequencyGetsANotice(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+	// 只听，不发。
+	c.subscribe(t, control.Sub{RX: []uint32{118000}})
+
+	pkt := append(wire.Header{
+		Ver: wire.Version, Flags: wire.FlagFirst, Seq: 1, FreqKHz: 118000,
+	}.AppendTo(nil), 0x01, 0x02, 0x03, 0x04)
+	if err := c.conn.SendDatagram(pkt); err != nil {
+		t.Fatalf("SendDatagram: %v", err)
+	}
+
+	n := readNotice(t, c, "transmitting on a frequency the session never declared must be answered")
+	if n.Kind != control.KindTxDenied {
+		t.Fatalf("NOTICE.Kind = %q, want %q", n.Kind, control.KindTxDenied)
+	}
+	if n.Freq != 118000 {
+		t.Fatalf("NOTICE.Freq = %d, want 118000 — a client with several radios cannot tell which one was refused", n.Freq)
+	}
+}
+
+// TestTheTxDeniedNoticeIsThrottled 钉住这条 NOTICE 自己不会变成一场拒绝服务。
+//
+// 按住 PTT 的客户端每秒发 50 个包。一包一条 NOTICE 的话控制流上全是它，
+// 而 SUBACK 和 PONG 要排在后面——那是拿一个静默失败换一个更响的故障。
+//
+// "只有一条"的证明是**下一帧必须是 PONG**：中间再夹一条 tx_denied，
+// ping 就会失败。
+func TestTheTxDeniedNoticeIsThrottled(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+	c.subscribe(t, control.Sub{RX: []uint32{118000}})
+
+	pkt := append(wire.Header{
+		Ver: wire.Version, Flags: wire.FlagFirst, Seq: 1, FreqKHz: 118000,
+	}.AppendTo(nil), 0x01, 0x02, 0x03, 0x04)
+	for i := 0; i < 20; i++ {
+		if err := c.conn.SendDatagram(pkt); err != nil {
+			t.Fatalf("SendDatagram %d: %v", i, err)
+		}
+	}
+
+	n := readNotice(t, c, "the first refused packet must be answered")
+	if n.Kind != control.KindTxDenied {
+		t.Fatalf("NOTICE.Kind = %q, want %q", n.Kind, control.KindTxDenied)
+	}
+	ping(t, c)
+}
+
+// TestTransmittingWhileRangeFilteringIsDegradedSaysSo 钉住降级不是一件悄悄发生的事。
+//
+// 位置快照取不到时服务端**全部放行**——射程过滤整个不生效，一个塔台频率上的话
+// 会传到全国。这是正确的取舍（语音能不能通比射程真实感重要），但它必须说出来：
+// 没有这条 NOTICE 的话，两端都看不出今天和昨天有什么不同。
+//
+// testServer 不装 Locator，所以它就是永久降级的那一种。
+func TestTransmittingWhileRangeFilteringIsDegradedSaysSo(t *testing.T) {
+	addr, priv, _ := testServer(t)
+	c := connect(t, addr, "1000", 8, priv)
+	c.subscribe(t, control.Sub{RX: []uint32{121800}, TX: []uint32{121800}})
+
+	pkt := append(wire.Header{
+		Ver: wire.Version, Flags: wire.FlagFirst, Seq: 1, FreqKHz: 121800,
+	}.AppendTo(nil), 0x01, 0x02, 0x03, 0x04)
+	if err := c.conn.SendDatagram(pkt); err != nil {
+		t.Fatalf("SendDatagram: %v", err)
+	}
+
+	n := readNotice(t, c, "transmitting while range filtering is off must be answered")
+	if n.Kind != control.KindRangeUnavailable {
+		t.Fatalf("NOTICE.Kind = %q, want %q", n.Kind, control.KindRangeUnavailable)
+	}
+
+	// **一条会话只说一次。** 降级会持续几分钟甚至几小时，每一帧说一次
+	// 就是每秒五十次。下一帧必须是 PONG。
+	if err := c.conn.SendDatagram(pkt); err != nil {
+		t.Fatalf("SendDatagram: %v", err)
+	}
+	ping(t, c)
+}
+
