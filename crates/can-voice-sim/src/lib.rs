@@ -14,6 +14,9 @@
 //! [`msfs`] 是 SimConnect，**Windows-only 的 C API**。
 
 pub mod bridge;
+pub mod chat;
+pub mod controllers;
+pub mod feed;
 pub mod csl;
 pub mod traffic;
 pub mod xplane;
