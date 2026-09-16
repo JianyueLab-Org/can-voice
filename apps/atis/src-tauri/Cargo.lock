@@ -79,6 +79,7 @@ dependencies = [
  "can-voice-log",
  "can-voice-settings",
  "can-voice-update",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tauri",

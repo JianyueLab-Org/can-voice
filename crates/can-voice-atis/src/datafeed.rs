@@ -5,6 +5,7 @@
 //! `_ATIS` 结尾的席位才会出现在 `atis[]` 里——但这一侧照样自己判一次，
 //! 因为判错的后果是在一个管制席位的频率上播通播。
 
+use crate::profile::AtisType;
 use serde_json::Value;
 
 /// 取 datafeed 时用的 User-Agent。
@@ -69,6 +70,76 @@ fn station_from(entry: &Value) -> Option<Station> {
         callsign: callsign.to_string(),
         freq_khz: (mhz * 1000.0).round() as u32,
         text,
+    })
+}
+
+/// 数据源上此刻在线的一个通播席位，**给桌面端挑用**。
+///
+/// 和上面那个 [`Station`] 不是一回事：那一个是给机队播的，带整段报文；
+/// 这一个只有机场、呼号、频率和类型——够建一个席位，不够播。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Online {
+    pub icao: String,
+    pub callsign: String,
+    /// 十进制兆赫字符串，和 [`crate::profile::Station::frequency`] 同形状，
+    /// 所以可以直接填进去。
+    pub frequency: String,
+    pub atis_type: AtisType,
+}
+
+impl Online {
+    /// 建一个可以加进配置的席位。
+    ///
+    /// **只有机场、频率和类型**——模板、预设、跑道构型它给不了，所以建出来的是
+    /// 默认模板的席位，不是一个导完就能播的席位。界面要把这一点说清楚。
+    pub fn to_station(&self) -> crate::profile::Station {
+        let mut station = crate::profile::Station::new(&self.icao);
+        station.frequency = self.frequency.clone();
+        station.atis_type = self.atis_type;
+        station
+    }
+}
+
+/// 呼号后缀 → 通播类型。**长的在前**：`_ATIS` 会把 `ZSPD_D_ATIS` 也匹配上，
+/// 于是机场变成 `ZSPD_D`，而那不是一个四位代码。
+const SUFFIXES: &[(&str, AtisType)] = &[
+    ("_D_ATIS", AtisType::Departure),
+    ("_A_ATIS", AtisType::Arrival),
+    ("_ATIS", AtisType::Combined),
+];
+
+/// 数据源上此刻在线的通播席位。
+///
+/// **这不是"从网上取配置"。** 配置在 can-api 的 `/api/v1/atis/config`，由
+/// [`crate::netconfig`] 取（席位、频率、跑道构型预设、模板、中文用词）。这里读
+/// 的是运行状态，所以它能省掉的只是查机场和频率这一步。
+pub fn online_stations(feed: &Value) -> Vec<Online> {
+    let Some(list) = feed.get("atis").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out: Vec<Online> = list.iter().filter_map(online_from).collect();
+    out.sort_by(|a, b| a.callsign.cmp(&b.callsign));
+    out
+}
+
+fn online_from(entry: &Value) -> Option<Online> {
+    let callsign = entry.get("callsign")?.as_str()?.trim().to_uppercase();
+    let frequency = entry.get("frequency")?.as_str()?.trim();
+    let mhz: f64 = frequency.parse().ok()?;
+    if (mhz - NO_FREQUENCY_MHZ).abs() < FREQ_EPSILON {
+        return None;
+    }
+    let (icao, atis_type) = SUFFIXES
+        .iter()
+        .find_map(|(suffix, kind)| Some((callsign.strip_suffix(suffix)?.to_string(), *kind)))?;
+    if icao.len() != 4 || !icao.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(Online {
+        icao,
+        callsign,
+        frequency: frequency.to_string(),
+        atis_type,
     })
 }
 
@@ -213,5 +284,98 @@ mod tests {
             !s[0].text.contains('\n'),
             "lines are joined with a space, not a newline"
         );
+    }
+}
+
+#[cfg(test)]
+mod online_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn feed(atis: Value) -> Value {
+        json!({ "atis": atis, "pilots": [], "controllers": [], "general": {} })
+    }
+
+    fn one(callsign: &str, frequency: &str) -> Value {
+        json!({ "callsign": callsign, "frequency": frequency, "text_atis": ["x"] })
+    }
+
+    #[test]
+    fn an_online_position_gives_its_airport_and_its_frequency() {
+        let found = online_stations(&feed(json!([one("ZSPD_ATIS", "127.850")])));
+        assert_eq!(
+            found,
+            [Online {
+                icao: "ZSPD".into(),
+                callsign: "ZSPD_ATIS".into(),
+                frequency: "127.850".into(),
+                atis_type: AtisType::Combined,
+            }]
+        );
+    }
+
+    /// `_ATIS` 会把 `ZSPD_D_ATIS` 也匹配上，于是机场变成 `ZSPD_D`——一个四位
+    /// 检查挡不住的五位串。长后缀必须先试。
+    #[test]
+    fn the_departure_suffix_is_matched_before_the_bare_one() {
+        let found = online_stations(&feed(json!([one("ZSPD_D_ATIS", "126.500")])));
+        assert_eq!(found[0].icao, "ZSPD");
+        assert_eq!(found[0].atis_type, AtisType::Departure);
+    }
+
+    #[test]
+    fn the_arrival_suffix_is_read_too() {
+        let found = online_stations(&feed(json!([one("ZSPD_A_ATIS", "126.500")])));
+        assert_eq!(found[0].atis_type, AtisType::Arrival);
+    }
+
+    /// 拿这个占位值去建席位，人会在一个谁也不在的频率上播一整天。
+    #[test]
+    fn the_no_frequency_placeholder_is_not_a_position_worth_offering() {
+        assert!(online_stations(&feed(json!([one("ZSPD_ATIS", "199.998")]))).is_empty());
+    }
+
+    #[test]
+    fn a_callsign_that_is_not_an_atis_one_is_skipped() {
+        assert!(online_stations(&feed(json!([one("ZSPD_TWR", "118.000")]))).is_empty());
+    }
+
+    #[test]
+    fn an_airport_code_that_is_not_four_characters_is_skipped() {
+        assert!(online_stations(&feed(json!([one("ZS_ATIS", "118.000")]))).is_empty());
+    }
+
+    #[test]
+    fn positions_come_back_in_callsign_order() {
+        let found = online_stations(&feed(json!([
+            one("ZSPD_ATIS", "127.850"),
+            one("ZBAA_ATIS", "126.800"),
+        ])));
+        let callsigns: Vec<&str> = found.iter().map(|o| o.callsign.as_str()).collect();
+        assert_eq!(callsigns, ["ZBAA_ATIS", "ZSPD_ATIS"]);
+    }
+
+    /// 取回来的频率要能**直接填进席位**，否则这一步省不掉什么。
+    #[test]
+    fn the_frequency_is_the_shape_a_station_stores() {
+        let found = online_stations(&feed(json!([one("ZSPD_ATIS", "127.850")])));
+        let mut station = crate::profile::Station::new(&found[0].icao);
+        station.frequency = found[0].frequency.clone();
+        assert_eq!(station.frequency_khz(), Some(127_850));
+    }
+
+    #[test]
+    fn an_online_position_becomes_a_station_with_the_same_callsign_and_frequency() {
+        let found = online_stations(&feed(json!([one("ZSPD_D_ATIS", "126.500")])));
+        let station = found[0].to_station();
+        assert_eq!(station.callsign(), "ZSPD_D_ATIS");
+        assert_eq!(station.frequency_khz(), Some(126_500));
+        // 坐标按 ICAO 补上：留成 0/0 的席位会显示在几内亚湾外海。
+        assert_ne!((station.latitude, station.longitude), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_feed_with_no_atis_array_at_all_is_simply_empty() {
+        assert!(online_stations(&json!({"pilots": []})).is_empty());
     }
 }

@@ -13,9 +13,12 @@
 //!
 //! 这一层只有 Tauri 命令、一个状态容器，和每个在播席位那条盯报文的循环。
 
+use can_voice_atis::datafeed::Online;
 use can_voice_atis::metar::Metar;
+use can_voice_atis::netconfig::{self, Comparison, Merged, NetworkConfig};
 use can_voice_atis::profile::{Preset, Profile, ProfileSet, Station, DEFAULT_PROFILE_PATH};
 use can_voice_atis::script::{self, Rendered};
+use can_voice_atis::{vatis, weather};
 use can_voice_fsd::client::{self, Config, FsdEvent, FsdHandle, FsdState, Reason};
 use can_voice_fsd::packet::{self, Identity, Position, FACILITY_ATIS, RATING_OBSERVER};
 use std::collections::HashMap;
@@ -33,6 +36,13 @@ const DEFAULT_REFRESH_SECS: u32 = 300;
 const MIN_REFRESH_SECS: u32 = 60;
 const MAX_REFRESH_SECS: u32 = 3600;
 const METAR_TIMEOUT: Duration = Duration::from_secs(20);
+/// HTTP 那几条路（气象兜底、网络配置、数据源）的超时。
+const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 气象源地址。
+fn metar_url() -> String {
+    env_or("CAN_METAR_URL", weather::DEFAULT_URL)
+}
 
 fn clamp_refresh(secs: u32) -> u32 {
     secs.clamp(MIN_REFRESH_SECS, MAX_REFRESH_SECS)
@@ -129,6 +139,12 @@ pub struct Settings {
     /// 上的同一个人是 C1。
     #[serde(default)]
     pub rating: u32,
+    /// 上一次**整份**并进来的网络配置版本（服务端算的内容哈希）。
+    ///
+    /// 只在整份都并进来时才记：没勾覆盖、或有席位因为在播被跳过的话，下次点开
+    /// 那些差异还要让人再看一遍。
+    #[serde(default)]
+    pub config_version: String,
 }
 
 pub struct App {
@@ -138,6 +154,13 @@ pub struct App {
     settings: Mutex<Settings>,
     /// 报文刷新周期（秒）。每个在播席位那条循环读它，所以是原子量不是锁。
     refresh_secs: Arc<std::sync::atomic::AtomicU32>,
+    /// 共用一个 HTTP 客户端：报文兜底每个在播席位每个周期都可能用一次。
+    http: reqwest::Client,
+    /// 最近一次取回来、给人看过差异的网络配置。
+    ///
+    /// **并的是给人看过的那一份**，不是按下"并进来"时再取一次——两次之间服务端
+    /// 可能已经换了，而人点头的是他看到的那份差异。
+    network: Mutex<Option<(NetworkConfig, Comparison)>>,
 }
 
 impl App {
@@ -152,6 +175,11 @@ impl App {
                 settings.metar_refresh_secs,
             ))),
             settings: Mutex::new(settings),
+            http: reqwest::Client::builder()
+                .timeout(HTTP_TIMEOUT)
+                .build()
+                .unwrap_or_default(),
+            network: Mutex::new(None),
         }
     }
 
@@ -345,6 +373,153 @@ fn save_station(
     Ok(())
 }
 
+// ——— 从外面取 ———
+//
+// 四件事，旧版都有、新版此前一件都没有（#44）。**失败一律说出为什么**：这几条都是
+// 人按了按钮才发生的，失败却什么都不说，他只得到一个没反应的按钮。
+
+/// 在播的呼号。**并配置时这些一律不动**：换掉一个在播席位只会让稿子和实际在播
+/// 的内容对不上。
+fn on_air(app: &App) -> Vec<String> {
+    match app.running.lock() {
+        Ok(r) => r.keys().cloned().collect(),
+        Err(p) => p.into_inner().keys().cloned().collect(),
+    }
+}
+
+/// 取一份真实报文，**不上线也能取**。
+///
+/// 没有它的话，"先起客户端把稿子写好，再上线播"做不成：问报文的 `$AX` 要求已经
+/// 连着 FSD，于是写模板的人只能对着一份编出来的电码调格式。
+#[tauri::command]
+async fn fetch_metar(app: tauri::State<'_, App>, icao: String) -> Result<String, String> {
+    weather::fetch(&app.http, &metar_url(), &icao, weather::RETRIES)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 导进来的结果：并了什么、跳过了什么、vATIS 那边有哪些这里没有对应功能。
+#[derive(serde::Serialize)]
+pub struct ImportReport {
+    source: String,
+    merged: Merged,
+    notes: Vec<String>,
+}
+
+/// 导入 vATIS 的配置。文件是界面那一侧读出来递过来的——为一个选文件的框引一个
+/// 对话框插件、再开一条文件系统权限，不值得。
+///
+/// **只补缺，不覆盖**：同呼号的席位原样保留，和旧版一致。本地那一份多半是值班时
+/// 调过的，别人的导出文件不该盖掉它。
+#[tauri::command]
+fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport, String> {
+    let imported = vatis::from_text(&body).map_err(|e| e.to_string())?;
+    let protected = on_air(&app);
+    let mut set = app.profiles.lock().expect("profiles");
+    let merged = netconfig::merge(set.active(), &imported.stations, false, &protected);
+    save(&set);
+    Ok(ImportReport {
+        source: imported.name,
+        merged,
+        notes: imported.notes,
+    })
+}
+
+/// 把数据源上此刻在线的通播席位加进配置。
+///
+/// 这一步省掉的**只是查机场和频率**：模板、预设、跑道构型数据源给不了，要那些
+/// 得走 [`check_network_config`]。只补缺，已有的呼号不动。
+#[tauri::command]
+async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, String> {
+    let url = env_or("CAN_FSD_DATAFEED", can_voice_datafeed::DEFAULT_URL);
+    let feed = can_voice_datafeed::fetch(&app.http, &url)
+        .await
+        .ok_or_else(|| format!("取不到数据源（{url}）"))?;
+    let stations: Vec<Station> = can_voice_atis::datafeed::online_stations(&feed)
+        .iter()
+        .map(Online::to_station)
+        .collect();
+    let protected = on_air(&app);
+    let mut set = app.profiles.lock().expect("profiles");
+    let merged = netconfig::merge(set.active(), &stations, false, &protected);
+    save(&set);
+    Ok(merged)
+}
+
+/// 给人看的那份差异。装的是呼号，不是整个席位——界面只要列出来。
+#[derive(serde::Serialize)]
+pub struct NetworkPreview {
+    label: String,
+    version: String,
+    notes: String,
+    problems: Vec<String>,
+    /// 上一次整份并进来的版本。空的表示从没并过。
+    previous: String,
+    missing: Vec<String>,
+    differing: Vec<String>,
+    same: Vec<String>,
+    /// 有差异、但正在播出的那些。并的时候会被跳过，先告诉人。
+    on_air: Vec<String>,
+}
+
+/// 取全网通播配置，**只看差异，不动本地**。
+///
+/// 值班时"按一下就变了"很难接受，所以动手是另一个命令，而且只动人勾了的那些。
+#[tauri::command]
+async fn check_network_config(app: tauri::State<'_, App>) -> Result<NetworkPreview, String> {
+    let url = env_or("CAN_ATIS_CONFIG_URL", netconfig::DEFAULT_URL);
+    let document = netconfig::fetch(&app.http, &url)
+        .await
+        .map_err(|e| e.to_string())?;
+    let config = netconfig::parse(&document).map_err(|e| e.to_string())?;
+    let comparison = {
+        let mut set = app.profiles.lock().expect("profiles");
+        netconfig::compare(set.active(), &config.stations)
+    };
+    let live = on_air(&app);
+    let callsigns = |list: &[Station]| list.iter().map(Station::callsign).collect::<Vec<_>>();
+    let preview = NetworkPreview {
+        label: config.label(),
+        version: config.version.clone(),
+        notes: config.notes.clone(),
+        problems: config.problems.clone(),
+        previous: app.settings_snapshot().config_version,
+        missing: callsigns(&comparison.missing),
+        differing: callsigns(&comparison.differing),
+        same: callsigns(&comparison.same),
+        on_air: callsigns(&comparison.differing)
+            .into_iter()
+            .filter(|c| live.contains(c))
+            .collect(),
+    };
+    *app.network.lock().expect("network") = Some((config, comparison));
+    Ok(preview)
+}
+
+/// 把上一次看过的那份网络配置并进来，只并勾了的。
+#[tauri::command]
+fn apply_network_config(
+    app: tauri::State<'_, App>,
+    add_missing: bool,
+    overwrite: bool,
+) -> Result<Merged, String> {
+    let Some((config, comparison)) = app.network.lock().expect("network").take() else {
+        return Err("先取一次网络配置，看过差异再并".to_string());
+    };
+    let protected = on_air(&app);
+    let merged = {
+        let mut set = app.profiles.lock().expect("profiles");
+        let chosen = netconfig::chosen(&comparison, add_missing, overwrite);
+        let merged = netconfig::merge(set.active(), &chosen, overwrite, &protected);
+        save(&set);
+        merged
+    };
+    if merged.settles(&comparison, add_missing, overwrite) {
+        app.update_settings(|s| s.config_version = config.version.clone());
+    }
+    Ok(merged)
+}
+
 // ——— 渲染预览 ———
 
 /// 拿一份报文渲染一次，**不连网也能看**。
@@ -497,6 +672,7 @@ async fn start(
         live.clone(),
         wake.clone(),
         app.refresh_secs.clone(),
+        app.http.clone(),
     ));
     running.insert(
         callsign,
@@ -624,6 +800,7 @@ async fn watch(
     live: Arc<Mutex<Live>>,
     wake: Arc<tokio::sync::Notify>,
     refresh: Arc<std::sync::atomic::AtomicU32>,
+    http: reqwest::Client,
 ) {
     let mut events = fsd.events();
     let mut period = refresh_period(&refresh);
@@ -653,7 +830,7 @@ async fn watch(
                     // 刚上线就立刻要一份报文，不等第一个五分钟——否则席位
                     // 挂在网上却一句通播都没有。
                     if online && !was_online {
-                        poll(&airing, &fsd, &live, true).await;
+                        poll(&airing, &fsd, &live, &http, true).await;
                     }
                 }
                 // 事件流跟不上就丢了几条状态；下一条会补上，不必重来。
@@ -662,12 +839,12 @@ async fn watch(
             },
             _ = ticker.tick() => {
                 if online {
-                    poll(&airing, &fsd, &live, false).await;
+                    poll(&airing, &fsd, &live, &http, false).await;
                 }
             }
             _ = wake.notified() => {
                 if online {
-                    poll(&airing, &fsd, &live, false).await;
+                    poll(&airing, &fsd, &live, &http, false).await;
                 }
             }
         }
@@ -704,17 +881,41 @@ fn refresh_period(refresh: &std::sync::atomic::AtomicU32) -> Duration {
 }
 
 /// 问一次报文，变了就推进字母并重发。
-async fn poll(airing: &Arc<Mutex<Airing>>, fsd: &FsdHandle, live: &Arc<Mutex<Live>>, first: bool) {
+async fn poll(
+    airing: &Arc<Mutex<Airing>>,
+    fsd: &FsdHandle,
+    live: &Arc<Mutex<Live>>,
+    http: &reqwest::Client,
+    first: bool,
+) {
     // **锁不跨 await。** 问报文最长要二十秒，攥着锁的话这二十秒里换构型、
     // 推字母、读界面全都卡住。
     let (icao, previous) = {
         let a = airing.lock().expect("airing");
         (a.station.identifier.clone(), a.last_metar.clone())
     };
-    let Some(report) = fsd.request_metar(&icao, METAR_TIMEOUT).await else {
-        // 问不到就**保持现状**，不清空也不换字母：一次网络抖动不该让一个席位
-        // 的通播变成空的。
-        tracing::info!(icao = %icao, "no metar this round");
+    let report = match fsd.request_metar(&icao, METAR_TIMEOUT).await {
+        Some(report) => Some(report),
+        // **FSD 没给就走 HTTP 兜底。** 服务端的气象源也会抖，一个在播席位不该
+        // 因为那一侧抖了一下就整整一个周期没有新报文。
+        //
+        // 两条路来的报文可以直接比：can-fsd 问的是同一个气象源，也是 trim 之后
+        // 取 ICAO 开头的那一行（`internal/fsd/metar.go` 的 `extractMetar`），所以
+        // 换了来源不会让 `decide` 把同一份报文当成变了、白推一格字母。
+        None => match weather::fetch(http, &metar_url(), &icao, weather::RETRIES).await {
+            Ok(report) => {
+                tracing::info!(icao = %icao, "fsd gave no metar; took it over http");
+                Some(report)
+            }
+            Err(e) => {
+                tracing::info!(icao = %icao, error = %e, "no metar this round");
+                None
+            }
+        },
+    };
+    // 问不到就**保持现状**，不清空也不换字母：一次网络抖动不该让一个席位的通播
+    // 变成空的。
+    let Some(report) = report else {
         return;
     };
     let Next::Publish { advance } = decide(&previous, &report, first) else {
@@ -851,6 +1052,11 @@ pub fn run() {
             set_metar_refresh,
             set_rating,
             template_problems,
+            fetch_metar,
+            import_vatis,
+            import_online,
+            check_network_config,
+            apply_network_config,
             live,
             refresh,
             settings,

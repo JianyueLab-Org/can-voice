@@ -5,8 +5,9 @@ import StationEditor from "./components/StationEditor.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import LogPanel from "./components/LogPanel.vue";
 import NameDialog from "./components/NameDialog.vue";
-import type { Live, Rendered, Station } from "./types";
-import { callsignOf, stateText } from "./types";
+import NetworkDialog from "./components/NetworkDialog.vue";
+import type { ImportReport, Live, Merged, NetworkPreview, Rendered, Station } from "./types";
+import { callsignOf, describeMerge, stateText } from "./types";
 
 const profiles = ref<{ names: string[]; active: string }>({ names: [], active: "" });
 const stations = ref<Station[]>([]);
@@ -23,6 +24,13 @@ const preview = ref<Rendered | null>(null);
 const problems = ref<string[]>([]);
 const refreshSecs = ref(300);
 const rating = ref(0);
+
+/** 导入 / 取配置之后给人看的结果。和 `error` 分开：这不是出错。 */
+const notice = ref<string[]>([]);
+/** 正在跑的那个外部请求。按钮据此变灰，免得连点出两次请求。 */
+const busy = ref<"metar" | "vatis" | "online" | "network" | null>(null);
+const network = ref<NetworkPreview | null>(null);
+const vatisFile = ref<HTMLInputElement | null>(null);
 
 /** 当前打开的是哪个对话框。`null` 是没开。 */
 const asking = ref<"profile" | "rename" | "station" | null>(null);
@@ -169,6 +177,77 @@ const removeProfile = () =>
 
 const pickProfile = (name: string) => guard(() => invoke("select_profile", { name }));
 
+/** 跑一个外部请求：清掉上一次的提示、按钮变灰、失败了说出为什么。 */
+async function fetching(kind: NonNullable<typeof busy.value>, fn: () => Promise<void>) {
+  error.value = "";
+  notice.value = [];
+  busy.value = kind;
+  try {
+    await fn();
+  } catch (e) {
+    error.value = String(e);
+  } finally {
+    busy.value = null;
+  }
+  await reload();
+}
+
+/**
+ * 取一份真实报文来试算，**不上线也能取**。
+ *
+ * 没有它的话"先把稿子写好再上线"做不成：只能对着一份编出来的电码调模板。
+ */
+const fetchMetar = () =>
+  fetching("metar", async () => {
+    const s = station.value;
+    if (!s) return;
+    sampleMetar.value = await invoke<string>("fetch_metar", { icao: s.identifier });
+  });
+
+/**
+ * 导入 vATIS 配置。文件由这一侧读出来递给 Rust——为一个选文件的框引对话框插件、
+ * 再开一条文件系统权限，不值得。
+ */
+async function importVatis(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  // 清掉，否则同一个文件改完再选一次不会触发 change。
+  input.value = "";
+  if (!file) return;
+  await fetching("vatis", async () => {
+    const report = await invoke<ImportReport>("import_vatis", { body: await file.text() });
+    notice.value = [
+      `从 vATIS 配置「${report.source || file.name}」导入`,
+      ...describeMerge(report.merged),
+      ...report.notes,
+    ];
+  });
+}
+
+/** 数据源上此刻在线的通播席位。**只有机场和频率**，模板和构型它给不了。 */
+const importOnline = () =>
+  fetching("online", async () => {
+    const merged = await invoke<Merged>("import_online");
+    notice.value = [
+      "从数据源导入在线通播席位",
+      ...describeMerge(merged),
+      ...(merged.added.length ? ["新加的席位用的是默认模板：构型和 NOTAM 要自己补，或者取一次网络配置。"] : []),
+    ];
+  });
+
+/** 取全网配置，**只看差异**。动手在对话框里。 */
+const checkNetwork = () =>
+  fetching("network", async () => {
+    network.value = await invoke<NetworkPreview>("check_network_config");
+  });
+
+const applyNetwork = (addMissing: boolean, overwrite: boolean) =>
+  fetching("network", async () => {
+    network.value = null;
+    const merged = await invoke<Merged>("apply_network_config", { addMissing, overwrite });
+    notice.value = ["并入全网通播配置", ...describeMerge(merged)];
+  });
+
 watch([selected, presetName, sampleMetar], () => {
   syncPreset();
   void renderPreview();
@@ -239,6 +318,17 @@ onUnmounted(() => window.clearInterval(timer));
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
     </p>
+    <div
+      v-if="notice.length"
+      class="flex items-start gap-2 rounded border border-sky-400 px-3 py-2 text-xs"
+    >
+      <div class="flex flex-col gap-0.5">
+        <p v-for="(line, i) in notice" :key="i" :class="i === 0 ? 'font-semibold' : ''">
+          {{ line }}
+        </p>
+      </div>
+      <button class="ml-auto opacity-60" title="关掉" @click="notice = []">×</button>
+    </div>
 
     <div class="flex min-h-0 flex-1 gap-4">
       <!-- 席位列表 -->
@@ -262,6 +352,42 @@ onUnmounted(() => window.clearInterval(timer));
         <button class="rounded border border-dashed px-2 py-1 text-xs" @click="asking = 'station'">
           + 新席位
         </button>
+        <details class="rounded border px-2 py-1 text-xs">
+          <summary class="cursor-pointer opacity-70">导入</summary>
+          <div class="flex flex-col gap-1 pt-2">
+            <!-- 配置本身：席位、频率、构型预设、模板、中文用词。先看差异再并。 -->
+            <button
+              class="rounded border px-2 py-1 text-left"
+              :disabled="busy !== null"
+              @click="checkNetwork"
+            >
+              {{ busy === "network" ? "正在取…" : "全网通播配置…" }}
+            </button>
+            <button
+              class="rounded border px-2 py-1 text-left"
+              :disabled="busy !== null"
+              @click="vatisFile?.click()"
+            >
+              {{ busy === "vatis" ? "正在导入…" : "vATIS 配置文件…" }}
+            </button>
+            <input
+              ref="vatisFile"
+              type="file"
+              accept=".json,application/json"
+              class="hidden"
+              @change="importVatis"
+            />
+            <!-- 运行状态，不是配置：只省掉查机场和频率这一步。 -->
+            <button
+              class="rounded border px-2 py-1 text-left"
+              :disabled="busy !== null"
+              title="只有机场和频率，模板和构型要另外补"
+              @click="importOnline"
+            >
+              {{ busy === "online" ? "正在取…" : "此刻在线的通播席位" }}
+            </button>
+          </div>
+        </details>
 
         <!-- 折叠着：平时不占地方。 -->
         <details class="mt-auto rounded border px-2 py-1 text-xs">
@@ -371,8 +497,17 @@ onUnmounted(() => window.clearInterval(timer));
         </p>
 
         <label class="flex flex-col gap-1">
-          <span class="text-xs opacity-60">
+          <span class="flex items-center text-xs opacity-60">
             {{ onAir ? "服务端给的报文" : "试算用的报文" }}
+            <button
+              v-if="!onAir"
+              class="ml-auto rounded border px-2 py-0.5"
+              :disabled="!station || busy !== null"
+              title="从气象源取这个机场此刻的真实报文，不用上线"
+              @click.prevent="fetchMetar"
+            >
+              {{ busy === "metar" ? "正在取…" : "取真实报文" }}
+            </button>
           </span>
           <textarea
             v-if="!onAir"
@@ -427,6 +562,7 @@ onUnmounted(() => window.clearInterval(timer));
       @confirm="renameProfile"
       @cancel="asking = null"
     />
+    <NetworkDialog :preview="network" @apply="applyNetwork" @cancel="network = null" />
     <NameDialog
       :open="asking === 'station'"
       title="新席位"

@@ -26,4 +26,8 @@ tauri = { version = "2", features = [] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# **和 crates 里那几份写得一字不差。** default-features 一旦没关，reqwest 会在
+# rustls 旁边再拉一套 native-tls：二进制里两套 TLS，Linux 包运行时还多依赖一份
+# 系统 libssl——而开发机和 CI 都装着它，所以缺它的那台机器是用户的。
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
