@@ -33,7 +33,10 @@ pub struct Health {
     pub rtt_ms: u32,
     pub sent: u64,
     pub received: u64,
+    /// QUIC 认定丢掉的包。
     pub lost: u64,
+    /// 包头解不开的数据报——协议漂移，不是网络丢包。
+    pub unparsable: u64,
 }
 
 /// 界面要显示的一切。
@@ -119,12 +122,14 @@ impl Snapshot {
                 sent,
                 received,
                 lost,
+                unparsable,
             } => {
                 self.health = Some(Health {
                     rtt_ms: *rtt_ms,
                     sent: *sent,
                     received: *received,
                     lost: *lost,
+                    unparsable: *unparsable,
                 });
             }
         }
@@ -378,6 +383,7 @@ mod tests {
             sent: 100,
             received: 99,
             lost: 1,
+            unparsable: 0,
         });
         assert_eq!(s.health.as_ref().map(|h| h.rtt_ms), Some(42));
     }

@@ -128,7 +128,11 @@ pub enum Event {
         rtt_ms: u32,
         sent: u64,
         received: u64,
+        /// QUIC 自己认定丢掉的包。**不是包头解不开的那些**——见 `unparsable`。
         lost: u64,
+        /// 包头解不开的数据报。这是协议漂移，不是网络丢包，
+        /// 混进 `lost` 会让后者在正常运行里恒为 0。
+        unparsable: u64,
     },
 }
 
@@ -390,6 +394,7 @@ mod tests {
             sent: 1000,
             received: 995,
             lost: 5,
+            unparsable: 0,
         };
         match e {
             Event::Health {
@@ -397,6 +402,7 @@ mod tests {
                 sent,
                 received,
                 lost,
+                ..
             } => {
                 assert_eq!(rtt_ms, 42);
                 assert_eq!(sent - received, lost);
