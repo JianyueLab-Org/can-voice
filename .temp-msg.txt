@@ -1,73 +1,28 @@
-MSFS 他机注入接上 SimConnect，X-Plane 插件跟着发版走
+替换方案拍板：一并替换，没有共存期
 
-## 三个 SimConnect 调用
+原先那份是分阶段方案，五处标着「待定」等人决定。决定下来了：一并替换。
+把文件改成这一条路，五处待定连同它们描述的共存期一起删掉。
 
-`apps/msfs` 里那个循环从头到尾只有一句 `tracing::debug!` 和一条 TODO：账算
-得好好的，算完扔掉。现在接上 `AICreateNonATCAircraft` / `SetDataOnSimObject`
-/ `AIRemoveObject`。
+## 有一件事因此掉了个方向
 
-**第二条 SimConnect 连接，专门一条阻塞线程。** handle 不是线程安全的，和读
-自机那条共用就得加锁，等于把注入和轮询串起来；SimConnect 本来就允许一个进程
-开多条连接。线程而不是 tokio 任务的理由和读自机那条一样：C 函数会卡住执行器。
+「两套不能跑在同一台机器的同一个端口上」原先是障碍——共存期得换机器或换端口。
+一并替换之后它是**帮手**：can-voice 直接接管原来那个地址和端口，老客户端连过去
+握手就失败（拿 Mumble 的 TLS 去敲一个 QUIC 端口，什么也谈不拢）。
 
-## 新建是异步的，而且失败不走返回值
+而那正是想要的。分阶段方案里最担心的故障是"掉队的人待在一个正常但空无一人的
+频率里"——他看不出任何异常，而没有人听得见他。**连不上是会被报告的，一个人的
+房间不会。**
 
-`AICreateNonATCAircraft` 对一个**不存在的机模标题照样返回成功**，失败是过一会
-儿以一个 `RECV_EXCEPTION` 回来的。而 EXCEPTION 带的是 `send_id` 不是
-`request_id`，所以每次调用之后要立刻问一次 `GetLastSentPacketID` 把 send id
-记下来，否则失败了也不知道是哪一架。
+## 顺带记下一件真正缺的功能
 
-光靠 EXCEPTION 不够——也可能什么都不回（模拟器在加载、连接断了）。所以再加
-一道 10 秒超时。**两道都要**：一架卡在"要过了、还没回音"的飞机永远不会被重试。
+`can-audio/server/ATIS/mumble.py` 是一队服务端机器人：edge-tts 念稿，pymumble
+连进 Mumble 频率播出去。**can-voice 这边没有对应的东西**——`atis-for-can` 只做
+稿子，声音不归它管。
 
-## 机型码 → 机模标题（新 `msfs_models.rs`）
+所以照现在的状态一并替换，全网通播会**哑掉**，而不是听起来不一样。这是换之前
+必须补的一件：通播是飞行员联系管制之前唯一的信息来源。README 和方案里都写上了。
 
-X-Plane 有 CSL 包，MSFS 没有对应的东西——`AICreateNonATCAircraft` 要的是
-`aircraft.cfg` 里 `title=` 那个字符串，和机型码之间没有任何映射。
-
-而标题存不存在取决于**这台机器装了什么**（2020/2024、Standard/Deluxe/Premium、
-DLC、第三方 AI 机模包）。所以这里不给"那个标题"，给**一串按可信度排好的候选**：
-机型本身 → 同族 → 同类机身 → 兜底。账本每失败一次就退一格（新增
-`Injector::attempt`），候选用完就放弃这架（新增 `give_up`）。
-
-**没有 `give_up` 的话，一架在这台机器上没有任何机模能顶的飞机会每 500 ms
-重试一次，永远**，而它挤掉的是别的飞机的重试。放弃是针对那个机型的——飞行员
-改了机型，或者飞机走了再回来，都从最像的那个重新试。
-
-内置表**只收第一方（Asobo）机模**：第三方机模的标题带作者前缀和涂装名，同一架
-飞机在两个人的机库里是两个字符串，写进内置表只会制造"在我这儿是好的"。装了
-FSLTL / AIG 的人写一张 `%LOCALAPPDATA%\msfs-for-can\titles.json` 覆盖，读到的
-候选**排在内置表前面而不是替换掉它**——第三方包也会缺机型。写坏的覆盖表当没有：
-让他机全部消失比涂装不对严重得多。
-
-## `Action::Create` 现在带位置
-
-不带的话 AI 机建在 0°N 0°E，会在几内亚湾外面出现半秒再跳过来，而且模拟器可能
-顺手去加载那一块地景。
-
-## 顺手修的一处回归风险
-
-重接线时我一度把 `SimLink` 从注入函数的参数里去掉了，**那会让 `MAX_RANGE_NM`
-静默失效**——距离过滤要自机位置，不给就等于没设，两百海里外的飞机会白占 AI 机
-的名额。加了注释说明这个参数是干什么的。
-
-## X-Plane 插件现在是发行资产
-
-说明里原本只写"见仓库里 `apps/xpc/plugin/`"，而仓库是私有的，测试者点不进去。
-装了 `xpc-for-can` 的人会连上、能说话，然后看不见任何他机，也没有任何东西告诉
-他缺了什么。现在打成 `xpc-for-can-xplane-plugin.zip` 一起发，说明里写清楚解压
-到哪儿、要先装 XPPython3。
-
-## 怎么验的
-
-Windows 那一段在这台机器上编不了（Homebrew 的 rust，没有 rustup，拿不到交叉
-target）。所以本地把 `#[cfg(windows)]` 临时换成 `#[cfg(all())]` 过了一遍
-check 和 clippy，再换回来——这一趟抓出三处：`TrafficSink` 没 import、
-`Action::Create` 的模式漏了新字段、以及 `u32::MAX` 该写成 `c_ulong::MAX`
-（Windows 上 `c_ulong` 是 u32，别的平台是 u64，值一样但这样写到处都检查得过）。
-
-纯逻辑那一半有测试：候选表 11 个、账本新增 5 个。真正连模拟器还是只有在
-Windows 上连一次才算数。
+macOS 客户端并入"没有覆盖的"一节。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MuSTw2foJERFBC1gtzWFWY
