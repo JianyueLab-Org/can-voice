@@ -479,7 +479,10 @@ mod tests {
         .encode()
         .expect("encode");
         let text = String::from_utf8(bytes).expect("utf8");
-        assert!(text.contains("\"station\":\"ZSPD_ATIS\""), "encoded as {text}");
+        assert!(
+            text.contains("\"station\":\"ZSPD_ATIS\""),
+            "encoded as {text}"
+        );
     }
 
     /// `PROTO_VERSION` 是**字面值契约**：服务端判的是

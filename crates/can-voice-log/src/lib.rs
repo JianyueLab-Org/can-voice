@@ -53,7 +53,8 @@ pub fn init(product: &str, debug: bool) -> Option<PathBuf> {
     use tracing_subscriber::EnvFilter;
 
     let default_level = if debug { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
     let file = log_path(product).and_then(|p| {
         match RotatingWriter::open(&p, MAX_BYTES, BACKUPS) {
@@ -364,9 +365,7 @@ async fn upload_text(
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
             Err("CAN 号或者密码不对".to_string())
         }
-        reqwest::StatusCode::TOO_MANY_REQUESTS => {
-            Err("寄得太频繁了，稍后再试".to_string())
-        }
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err("寄得太频繁了，稍后再试".to_string()),
         reqwest::StatusCode::SERVICE_UNAVAILABLE => {
             // can-api 的 `LogUploadMailTo` 没配的时候就是这一条。告诉用户
             // "服务端没开这个功能"，比让他反复重试强。
@@ -466,7 +465,10 @@ mod tests {
 
         let current = std::fs::read_to_string(&path).expect("read");
         assert!(current.contains("newest"), "got {current:?}");
-        assert!(!current.contains("aaaa"), "the old lines moved out: {current:?}");
+        assert!(
+            !current.contains("aaaa"),
+            "the old lines moved out: {current:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -643,7 +645,10 @@ mod tests {
         let got = String::from_utf8(buf.lock().expect("captured").clone()).expect("utf8");
         assert!(got.contains("boom in a thread nobody watches"), "got {got}");
         assert!(got.contains("a panic went uncaught"), "got {got}");
-        assert!(got.contains("lib.rs"), "the location must be in there: {got}");
+        assert!(
+            got.contains("lib.rs"),
+            "the location must be in there: {got}"
+        );
     }
 
     /// GUI 程序里一个没接住的 panic 本来什么都不留：窗口没了，日志干净。

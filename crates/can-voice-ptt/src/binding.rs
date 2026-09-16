@@ -37,7 +37,11 @@ pub fn keyboard_supported() -> bool {
 ///
 /// 两个变量都要看：只看 `XDG_SESSION_TYPE` 的话，没设它的合成器漏网；
 /// 只看 `WAYLAND_DISPLAY` 的话，一个从 X11 会话里启动的 Wayland 应用会误判。
-fn keyboard_supported_on(linux: bool, wayland_display: Option<&str>, session_type: Option<&str>) -> bool {
+fn keyboard_supported_on(
+    linux: bool,
+    wayland_display: Option<&str>,
+    session_type: Option<&str>,
+) -> bool {
     if !linux {
         return true;
     }
@@ -269,7 +273,11 @@ mod tests {
     fn x11_and_the_other_platforms_can() {
         assert!(keyboard_supported_on(true, None, Some("x11")));
         assert!(keyboard_supported_on(true, None, None));
-        assert!(keyboard_supported_on(false, Some("wayland-0"), Some("wayland")));
+        assert!(keyboard_supported_on(
+            false,
+            Some("wayland-0"),
+            Some("wayland")
+        ));
     }
 
     /// 空串等于没设。**照 `is_some` 判会把它当成 Wayland**，
