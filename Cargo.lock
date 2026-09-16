@@ -125,6 +125,7 @@ dependencies = [
  "can-voice-client",
  "can-voice-proto",
  "can-voice-ptt",
+ "can-voice-settings",
  "can-voice-token",
  "serde",
  "serde_json",
@@ -198,6 +199,15 @@ version = "0.1.0"
 dependencies = [
  "gilrs",
  "rdev",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-settings"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
  "tracing",

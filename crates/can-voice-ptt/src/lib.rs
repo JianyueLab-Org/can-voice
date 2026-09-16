@@ -7,6 +7,6 @@ pub mod binding;
 pub mod state;
 pub mod watcher;
 
-pub use binding::{mouse_supported, Binding, MouseButton};
+pub use binding::{keyboard_supported, mouse_supported, Binding, MouseButton};
 pub use state::{DeviceReporter, PttState, Router, Sources};
 pub use watcher::PttWatcher;

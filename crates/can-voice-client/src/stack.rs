@@ -18,7 +18,7 @@ use can_voice_proto::control::Sub;
 pub const MAX_XC_PAIRS: usize = 64;
 
 /// 一个频率及其开关。
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Radio {
     pub freq_khz: u32,
     pub rx: bool,
