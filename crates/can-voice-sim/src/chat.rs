@@ -88,6 +88,62 @@ impl ChatLog {
     }
 }
 
+/// 这条消息该不该响提示音。规矩照搬 xPilot，也照搬 `can-audio/xpc/chime.py`。
+///
+/// 纯函数，不读时钟、不碰设置、不出声——判定是这件事里唯一会出错的部分，
+/// 所以它要能单测。放不放得出声是另一回事，见 `can-voice-chime`。
+///
+/// - **私聊给你的一定响。**
+/// - **频率上的**（收件人是 `@` 加五位频率）只有点到你呼号的才响，
+///   除非 `every_message` 打开。
+/// - **广播**（`*` 全网、`*S` 是 SUP）照响：条数很少，而且多半要紧。
+/// - **自己发出去的不响。** 服务端现在不回显，但这条判断很便宜。
+pub fn wants_alert(
+    callsign: &str,
+    sender: &str,
+    recipient: &str,
+    body: &str,
+    every_message: bool,
+) -> bool {
+    let callsign = callsign.trim().to_uppercase();
+    let sender = sender.trim().to_uppercase();
+    let recipient = recipient.trim().to_uppercase();
+    if !sender.is_empty() && sender == callsign {
+        return false;
+    }
+    if recipient.starts_with('@') {
+        return every_message || mentions(&callsign, body);
+    }
+    true
+}
+
+/// 正文里点到这个呼号了吗。
+///
+/// **前后不能再接字母数字**，否则呼号 `CCA150` 会被 `"CCA1501, descend"` 点到
+/// ——那是另一架飞机的指令，响一声比不响更坏：它让人抬头看一眼本来与他无关的东西。
+/// 标点算边界，字母数字才不算。
+fn mentions(callsign: &str, body: &str) -> bool {
+    if callsign.is_empty() {
+        return false;
+    }
+    let body = body.to_uppercase();
+    for (start, hit) in body.match_indices(callsign) {
+        let end = start + hit.len();
+        let before_ok = body[..start]
+            .chars()
+            .next_back()
+            .map_or(true, |c| !c.is_alphanumeric());
+        let after_ok = body[end..]
+            .chars()
+            .next()
+            .map_or(true, |c| !c.is_alphanumeric());
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +255,133 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(got[0].outbound);
         assert_eq!(got[0].from, "CCA1501");
+    }
+
+    /// 私聊给你的一定响。
+    #[test]
+    fn a_private_message_always_chimes() {
+        assert!(wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "CCA1501",
+            "cleared to land",
+            false
+        ));
+    }
+
+    /// 频率上的消息，只有点到你呼号的才响。
+    #[test]
+    fn a_frequency_message_chimes_only_when_it_names_you() {
+        assert!(wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "@28750",
+            "CCA1501 descend",
+            false
+        ));
+        assert!(!wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "@28750",
+            "CES2345 descend",
+            false
+        ));
+    }
+
+    /// **CCA150 不该被 "CCA1501, descend" 点到。**
+    ///
+    /// 那是另一架飞机的指令，响一声比不响更坏——它会让人抬头看一眼本来与他无关的东西。
+    /// 判据是呼号前后不能再接字母数字。
+    #[test]
+    fn a_longer_callsign_does_not_trigger_the_shorter_one() {
+        assert!(!wants_alert(
+            "CCA150",
+            "ZBAA_TWR",
+            "@28750",
+            "CCA1501, descend",
+            false
+        ));
+        assert!(!wants_alert(
+            "CA150",
+            "ZBAA_TWR",
+            "@28750",
+            "CCA150 descend",
+            false
+        ));
+    }
+
+    /// 标点算边界，字母数字才不算。
+    #[test]
+    fn punctuation_counts_as_a_boundary() {
+        assert!(wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "@28750",
+            "(CCA1501), descend",
+            false
+        ));
+        assert!(wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "@28750",
+            "cca1501, descend",
+            false
+        ));
+    }
+
+    /// 打开"每条都提示"之后，频率上的每一条都响。
+    #[test]
+    fn every_message_turns_the_frequency_half_on() {
+        assert!(wants_alert(
+            "CCA1501",
+            "ZBAA_TWR",
+            "@28750",
+            "CES2345 descend",
+            true
+        ));
+    }
+
+    /// 自己发出去的不响。服务端现在不回显，但这条判断很便宜。
+    #[test]
+    fn your_own_message_does_not_chime() {
+        assert!(!wants_alert(
+            "CCA1501",
+            "CCA1501",
+            "@28750",
+            "CCA1501 roger",
+            true
+        ));
+    }
+
+    /// 广播（`*` 是全网，`*S` 是 SUP）照响：条数很少，而且多半要紧。
+    #[test]
+    fn a_broadcast_chimes() {
+        assert!(wants_alert(
+            "CCA1501",
+            "SUP",
+            "*",
+            "network restart in 5",
+            false
+        ));
+        assert!(wants_alert(
+            "CCA1501",
+            "SUP",
+            "*S",
+            "anyone seen this",
+            false
+        ));
+    }
+
+    /// 还没连上、呼号是空的时候：频率消息点不到你，私聊和广播照常。
+    #[test]
+    fn an_empty_callsign_cannot_be_mentioned() {
+        assert!(!wants_alert(
+            "",
+            "ZBAA_TWR",
+            "@28750",
+            "CCA1501 descend",
+            false
+        ));
+        assert!(wants_alert("", "ZBAA_TWR", "*", "hello", false));
     }
 }

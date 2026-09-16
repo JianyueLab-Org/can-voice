@@ -321,6 +321,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-chime"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "tracing",
+]
+
+[[package]]
 name = "can-voice-client"
 version = "0.1.0"
 dependencies = [
@@ -2408,6 +2416,7 @@ name = "msfs-for-can"
 version = "27.0.3"
 dependencies = [
  "can-voice-app",
+ "can-voice-chime",
  "can-voice-client",
  "can-voice-fsd",
  "can-voice-log",

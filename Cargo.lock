@@ -152,6 +152,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-chime"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "tracing",
+]
+
+[[package]]
 name = "can-voice-client"
 version = "0.1.0"
 dependencies = [
