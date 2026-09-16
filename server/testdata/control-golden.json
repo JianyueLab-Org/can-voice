@@ -1,0 +1,176 @@
+{
+  "comment": "can-voice 控制面消息的跨实现黄金文件。Go 与 Rust 两侧都测这份。改它等于改协议。数据面包头有它自己的一份 wire-golden.json；这一份管的是控制面的 JSON 形状——字段名、类型、以及哪些字段会缺席。spec 4/10 说两边真正共享的是包头布局和控制面消息形状，而在这份文件出现之前，后者只有 e2e 走过的那几条消息被间接覆盖，SUBACK 的 rejected_xc、NOTICE 这类少走的路径上字段改名会静默漂。",
+  "how": "每条用例的 wire 是一份真实的线上样例。两侧各自：解开它，再重新编码，然后检查**wire 里每一个非 null 的键都原样出现在重新编码的结果里**。这一条规则是语言中立的,而且正好把两处真实的实现差异放行、把真正的漂移挡住——见下面的 asymmetries。字段改名或改类型会让解出来的是默认值,重新编码就对不上,立刻红。",
+  "asymmetries": "两处已知的编码差异,放行而不是抹平,因为它们是真的,而且各有各的理由。一,Go 的 nil slice 编码成 null,Rust 的 Vec 编码成 []。SUBACK 的 rejected/rejected_xc 在服务端没有 omitempty,所以 null 是常态——Rust 侧靠 null_as_default 读它,这也是那个 deserialize_with 存在的全部理由。wire 里写 null 的键因此不参与比较,只有非 null 的键才比。二,Notice 的 freq/reason 在 Go 带 omitempty、Rust 没有 skip_serializing_if,所以 Rust 编出来会多两个零值键。多出来的键不算违约——规则只要求wire 里有的键都在,不要求没有的键都不在。",
+  "cases": [
+    {
+      "name": "HELLO：最小形态,follow 与 station 都缺席",
+      "wire": {
+        "type": "HELLO",
+        "token": "eyJ0eXAiOiJKV1QifQ.c2ln",
+        "client": "audio-for-can/27.0.3",
+        "proto": 1
+      }
+    },
+    {
+      "name": "HELLO：观察员,follow 带呼号",
+      "wire": {
+        "type": "HELLO",
+        "token": "t",
+        "client": "xpc-for-can/27.0.3",
+        "proto": 1,
+        "follow": "CES2345"
+      }
+    },
+    {
+      "name": "HELLO：通播机队,station 区分同一个 CID 的不同席位",
+      "wire": {
+        "type": "HELLO",
+        "token": "t",
+        "client": "atis-for-can/27.0.3",
+        "proto": 1,
+        "station": "ZBAA_ATIS"
+      }
+    },
+    {
+      "name": "READY：limits 从这里带上来,客户端要在声明之前就知道 max_tx",
+      "wire": {
+        "type": "READY",
+        "session": 42,
+        "server": "CAN BETA TEST",
+        "max_tx": 8,
+        "max_rx": 16
+      }
+    },
+    {
+      "name": "SUB：三样都有,xc 是成对的",
+      "wire": {
+        "type": "SUB",
+        "rx": [
+          118000,
+          121800
+        ],
+        "tx": [
+          118000
+        ],
+        "xc": [
+          [
+            118000,
+            121800
+          ]
+        ]
+      }
+    },
+    {
+      "name": "SUB：空声明。客户端编出来是 [],不是 null",
+      "wire": {
+        "type": "SUB",
+        "rx": [],
+        "tx": [],
+        "xc": []
+      }
+    },
+    {
+      "name": "SUB：服务端要能读 null。旧客户端和手写的 JSON 都可能这么发",
+      "wire": {
+        "type": "SUB",
+        "rx": null,
+        "tx": null,
+        "xc": null
+      }
+    },
+    {
+      "name": "SUBACK：全部接受。rejected 与 rejected_xc 是 Go 的 nil slice,所以是 null",
+      "wire": {
+        "type": "SUBACK",
+        "rx": [
+          118000
+        ],
+        "tx": [
+          118000
+        ],
+        "rejected": null,
+        "rejected_xc": null
+      }
+    },
+    {
+      "name": "SUBACK：有被拒的频率,也有被拒的交叉耦合",
+      "wire": {
+        "type": "SUBACK",
+        "rx": [
+          118000
+        ],
+        "tx": [],
+        "rejected": [
+          121800
+        ],
+        "rejected_xc": [
+          [
+            118000,
+            121800
+          ]
+        ]
+      }
+    },
+    {
+      "name": "SUBACK：被拒的太多,截断了。这个键带 omitempty,为 false 时缺席",
+      "wire": {
+        "type": "SUBACK",
+        "rx": [],
+        "tx": [],
+        "rejected": [
+          121800
+        ],
+        "rejected_xc": null,
+        "rejected_truncated": true
+      }
+    },
+    {
+      "name": "NOTICE：tx_denied 带频率,reason 缺席",
+      "wire": {
+        "type": "NOTICE",
+        "kind": "tx_denied",
+        "freq": 118000
+      }
+    },
+    {
+      "name": "NOTICE：range_unavailable 带 reason",
+      "wire": {
+        "type": "NOTICE",
+        "kind": "range_unavailable",
+        "freq": 121800,
+        "reason": "no station in range"
+      }
+    },
+    {
+      "name": "NOTICE：unknown_message 两个可选字段都缺席",
+      "wire": {
+        "type": "NOTICE",
+        "kind": "unknown_message"
+      }
+    },
+    {
+      "name": "PING / PONG：t 是毫秒,可以为负(客户端时钟在 1970 之前不是我们的问题,但不能解不开)",
+      "wire": {
+        "type": "PING",
+        "t": 1789000000000
+      }
+    },
+    {
+      "name": "PONG：server_t 是服务端自己的时钟",
+      "wire": {
+        "type": "PONG",
+        "t": 1789000000000,
+        "server_t": 1789000000123
+      }
+    },
+    {
+      "name": "BYE：顶号。reason 没有 omitempty,空串也在",
+      "wire": {
+        "type": "BYE",
+        "reason": "evicted"
+      }
+    }
+  ],
+  "why_not_bytes": "不按字节比:serde_json 的键是字典序,Go 是结构体声明序,字节比只会钉住一个和协议无关的东西。也不整体比对象相等,因为那会把下面两处差异误判成故障。"
+}
