@@ -15,11 +15,12 @@
 //! 一份全量声明、发出去——三条耦合规则（关 RX 清 TX/XC、开 TX 强制 RX、
 //! 开 XC 强制 RX+TX）在核心库里只写了一遍。
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{Ended, Snapshot};
 use can_voice_client::stack::RadioStack;
 use can_voice_client::{Config, Event, VoiceClient};
 use can_voice_token::TokenSource;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,10 +31,20 @@ pub enum Error {
 }
 
 /// 一个应用的全部运行时状态。
+///
+/// 状态装在一个 `Arc` 里，因为**监护任务要能自己换票重连**：它活在
+/// `tokio::spawn` 里，拿不到 `&self`。
 pub struct Bridge {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     client: Mutex<Option<VoiceClient>>,
     stack: Mutex<RadioStack>,
-    snapshot: Arc<Mutex<Snapshot>>,
+    snapshot: Mutex<Snapshot>,
+    /// 重连要的两样东西。`disconnect` 会清掉它 —— 否则主动下线会被监护任务
+    /// 当成掉线再连回来。
+    session: Mutex<Option<(Config, TokenSource)>>,
 }
 
 impl Default for Bridge {
@@ -45,35 +56,45 @@ impl Default for Bridge {
 impl Bridge {
     pub fn new() -> Self {
         Self {
-            client: Mutex::new(None),
-            stack: Mutex::new(RadioStack::new()),
-            snapshot: Arc::new(Mutex::new(Snapshot::default())),
+            inner: Arc::new(Inner {
+                client: Mutex::new(None),
+                stack: Mutex::new(RadioStack::new()),
+                snapshot: Mutex::new(Snapshot::default()),
+                session: Mutex::new(None),
+            }),
         }
     }
 
     /// 当前状态。**前端一挂上就读它**，不要试图从事件流拼——事件是广播，
     /// 挂上之前发生的事收不到。
     pub fn snapshot(&self) -> Snapshot {
-        self.snapshot.lock().map(|s| s.clone()).unwrap_or_default()
+        self.inner
+            .snapshot
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default()
     }
 
     /// 连上去。票由 `TokenSource` 换，过期了会换一张再试一次。
+    ///
+    /// 凭据留在桥里，因为票只活 60 秒：掉线重连拿的必须是一张新票。
     pub async fn connect(&self, cfg: Config, tokens: &TokenSource) -> Result<(), Error> {
-        let client = can_voice_token::connect(cfg, tokens).await?;
-        let events = client.events();
-        let snapshot = self.snapshot.clone();
-        tokio::spawn(pump_into_snapshot(events, snapshot));
-
-        if let Ok(mut slot) = self.client.lock() {
-            *slot = Some(client);
+        let client = can_voice_token::connect(cfg.clone(), tokens).await?;
+        if let Ok(mut s) = self.inner.session.lock() {
+            *s = Some((cfg, tokens.clone()));
         }
-        self.push_declaration();
+        self.inner.adopt(client);
         Ok(())
     }
 
     /// 断开。
     pub async fn disconnect(&self) {
-        let client = self.client.lock().ok().and_then(|mut c| c.take());
+        // 先清重连依据，再关连接。反过来的话，关闭事件到达时监护任务还看得见
+        // 凭据，会把一次主动下线当成掉线连回来。
+        if let Ok(mut s) = self.inner.session.lock() {
+            *s = None;
+        }
+        let client = self.inner.client.lock().ok().and_then(|mut c| c.take());
         if let Some(c) = client {
             c.shutdown().await;
         }
@@ -81,15 +102,16 @@ impl Bridge {
 
     /// 改台面。**每次都重发一份全量声明**——没有"这次改了哪一个"的增量路径。
     pub fn with_stack(&self, f: impl FnOnce(&mut RadioStack)) {
-        if let Ok(mut s) = self.stack.lock() {
+        if let Ok(mut s) = self.inner.stack.lock() {
             f(&mut s);
         }
-        self.push_declaration();
+        self.inner.push_declaration();
     }
 
     /// 当前台面。
     pub fn radios(&self) -> Vec<can_voice_client::stack::Radio> {
-        self.stack
+        self.inner
+            .stack
             .lock()
             .map(|s| s.radios().to_vec())
             .unwrap_or_default()
@@ -97,9 +119,27 @@ impl Bridge {
 
     /// 按下 / 松开 PTT。
     pub fn set_transmitting(&self, on: bool) {
-        if let Ok(c) = self.client.lock() {
+        if let Ok(c) = self.inner.client.lock() {
             if let Some(c) = c.as_ref() {
                 c.set_transmitting(on);
+            }
+        }
+    }
+
+    /// 换录音 / 播放设备。
+    ///
+    /// **两件事都要做**：转给正在跑的那条连接（立刻生效），并改掉存着的
+    /// `Config`，否则下一次重连又换回旧设备。
+    pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
+        if let Ok(mut s) = self.inner.session.lock() {
+            if let Some((cfg, _)) = s.as_mut() {
+                cfg.input_device = input.clone();
+                cfg.output_device = output.clone();
+            }
+        }
+        if let Ok(c) = self.inner.client.lock() {
+            if let Some(c) = c.as_ref() {
+                c.set_audio_devices(input, output);
             }
         }
     }
@@ -107,11 +147,26 @@ impl Bridge {
     /// 某个频率的播放音量。
     pub fn set_volume(&self, freq_khz: u32, gain: f32) {
         self.with_stack(|s| s.set_gain(freq_khz, gain));
-        if let Ok(c) = self.client.lock() {
+        if let Ok(c) = self.inner.client.lock() {
             if let Some(c) = c.as_ref() {
                 c.set_frequency_volume(freq_khz, gain);
             }
         }
+    }
+}
+
+impl Inner {
+    /// 接管一条新连接：起监护任务、存起来、把台面重发一遍。
+    ///
+    /// **重连之后台面要重发**，而重发就是恢复——声明是幂等的全量声明，
+    /// 这正是声明式 API 换来的东西。
+    fn adopt(self: &Arc<Self>, client: VoiceClient) {
+        let events = client.events();
+        if let Ok(mut slot) = self.client.lock() {
+            *slot = Some(client);
+        }
+        tokio::spawn(supervise(self.clone(), events));
+        self.push_declaration();
     }
 
     /// 把台面折算成声明发出去。夹掉的耦合对返回给调用方显示。
@@ -132,16 +187,26 @@ impl Bridge {
     }
 }
 
-async fn pump_into_snapshot(
-    mut events: tokio::sync::broadcast::Receiver<Event>,
-    snapshot: Arc<Mutex<Snapshot>>,
-) {
+/// 把事件泵进快照，并在票过期时换一张再连一次。
+async fn supervise(inner: Arc<Inner>, mut events: tokio::sync::broadcast::Receiver<Event>) {
+    let started = std::time::Instant::now();
     loop {
         match events.recv().await {
             Ok(e) => {
-                if let Ok(mut s) = snapshot.lock() {
+                let ended = {
+                    let Ok(mut s) = inner.snapshot.lock() else {
+                        return;
+                    };
                     s.apply(&e);
+                    s.ended.clone()
+                };
+                let Some(ended) = ended else { continue };
+                if should_renew_after(&ended, started.elapsed()) {
+                    renew(inner).await;
                 }
+                // 无论换不换，这一条链路结束了，这个任务也该结束——
+                // 新的一条由 `adopt` 起一个新的。
+                return;
             }
             // 跟不上就继续：快照只关心最新的状态，丢掉的中间事件不影响它收敛。
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -152,9 +217,40 @@ async fn pump_into_snapshot(
     }
 }
 
+/// 换一张票再连一次。
+async fn renew(inner: Arc<Inner>) {
+    let Some((cfg, tokens)) = inner.session.lock().ok().and_then(|s| s.clone()) else {
+        // 主动下线清掉了凭据。什么都不做才是对的。
+        return;
+    };
+    tracing::info!("the token had expired; fetching a fresh one and reconnecting");
+    match can_voice_token::connect(cfg, &tokens).await {
+        Ok(client) => inner.adopt(client),
+        Err(e) => tracing::warn!(error = %e, "could not reconnect with a fresh token"),
+    }
+}
+
+/// 一次会话至少要活这么久，才值得为它换票重连。
+///
+/// 比票的寿命（60 秒）短一半：一条活过半分钟的会话是真的在用，
+/// 而"连上就掉"说明问题不在票上。
+const MIN_SESSION_BEFORE_RENEWAL: Duration = Duration::from_secs(30);
+
+/// 这次掉线该不该换一张票再连一次。
+///
+/// **换票是这一层的事，不是核心库的。** 核心库刻意不碰凭据，所以它撞上
+/// `token_expired` 只能进 Offline，并在日志里说"由上层换一张再 connect 一次"。
+/// 在这个函数存在之前，那个上层不存在：can-api 签的是 60 秒的票，于是在线超过
+/// 一分钟之后掉一次线，重连握手拿的还是同一张过期票，用户只能重新手打密码。
+pub fn should_renew_after(ended: &Ended, session_lasted: Duration) -> bool {
+    matches!(ended, Ended::Refused(r) if r.is_recoverable())
+        && session_lasted >= MIN_SESSION_BEFORE_RENEWAL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use can_voice_client::conn::RefusedReason;
 
     /// **桥这一层不得引入 `join` / `leave` / `channel_id`。**
     ///
@@ -198,6 +294,48 @@ mod tests {
             scanned > 5,
             "only {scanned} public fns scanned; the walk is probably broken"
         );
+    }
+
+    // ——— 掉线之后该不该换票重连 ———
+
+    /// **票过期是上层唯一能救的掉线。** 核心库拿不到新票，所以它只能进 Offline；
+    /// 换一张再连一次是桥的事，而桥恰恰没做，于是在线超过票的寿命之后
+    /// 掉一次线就要用户重新手打密码。
+    #[test]
+    fn an_expired_token_after_a_working_session_is_worth_a_fresh_one() {
+        assert!(should_renew_after(
+            &Ended::Refused(RefusedReason::TokenExpired),
+            Duration::from_secs(600),
+        ));
+    }
+
+    /// 其余几种换多少张票都一样：顶号要换的是别处那个人，版本不对要换的是客户端。
+    #[test]
+    fn the_other_endings_are_not_a_token_problem() {
+        for e in [
+            Ended::Offline,
+            Ended::Evicted,
+            Ended::Refused(RefusedReason::TokenInvalid),
+            Ended::Refused(RefusedReason::ProtoUnsupported),
+            Ended::Refused(RefusedReason::Refused),
+            Ended::Refused(RefusedReason::Other("nope".into())),
+        ] {
+            assert!(
+                !should_renew_after(&e, Duration::from_secs(600)),
+                "{e:?} 不该换票重连"
+            );
+        }
+    }
+
+    /// **刚连上就过期，问题在时钟上，不在票上。** 再换只是把同一件事重演，
+    /// 而换票走 can-api 的鉴权路由——它和 FSD 登录共用同一个按 CAN ID 的限流桶，
+    /// 循环换票会把这个账号连 FSD 一起锁出去。
+    #[test]
+    fn an_immediate_second_expiry_is_a_clock_problem() {
+        assert!(!should_renew_after(
+            &Ended::Refused(RefusedReason::TokenExpired),
+            Duration::from_secs(2),
+        ));
     }
 
     /// 台面直接折算成声明，桥不自己拼订阅——耦合规则只有一份实现。

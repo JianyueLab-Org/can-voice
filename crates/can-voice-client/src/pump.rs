@@ -239,6 +239,8 @@ async fn pump(
     let mut last_ping = Instant::now();
     let mut rtt_ms = 0u32;
     let mut counters = Counters::default();
+    // 音频一开始是好的：建不起来的话 `AudioIo::start` 已经报过了。
+    let mut audio_ok = true;
 
     loop {
         // 有待发的声明就先推出去。`SubscriptionState` 保证这是幂等的全量声明，
@@ -259,6 +261,13 @@ async fn pump(
                 Some(Command::PushAudio(pcm)) => {
                     if let Some(t) = tx.as_mut() {
                         t.push(&pcm);
+                    }
+                }
+                // 换设备**立刻生效**，不必等到下一次连接：重建在音频线程上做，
+                // 因为 `cpal::Stream` 是 `!Send`。
+                Some(Command::Devices { input, output }) => {
+                    if let Some(io) = audio {
+                        io.set_devices(input.as_deref(), output.as_deref());
                     }
                 }
                 Some(Command::Shutdown) | None => {
@@ -311,6 +320,26 @@ async fn pump(
             },
 
             _ = ticker.tick() => {
+                // **声卡掉了要说一句。** 只在日志里 warn 一行的后果是
+                // "能连上、状态绿、说话没人听见"，而拔一次耳机就是这样。
+                // 恢复也要说，那一条会把前一条撤掉（见 Snapshot::apply）。
+                if let Some(io) = audio {
+                    let ok = io.running();
+                    if ok != audio_ok {
+                        audio_ok = ok;
+                        let (kind, reason) = if ok {
+                            ("audio_restored", "the audio devices are open again")
+                        } else {
+                            ("audio_unavailable", "the audio devices went away; reopening")
+                        };
+                        let _ = events.send(Event::Notice {
+                            kind: kind.into(),
+                            freq_khz: 0,
+                            reason: reason.into(),
+                        });
+                    }
+                }
+
                 // 接收：混音器每一拍都出恰好一帧，直接送去播放。
                 let (pcm, rx_events) = mixer.tick();
                 if let Some(io) = audio {

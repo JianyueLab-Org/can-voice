@@ -27,6 +27,11 @@ pub enum Ended {
     Refused(RefusedReason),
 }
 
+/// 声卡打不开。
+pub const AUDIO_UNAVAILABLE: &str = "audio_unavailable";
+/// 声卡又开起来了。**它不是一条要显示的通知**，是撤掉上面那条的信号。
+pub const AUDIO_RESTORED: &str = "audio_restored";
+
 /// 链路健康。掉线那一行要带着它一起打出来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct Health {
@@ -112,6 +117,12 @@ impl Snapshot {
                 freq_khz,
                 reason,
             } => {
+                // **恢复是撤掉，不是再叠一条。** 两条并排显示的话，用户看到的是
+                // "声卡打不开"和"声卡好了"同时在列，而他分不清哪一条说的是现在。
+                if kind == AUDIO_RESTORED {
+                    self.notices.retain(|(k, _, _)| k != AUDIO_UNAVAILABLE);
+                    return;
+                }
                 self.notices.push((kind.clone(), *freq_khz, reason.clone()));
                 if self.notices.len() > MAX_NOTICES {
                     self.notices.remove(0);
@@ -373,6 +384,51 @@ mod tests {
         s.apply(&Event::State(LinkState::Reconnecting));
         s.apply(&Event::State(LinkState::Online));
         assert!(s.denied_tx.is_empty());
+    }
+
+    /// **声卡恢复要把那条"坏了"撤掉，而不是再叠一条。**
+    ///
+    /// 两条并排显示的话，用户看到的是"声卡打不开"和"声卡好了"同时在列，
+    /// 而他分不清哪一条说的是现在。
+    #[test]
+    fn audio_coming_back_clears_the_notice_that_said_it_was_gone() {
+        let mut s = online();
+        s.apply(&Event::Notice {
+            kind: "audio_unavailable".into(),
+            freq_khz: 0,
+            reason: "gone".into(),
+        });
+        assert_eq!(s.notices.len(), 1);
+
+        s.apply(&Event::Notice {
+            kind: "audio_restored".into(),
+            freq_khz: 0,
+            reason: "back".into(),
+        });
+
+        assert!(
+            s.notices.is_empty(),
+            "恢复之后不该还留着任何一条声卡通知：{:?}",
+            s.notices
+        );
+    }
+
+    /// 别的通知不受影响——撤掉的只有声卡那一条。
+    #[test]
+    fn other_notices_survive_an_audio_recovery() {
+        let mut s = online();
+        s.apply(&Event::Notice {
+            kind: "range_unavailable".into(),
+            freq_khz: 0,
+            reason: "no feed".into(),
+        });
+        s.apply(&Event::Notice {
+            kind: "audio_restored".into(),
+            freq_khz: 0,
+            reason: "back".into(),
+        });
+        assert_eq!(s.notices.len(), 1);
+        assert_eq!(s.notices[0].0, "range_unavailable");
     }
 
     #[test]

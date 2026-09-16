@@ -162,6 +162,11 @@ pub(crate) enum Command {
     },
     /// 直接注入 48 kHz 单声道 PCM，绕过麦克风。
     PushAudio(Vec<i16>),
+    /// 换录音 / 播放设备。
+    Devices {
+        input: Option<String>,
+        output: Option<String>,
+    },
     Shutdown,
 }
 
@@ -225,6 +230,14 @@ impl VoiceClient {
     /// ——序号、首帧尾帧、扇出到每个 TX 频率，走的是同一条路。
     pub fn push_audio(&self, pcm48: &[i16]) {
         let _ = self.commands.send(Command::PushAudio(pcm48.to_vec()));
+    }
+
+    /// 换录音 / 播放设备。`None` 是跟系统默认。
+    ///
+    /// **立刻生效**，不必重连——重建在音频线程上做，因为 `cpal::Stream`
+    /// 是 `!Send`。设备没变时是空操作：重建会让声音断一下。
+    pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
+        let _ = self.commands.send(Command::Devices { input, output });
     }
 
     /// 订阅事件流。
