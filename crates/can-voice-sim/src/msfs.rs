@@ -127,6 +127,20 @@ pub fn snapshot(raw: &HashMap<&str, f64>) -> Option<Snapshot> {
     })
 }
 
+/// FSD 约定的俯仰坡度换成 SimConnect 约定，注入他机时用。
+///
+/// [`snapshot`] 读自机时取了一次负（`PLANE PITCH DEGREES` 名字里写着度、
+/// 实际是弧度，而且正方向和 FSD 相反），写回去自然要再取一次。
+///
+/// **它单独成一个函数，是因为这条约定唯一出过的错就是两端各做各的假设。**
+/// 注入那一半曾经把 `unpack_pbh` 出来的 FSD 值原样送进 `PLANE PITCH DEGREES`：
+/// 别人爬升时机头朝下、左转时向右压坡度，而自机上网的姿态是对的——
+/// 单机自测看不出来，要两个人对飞才看得见。往返测试 `reading_then_injecting_round_trips`
+/// 把两端钉在一起，改一边就红。
+pub fn attitude_for_injection(pitch: f64, bank: f64) -> (f64, f64) {
+    (-pitch, -bank)
+}
+
 /// COM 频率（MHz）。SimConnect 直接给兆赫。
 fn frequency(mhz: Option<f64>) -> Option<f64> {
     let mhz = mhz?;
@@ -174,6 +188,30 @@ mod tests {
     fn the_heading_wraps_into_zero_to_three_sixty() {
         let s = snapshot(&raw(&[("heading", 725.0_f64.to_radians())])).expect("snapshot");
         assert!((s.heading - 5.0).abs() < 1e-6, "{}", s.heading);
+    }
+
+    /// 注入他机时要把 FSD 约定换回 SimConnect 约定——和
+    /// [`the_attitude_is_radians_and_the_sign_is_flipped`] 那一次取负配对。
+    #[test]
+    fn injecting_flips_the_attitude_back() {
+        let (pitch, bank) = attitude_for_injection(10.0, 25.0);
+        assert!((pitch + 10.0).abs() < 1e-9, "{pitch}");
+        assert!((bank + 25.0).abs() < 1e-9, "{bank}");
+    }
+
+    /// **读进来再写回去必须回到原值。** 这一条钉的是接口两端用同一个约定：
+    /// 读那一半取了负而写那一半没取，别人爬升时机头朝下、左转时向右压坡度，
+    /// 而自机上网的姿态是对的——单机自测看不出来，要两个人对飞才看得见。
+    #[test]
+    fn reading_then_injecting_round_trips() {
+        let s = snapshot(&raw(&[
+            ("pitch", 10.0_f64.to_radians()),
+            ("bank", 25.0_f64.to_radians()),
+        ]))
+        .expect("snapshot");
+        let (pitch, bank) = attitude_for_injection(s.pitch, s.bank);
+        assert!((pitch - 10.0).abs() < 1e-6, "{pitch}");
+        assert!((bank - 25.0).abs() < 1e-6, "{bank}");
     }
 
     /// 应答机码是 BCD。
@@ -860,12 +898,14 @@ mod ffi {
         ) -> Result<(), String> {
             // **建在它现在所在的位置**，不是 0°N 0°E。给零的话飞机会在几内亚湾
             // 外面出现半秒再跳过来，而且模拟器可能顺手去加载那一块地景。
+            let (pitch, bank) =
+                super::attitude_for_injection(entry.position.pitch, entry.position.bank);
             let position = InitPosition {
                 latitude: entry.position.latitude,
                 longitude: entry.position.longitude,
                 altitude: entry.position.altitude,
-                pitch: entry.position.pitch,
-                bank: entry.position.bank,
+                pitch,
+                bank,
                 heading: entry.position.heading,
                 on_ground: u32::from(entry.position.on_ground) as c_ulong,
                 airspeed: entry.position.groundspeed.max(0.0) as c_ulong,
@@ -899,12 +939,14 @@ mod ffi {
         }
 
         fn update(&mut self, api: &Api, object_id: u32, entry: &crate::traffic::Entry) {
+            let (pitch, bank) =
+                super::attitude_for_injection(entry.position.pitch, entry.position.bank);
             let mut data = TrafficPosition {
                 latitude: entry.position.latitude,
                 longitude: entry.position.longitude,
                 altitude: entry.position.altitude,
-                pitch: entry.position.pitch,
-                bank: entry.position.bank,
+                pitch,
+                bank,
                 heading: entry.position.heading,
                 on_ground: if entry.position.on_ground { 1.0 } else { 0.0 },
                 airspeed: entry.position.groundspeed,
