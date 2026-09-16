@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import WindowToggles from "./components/WindowToggles.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import StationEditor from "./components/StationEditor.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
@@ -8,6 +11,11 @@ import NameDialog from "./components/NameDialog.vue";
 import NetworkDialog from "./components/NetworkDialog.vue";
 import type { ImportReport, Live, Merged, NetworkPreview, Rendered, Station } from "./types";
 import { callsignOf, describeMerge, stateText } from "./types";
+
+/** 设置对话框开没开。 */
+const showPrefs = ref(false);
+/** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
+const compact = computed(() => appearance.value.compact);
 
 const profiles = ref<{ names: string[]; active: string }>({ names: [], active: "" });
 const stations = ref<Station[]>([]);
@@ -268,6 +276,7 @@ async function loadSettings() {
 }
 
 onMounted(async () => {
+  void loadAppearance();
   await loadSettings();
   await reload();
   // 在播的那几路状态一直在变，轮询比订阅省事，也不会漏掉挂载之前发生的事。
@@ -277,43 +286,50 @@ onUnmounted(() => window.clearInterval(timer));
 </script>
 
 <template>
-  <main class="mx-auto flex h-screen max-w-6xl flex-col gap-3 p-4 text-sm">
+  <main
+    class="mx-auto flex h-screen max-w-6xl flex-col text-sm"
+    :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
+  >
     <header class="flex items-center gap-3">
-      <h1 class="text-base font-semibold">通播制作</h1>
-      <select
-        :value="profiles.active"
-        class="rounded border px-2 py-1 text-xs"
-        @change="pickProfile(($event.target as HTMLSelectElement).value)"
-      >
-        <option v-for="n in profiles.names" :key="n">{{ n }}</option>
-      </select>
-      <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">新配置</button>
-      <button
-        class="rounded border px-2 py-1 text-xs"
-        :disabled="!profiles.active"
-        @click="asking = 'rename'"
-      >
-        改名
-      </button>
-      <button
-        class="rounded border px-2 py-1 text-xs"
-        :disabled="profiles.names.length < 2"
-        @click="removeProfile"
-      >
-        删除
-      </button>
-      <div class="ml-auto flex items-center gap-2">
-        <input v-model="cid" placeholder="CAN 号" class="w-24 rounded border px-2 py-1 text-xs" />
-        <input
-          v-model="password"
-          type="password"
-          placeholder="密码"
-          class="w-28 rounded border px-2 py-1 text-xs"
-        />
-      </div>
+      <template v-if="!compact">
+        <h1 class="text-base font-semibold">通播制作</h1>
+        <select
+          :value="profiles.active"
+          class="rounded border px-2 py-1 text-xs"
+          @change="pickProfile(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="n in profiles.names" :key="n">{{ n }}</option>
+        </select>
+        <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">新配置</button>
+        <button
+          class="rounded border px-2 py-1 text-xs"
+          :disabled="!profiles.active"
+          @click="asking = 'rename'"
+        >
+          改名
+        </button>
+        <button
+          class="rounded border px-2 py-1 text-xs"
+          :disabled="profiles.names.length < 2"
+          @click="removeProfile"
+        >
+          删除
+        </button>
+        <div class="ml-auto flex items-center gap-2">
+          <input v-model="cid" placeholder="CAN 号" class="w-24 rounded border px-2 py-1 text-xs" />
+          <input
+            v-model="password"
+            type="password"
+            placeholder="密码"
+            class="w-28 rounded border px-2 py-1 text-xs"
+          />
+        </div>
+      </template>
+      <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
+      <WindowToggles class="ml-auto" @settings="showPrefs = true" />
     </header>
 
-    <UpdateBanner />
+    <UpdateBanner v-if="!compact" />
 
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
@@ -332,7 +348,8 @@ onUnmounted(() => window.clearInterval(timer));
 
     <div class="flex min-h-0 flex-1 gap-4">
       <!-- 席位列表 -->
-      <aside class="flex w-52 flex-col gap-1 overflow-auto">
+      <!-- 精简时只留席位列表：在播的哪几个、各自是哪个字母，就是值班时要盯的。 -->
+      <aside class="flex flex-col gap-1 overflow-auto" :class="compact ? 'flex-1' : 'w-52'">
         <button
           v-for="s in stations"
           :key="callsignOf(s)"
@@ -349,7 +366,11 @@ onUnmounted(() => window.clearInterval(timer));
             {{ live[callsignOf(s)].letter }}
           </span>
         </button>
-        <button class="rounded border border-dashed px-2 py-1 text-xs" @click="asking = 'station'">
+        <button
+          v-if="!compact"
+          class="rounded border border-dashed px-2 py-1 text-xs"
+          @click="asking = 'station'"
+        >
           + 新席位
         </button>
         <details class="rounded border px-2 py-1 text-xs">
@@ -390,8 +411,8 @@ onUnmounted(() => window.clearInterval(timer));
         </details>
 
         <!-- 折叠着：平时不占地方。 -->
-        <details class="mt-auto rounded border px-2 py-1 text-xs">
-          <summary class="cursor-pointer opacity-70">设置</summary>
+        <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
+          <summary class="cursor-pointer opacity-70">播出</summary>
           <div class="flex flex-col gap-2 pt-2">
             <label class="flex items-center gap-2">
               <span class="opacity-60">报文周期</span>
@@ -430,7 +451,7 @@ onUnmounted(() => window.clearInterval(timer));
           </div>
         </details>
 
-        <details class="rounded border px-2 py-1 text-xs">
+        <details v-if="!compact" class="rounded border px-2 py-1 text-xs">
           <summary class="cursor-pointer opacity-70">日志</summary>
           <div class="pt-2">
             <LogPanel :cid="cid" />
@@ -439,7 +460,7 @@ onUnmounted(() => window.clearInterval(timer));
       </aside>
 
       <!-- 编辑 -->
-      <div class="flex min-w-0 flex-1 flex-col gap-3 overflow-auto">
+      <div v-if="!compact" class="flex min-w-0 flex-1 flex-col gap-3 overflow-auto">
         <StationEditor
           v-if="station"
           :station="station"
@@ -452,7 +473,7 @@ onUnmounted(() => window.clearInterval(timer));
       </div>
 
       <!-- 稿子 -->
-      <aside class="flex w-80 flex-col gap-2 overflow-auto border-l pl-4">
+      <aside v-if="!compact" class="flex w-80 flex-col gap-2 overflow-auto border-l pl-4">
         <div class="flex items-center gap-2">
           <span class="text-xs font-semibold">{{ stateText(current) }}</span>
           <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
@@ -570,5 +591,6 @@ onUnmounted(() => window.clearInterval(timer));
       @confirm="addStation"
       @cancel="asking = null"
     />
+    <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
   </main>
 </template>

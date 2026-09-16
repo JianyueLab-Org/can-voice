@@ -16,6 +16,12 @@
 //! 直接写目标文件的话，一次崩溃或断电会留下半份 JSON，而下次启动读到的是
 //! "设置全没了"——那正是这个模块存在的理由的反面。
 
+pub mod appearance;
+pub mod endpoints;
+
+pub use appearance::{Appearance, Theme};
+pub use endpoints::Endpoints;
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::path::{Path, PathBuf};

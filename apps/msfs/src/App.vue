@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import WindowToggles from "./components/WindowToggles.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import TrafficList from "./components/TrafficList.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
@@ -8,6 +11,11 @@ import ControllerList from "./components/ControllerList.vue";
 import PilotPanel from "./components/PilotPanel.vue";
 import type { View } from "./types";
 import { mhz, xpdrText, voiceText } from "./types";
+
+/** 设置对话框开没开。 */
+const showPrefs = ref(false);
+/** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
+const compact = computed(() => appearance.value.compact);
 
 const cid = ref("");
 const password = ref("");
@@ -33,6 +41,7 @@ async function refresh() {
 }
 
 onMounted(async () => {
+  void loadAppearance();
   // 上次用的那一组预填。密码不存：它换的是一张短寿命的票。
   const saved = await invoke<import("./types").Settings>("settings");
   cid.value = saved.cid;
@@ -89,9 +98,12 @@ const send = () =>
 </script>
 
 <template>
-  <main class="mx-auto flex h-screen max-w-5xl flex-col gap-3 p-4 text-sm">
-    <header class="flex items-center gap-3">
-      <h1 class="text-base font-semibold">MSFS 飞行客户端</h1>
+  <main
+    class="mx-auto flex h-screen max-w-5xl flex-col text-sm"
+    :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
+  >
+    <header class="flex flex-wrap items-center gap-3">
+      <h1 v-if="!compact" class="text-base font-semibold">MSFS 飞行客户端</h1>
       <!-- 模拟器连没连上要一眼看得见：没连上时下面所有数字都是空的，
            而"空的"和"零"在座舱里是两件事。 -->
       <span
@@ -113,12 +125,14 @@ const send = () =>
       <span v-if="!view?.sim_connected && view?.sim_problem" class="text-xs text-amber-600">
         {{ view.sim_problem }}
       </span>
-      <span v-if="!mouseSupported" class="ml-auto text-xs opacity-60">
+      <span v-if="!mouseSupported && !compact" class="text-xs opacity-60">
         本系统不支持鼠标侧键作 PTT
       </span>
+      <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
+      <WindowToggles class="ml-auto" @settings="showPrefs = true" />
     </header>
 
-    <UpdateBanner />
+    <UpdateBanner v-if="!compact" />
 
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
@@ -155,7 +169,11 @@ const send = () =>
 
     <!-- 座舱读数。频率跟着 COM1 走，界面上没有第二个频率框——
          客户端上再有一个就会有两个真相。 -->
-    <section class="grid grid-cols-6 gap-2 rounded border px-3 py-2 font-mono text-xs tabular-nums">
+    <!-- 精简时收起：这几个数模拟器里都有，压在模拟器上的窗口不必再显示一遍。 -->
+    <section
+      v-if="!compact"
+      class="grid grid-cols-6 gap-2 rounded border px-3 py-2 font-mono text-xs tabular-nums"
+    >
       <div><p class="opacity-60">COM1</p>{{ mhz(view?.sim?.com1) }}</div>
       <div>
         <p class="opacity-60">应答机</p>
@@ -171,29 +189,32 @@ const send = () =>
       </div>
     </section>
 
-    <PilotPanel :cid="cid" :hangar="view?.hangar" />
+    <PilotPanel v-if="!compact" :cid="cid" :hangar="view?.hangar" />
 
     <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
          飞行员看不见，而他会以为对方没理他。 -->
-    <section class="grid min-h-0 flex-1 gap-3 md:grid-cols-2">
-      <div class="flex min-h-0 flex-col gap-2">
+    <!-- 精简时只留文字消息：管制员打的字飞行员必须看得见，附近的飞机和在线席位
+         是参考，不是值班时要盯的东西。 -->
+    <section class="grid min-h-0 flex-1 gap-3" :class="compact ? '' : 'md:grid-cols-2'">
+      <div v-if="!compact" class="flex min-h-0 flex-col gap-2">
         <p class="text-xs opacity-60">附近的飞机（{{ view?.traffic.length ?? 0 }}）</p>
         <TrafficList :traffic="view?.traffic ?? []" />
       </div>
       <div class="flex min-h-0 flex-col gap-2">
-        <p class="text-xs opacity-60">在线席位（{{ view?.controllers.length ?? 0 }}）</p>
+        <p v-if="!compact" class="text-xs opacity-60">在线席位（{{ view?.controllers.length ?? 0 }}）</p>
         <!-- 点一行就把那个席位填进收件人框。 -->
         <ControllerList
+          v-if="!compact"
           class="max-h-28 shrink-0"
           :controllers="view?.controllers ?? []"
           @reply="setRecipient"
         />
-        <p class="text-xs opacity-60">文字消息</p>
+        <p v-if="!compact" class="text-xs opacity-60">文字消息</p>
         <ChatLog :messages="view?.messages ?? []" @reply="setRecipient" />
       </div>
     </section>
 
-    <footer class="flex items-center gap-2 border-t pt-3">
+    <footer class="flex items-center gap-2 border-t" :class="compact ? 'pt-2' : 'pt-3'">
       <button
         class="rounded border px-4 py-2 text-xs"
         :class="pressed ? 'bg-red-600 text-white' : ''"
@@ -204,6 +225,7 @@ const send = () =>
         {{ pressed ? "发话中" : "按住发话" }}
       </button>
       <input
+        v-if="!compact"
         v-model="recipient"
         placeholder="收件人（留空发到频率）"
         class="w-40 rounded border px-2 py-1 text-xs"
@@ -212,7 +234,7 @@ const send = () =>
       <input
         v-model="message"
         placeholder="文字消息，.wallop 呼叫督导"
-        class="flex-1 rounded border px-2 py-1 text-xs"
+        class="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
         :disabled="!connected"
         @keyup.enter="send"
       />
@@ -220,5 +242,6 @@ const send = () =>
         发送
       </button>
     </footer>
+    <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
   </main>
 </template>

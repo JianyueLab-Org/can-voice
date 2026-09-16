@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import WindowToggles from "./components/WindowToggles.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
+import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
@@ -66,6 +69,11 @@ interface Snapshot {
   last_talk: Record<string, { speaker: number; at: number }>;
 }
 
+/** 设置对话框开没开。 */
+const showPrefs = ref(false);
+/** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
+const compact = computed(() => appearance.value.compact);
+
 const cid = ref("");
 const password = ref("");
 const busy = ref(false);
@@ -88,6 +96,7 @@ async function refresh() {
 }
 
 onMounted(async () => {
+  void loadAppearance();
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
   cid.value = (await invoke<{ cid: string }>("settings")).cid;
   await refresh();
@@ -234,12 +243,18 @@ async function act(name: string, args: Record<string, unknown>) {
 </script>
 
 <template>
-  <main class="mx-auto flex h-screen max-w-3xl flex-col gap-4 p-5 text-sm">
-    <header class="flex items-center justify-between gap-3">
-      <div>
-        <h1 class="text-base font-semibold">管制语音</h1>
-        <p class="text-xs opacity-70">{{ statusText }}</p>
+  <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
+  <main
+    class="mx-auto flex h-screen max-w-3xl flex-col text-sm"
+    :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
+  >
+    <header class="flex flex-wrap items-center justify-between gap-3">
+      <div class="min-w-0">
+        <h1 v-if="!compact" class="text-base font-semibold">管制语音</h1>
+        <p class="truncate text-xs opacity-70">{{ statusText }}</p>
       </div>
+      <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
+      <WindowToggles class="ml-auto" @settings="showPrefs = true" />
       <div v-if="!connected" class="flex items-center gap-2">
         <input v-model="cid" placeholder="CAN 号" class="w-24 rounded border px-2 py-1" />
         <input
@@ -251,10 +266,11 @@ async function act(name: string, args: Record<string, unknown>) {
         />
         <button :disabled="busy" class="rounded border px-3 py-1" @click="connect">连接</button>
       </div>
-      <button v-else class="rounded border px-3 py-1" @click="disconnect">断开</button>
+      <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
+      <button v-else-if="!compact" class="rounded border px-3 py-1" @click="disconnect">断开</button>
     </header>
 
-    <UpdateBanner />
+    <UpdateBanner v-if="!compact" />
 
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
@@ -300,7 +316,7 @@ async function act(name: string, args: Record<string, unknown>) {
       </span>
     </p>
 
-    <section class="flex items-center gap-2">
+    <section v-if="!compact" class="flex items-center gap-2">
       <input
         v-model="freqInput"
         placeholder="121.800"
@@ -309,11 +325,11 @@ async function act(name: string, args: Record<string, unknown>) {
       />
       <button class="rounded border px-3 py-1" @click="addFrequency">添加频率</button>
       <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
-        {{ showSettings ? "收起设置" : "设置" }}
+        {{ showSettings ? "收起" : "音频与 PTT" }}
       </button>
     </section>
 
-    <SettingsPanel v-if="showSettings" :cid="cid" />
+    <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
 
     <section class="flex flex-1 flex-col gap-2 overflow-auto">
       <RadioRow
@@ -330,6 +346,7 @@ async function act(name: string, args: Record<string, unknown>) {
         :locked="locked(r.freq_khz)"
         :transmitting="isTransmitting(r)"
         :last-talk="lastTalk(r.freq_khz)"
+        :compact="compact"
         :transmit-allowed="mayTransmit"
         @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
       />
@@ -338,7 +355,7 @@ async function act(name: string, args: Record<string, unknown>) {
       </p>
 
       <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
-      <div v-if="connected" class="mt-2 flex flex-col gap-1 border-t pt-2">
+      <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
         <p class="text-xs opacity-60">在线席位</p>
         <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
       </div>
@@ -354,7 +371,7 @@ async function act(name: string, args: Record<string, unknown>) {
       >
         {{ pressed ? "发话中" : "按住发话" }}
       </button>
-      <span v-if="snap?.health" class="opacity-60">
+      <span v-if="snap?.health && !compact" class="opacity-60">
         RTT {{ snap.health.rtt_ms }} ms · 收 {{ snap.health.received }} · 丢
         {{ snap.health.lost }}
         <span v-if="snap.health.unparsable" class="text-amber-700">
@@ -362,5 +379,6 @@ async function act(name: string, args: Record<string, unknown>) {
         </span>
       </span>
     </footer>
+    <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
   </main>
 </template>
