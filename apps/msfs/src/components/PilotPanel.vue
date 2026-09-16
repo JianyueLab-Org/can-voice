@@ -4,8 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import LogPanel from "./LogPanel.vue";
 
 /// 已经存下来的 CAN 号，寄日志时预填，省得再打一遍。
-const props = defineProps<{ cid?: string }>();
-import type { FlightPlan, Settings } from "../types";
+const props = defineProps<{ cid?: string; hangar?: HangarView }>();
+import type { FlightPlan, Settings, HangarView } from "../types";
 import { emptyFlightPlan } from "../types";
 
 interface BindingView {
@@ -22,6 +22,7 @@ const outputs = ref<string[]>([]);
 const input = ref("");
 const output = ref("");
 const inject = ref(true);
+const packagesDir = ref("");
 const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
 const keyboardOk = ref(true);
@@ -39,6 +40,7 @@ onMounted(async () => {
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
   inject.value = s.inject;
+  packagesDir.value = s.packages_dir;
   plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 });
@@ -54,6 +56,9 @@ const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
 
 const applyInject = () => invoke("set_injection", { on: inject.value });
+
+/** 改完立刻重扫。不重扫的话，填对了路径的人做的这件事看起来毫无反应。 */
+const applyPackagesDir = () => invoke("set_packages_dir", { dir: packagesDir.value });
 
 async function push() {
   await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
@@ -167,6 +172,35 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">换设备立刻生效。</p>
+
+      <!-- 扫不到机模的表现是"他机都是同一架小飞机"，和没装机模、和机型码
+           对不上长得差不多，所以三个数都要显示出来。 -->
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">包目录</span>
+        <input
+          v-model="packagesDir"
+          placeholder="留空就自己去找（读 UserCfg.opt）"
+          class="flex-1 rounded border px-2 py-1 font-mono"
+          @change="applyPackagesDir"
+          @keyup.enter="applyPackagesDir"
+        />
+        <button class="rounded border px-2 py-1" @click="applyPackagesDir">重扫</button>
+      </label>
+      <p v-if="props.hangar" class="opacity-60">
+        <template v-if="props.hangar.loading">正在扫本机机库…</template>
+        <template v-else-if="props.hangar.types">
+          扫到 {{ props.hangar.liveries }} 个涂装、{{ props.hangar.types }} 种机型（读了
+          {{ props.hangar.files }} 个 aircraft.cfg）
+        </template>
+        <span v-else-if="props.hangar.liveries" class="text-amber-700">
+          扫到 {{ props.hangar.liveries }} 个涂装，但一个机型码都没有——多半读到的是
+          附加件而不是飞机，把包目录填对再试。
+        </span>
+        <span v-else class="text-amber-700">
+          没扫到任何机模，他机会全部退到内置的那几个第一方机型。包目录常常在另一块盘上，
+          那就把路径填在这里。
+        </span>
+      </p>
 
       <div class="flex flex-col gap-2">
         <span class="font-semibold">按键发话（PTT）</span>

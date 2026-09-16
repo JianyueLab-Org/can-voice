@@ -171,7 +171,7 @@ const send = () =>
       </div>
     </section>
 
-    <PilotPanel :cid="cid" />
+    <PilotPanel :cid="cid" :hangar="view?.hangar" />
 
     <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
          飞行员看不见，而他会以为对方没理他。 -->

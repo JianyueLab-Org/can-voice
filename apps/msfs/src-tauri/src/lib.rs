@@ -154,6 +154,9 @@ pub struct Settings {
     /// 现在关不掉，而注入是最吃帧数的那一部分。
     #[serde(default = "yes")]
     pub inject: bool,
+    /// MSFS 的包目录。空的表示自己去找（先读 `UserCfg.opt`，再退到猜路径）。
+    #[serde(default)]
+    pub packages_dir: String,
     /// 用户说过"这一版不用再问我"的那个版本号。**跳过的是那一个版本，
     /// 不是从此闭嘴**——下一版照样提示。
     #[serde(default)]
@@ -182,6 +185,10 @@ pub struct App {
     controllers: Arc<Mutex<ControllerTable>>,
     http: reqwest::Client,
     ptt: Mutex<Option<can_voice_ptt::PttWatcher>>,
+    /// 本机机库。**扫出来的是本机的表**，不进内置表——内置表只收第一方，
+    /// 因为只有它们的标题在不同机器上是同一个字符串。
+    hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
+    hangar_loading: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl App {
@@ -198,6 +205,8 @@ impl App {
             settings: Mutex::new(settings),
             traffic: Arc::new(Mutex::new(TrafficTable::new())),
             chat: Arc::new(Mutex::new(ChatLog::default())),
+            hangar: Arc::new(Mutex::new(can_voice_sim::msfs_hangar::Hangar::default())),
+            hangar_loading: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             controllers: Arc::new(Mutex::new(ControllerTable::default())),
             http: reqwest::Client::builder()
                 .user_agent(concat!("msfs-for-can/", env!("CARGO_PKG_VERSION")))
@@ -254,6 +263,26 @@ pub struct View {
     pub messages: Vec<ChatMessage>,
     /// 在线管制席位，按呼号排序。
     pub controllers: Vec<ControllerEntry>,
+    /// 本机机库扫的结果。
+    pub hangar: HangarView,
+}
+
+/// 机库扫到了什么，给界面看的。
+///
+/// **三个数都要给**：涂装几百个而机型是 0，说明读到的全是附加件那类没有机型码
+/// 的配置——那和"目录指错了"是两回事，光看一个总数分不出来。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct HangarView {
+    /// 正在扫。界面靠它区分"还在扫"和"扫完了，没有"。
+    pub loading: bool,
+    /// 读了多少个 `aircraft.cfg`。
+    pub files: usize,
+    /// 认出多少个涂装。
+    pub liveries: usize,
+    /// 其中有多少种机型码。
+    pub types: usize,
+    /// 正在用的包目录；空的表示自己去找。
+    pub dir: String,
 }
 
 /// 把模拟器那一帧变成一次位置上报。
@@ -362,7 +391,12 @@ async fn connect(
     );
     spawn_asking(fsd.clone(), app.traffic.clone());
     spawn_pump(fsd.clone(), app.sim.clone(), app.voice.clone());
-    spawn_ai_injection(app.sim.clone(), app.traffic.clone(), app.inject.clone());
+    spawn_ai_injection(
+        app.sim.clone(),
+        app.traffic.clone(),
+        app.inject.clone(),
+        app.hangar.clone(),
+    );
     *app.fsd.lock().expect("fsd") = Some(fsd);
     // 上线成功才记住这一组：连不上的那一组多半有一项是打错的。
     app.update_settings(|s| {
@@ -395,6 +429,17 @@ fn settings(app: tauri::State<'_, App>) -> Settings {
 ///
 /// 关掉时**喂一份空的他机表**而不是停掉那条循环：停掉的话已经画出来的飞机会
 /// 留在天上不动，而空表会让它们按正常的消失路径被撤掉。
+/// 改完**立刻重扫**。不重扫的话，填对了路径的人做的这件事看起来毫无反应。
+#[tauri::command]
+fn set_packages_dir(app: tauri::State<'_, App>, dir: String) {
+    app.update_settings(|s| s.packages_dir.clone_from(&dir));
+    spawn_hangar_scan(
+        app.hangar.clone(),
+        app.hangar_loading.clone(),
+        hangar_roots(&dir),
+    );
+}
+
 #[tauri::command]
 fn set_injection(app: tauri::State<'_, App>, on: bool) {
     app.inject.store(on, std::sync::atomic::Ordering::Relaxed);
@@ -479,6 +524,15 @@ fn build_view(app: &App) -> View {
         reason: last_link.map(|e| e.reason),
         voice: Some(app.voice.snapshot()),
         messages: app.chat.lock().expect("chat").snapshot(),
+        hangar: HangarView {
+            loading: app
+                .hangar_loading
+                .load(std::sync::atomic::Ordering::Relaxed),
+            files: app.hangar.lock().expect("hangar").files,
+            liveries: app.hangar.lock().expect("hangar").liveries,
+            types: app.hangar.lock().expect("hangar").by_icao.len(),
+            dir: app.settings_snapshot().packages_dir,
+        },
         controllers: app
             .controllers
             .lock()
@@ -778,6 +832,45 @@ fn spawn_pump(fsd: PilotHandle, sim: SimLink, voice: Arc<Bridge>) {
 }
 
 /// 用户自己那张机模表的位置。没有就用内置的。
+/// 要扫哪几个目录：用户指定的优先，否则自己去找。
+fn hangar_roots(dir: &str) -> Vec<std::path::PathBuf> {
+    let dir = dir.trim();
+    if !dir.is_empty() {
+        return vec![std::path::PathBuf::from(dir)];
+    }
+    can_voice_sim::msfs_hangar::default_roots()
+}
+
+/// 后台扫机库。
+///
+/// **放后台**：社区包多的话上万个文件，扫一遍要几秒到几十秒，放在启动路径上会让
+/// 窗口迟迟打不开，而用户看到的是程序卡死。扫完（哪怕一个也没扫到）都要把
+/// `loading` 放下来：界面靠它区分"还在扫"和"扫完了，没有"。
+fn spawn_hangar_scan(
+    hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
+    loading: Arc<std::sync::atomic::AtomicBool>,
+    roots: Vec<std::path::PathBuf>,
+) {
+    loading.store(true, std::sync::atomic::Ordering::Relaxed);
+    std::thread::spawn(move || {
+        let found = can_voice_sim::msfs_hangar::scan(&roots);
+        tracing::info!(
+            files = found.files,
+            liveries = found.liveries,
+            types = found.by_icao.len(),
+            "scanned the local hangar"
+        );
+        if found.by_icao.is_empty() {
+            tracing::warn!(
+                roots = ?roots,
+                "no aircraft with a type code were found; set the packages directory in settings"
+            );
+        }
+        *hangar.lock().expect("hangar") = found;
+        loading.store(false, std::sync::atomic::Ordering::Relaxed);
+    });
+}
+
 fn titles_path() -> std::path::PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(std::path::PathBuf::from)
@@ -802,13 +895,22 @@ fn spawn_ai_injection(
     sim: SimLink,
     table: Arc<Mutex<TrafficTable>>,
     inject: Arc<std::sync::atomic::AtomicBool>,
+    hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
 ) {
     // 不在 Windows 上就没有 SimConnect，起个线程每 5 秒失败一次没有意义。
     if !can_voice_sim::msfs::available() {
         return;
     }
     std::thread::spawn(move || {
-        let overrides = can_voice_sim::msfs_models::load_overrides(&titles_path());
+        // 手写的 `titles.json` 在前，本机扫出来的在后：前者是用户明确说过的，
+        // 后者是推断的。两者都排在内置表前面，而内置表仍然兜底。
+        let mut overrides = can_voice_sim::msfs_models::load_overrides(&titles_path());
+        {
+            let found = hangar.lock().expect("hangar");
+            overrides.merge(can_voice_sim::msfs_models::Overrides::from_pairs(
+                found.by_icao.clone(),
+            ));
+        }
         if !overrides.is_empty() {
             tracing::info!(types = overrides.len(), "loaded model title overrides");
         }
@@ -977,8 +1079,15 @@ pub fn run() {
     // 这一步同时装上 panic 钩子——崩溃不留记录的话，窗口没了、日志干净。
     can_voice_log::init("msfs-for-can", std::env::args().any(|a| a == "--debug"));
 
+    let app = App::new();
+    // 启动就扫一遍。慢，所以在后台；界面上有 loading。
+    spawn_hangar_scan(
+        app.hangar.clone(),
+        app.hangar_loading.clone(),
+        hangar_roots(&app.settings_snapshot().packages_dir),
+    );
     tauri::Builder::default()
-        .manage(App::new())
+        .manage(app)
         .invoke_handler(tauri::generate_handler![
             log_file,
             send_log,
@@ -993,6 +1102,7 @@ pub fn run() {
             file_flight_plan,
             settings,
             set_injection,
+            set_packages_dir,
             set_audio_devices,
             keyboard_ptt_supported,
             ptt_bindings,
