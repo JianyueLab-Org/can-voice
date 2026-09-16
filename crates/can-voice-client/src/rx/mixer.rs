@@ -361,7 +361,11 @@ mod tests {
         let mut ended = false;
         for _ in 0..100 {
             let (pcm, events) = m.tick();
-            assert_eq!(pcm.len(), FRAME_SAMPLES, "the audio clock never skips a beat");
+            assert_eq!(
+                pcm.len(),
+                FRAME_SAMPLES,
+                "the audio clock never skips a beat"
+            );
             if events.iter().any(|e| matches!(e, RxEvent::End { .. })) {
                 ended = true;
                 break;

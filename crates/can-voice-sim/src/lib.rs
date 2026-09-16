@@ -16,8 +16,8 @@
 pub mod bridge;
 pub mod chat;
 pub mod controllers;
-pub mod feed;
 pub mod csl;
+pub mod feed;
 pub mod traffic;
 pub mod xplane;
 

@@ -43,7 +43,11 @@ pub struct Outgoing {
 ///
 /// 算出来的结果可以原样交给 `PilotHandle::send_text`：它自己也会跑一次点命令
 /// 解析，而一条已经翻好的消息不以点开头，跑第二次得到的是同一个答案。
-pub fn outgoing(typed_recipient: &str, typed_message: &str, com1_khz: Option<u32>) -> Option<Outgoing> {
+pub fn outgoing(
+    typed_recipient: &str,
+    typed_message: &str,
+    com1_khz: Option<u32>,
+) -> Option<Outgoing> {
     let (dot, body) = can_voice_fsd::pilot::parse_dot_command(typed_message);
     if body.is_empty() {
         return None;
@@ -114,7 +118,10 @@ mod tests {
         let got = outgoing("", "request pushback", Some(128_750)).expect("sendable");
         assert_eq!(got.to, "@28750");
         // 118.350 的那个 0 不能被吃掉：五位是定长。
-        assert_eq!(outgoing("", "hi", Some(118_350)).expect("sendable").to, "@18350");
+        assert_eq!(
+            outgoing("", "hi", Some(118_350)).expect("sendable").to,
+            "@18350"
+        );
     }
 
     /// 既没填收件人、COM1 也没有频率时，说不出该发给谁。
@@ -167,7 +174,10 @@ mod tests {
         }
         let got = log.snapshot();
         assert_eq!(got.len(), MAX_MESSAGES);
-        assert_eq!(got[0].text, "m10", "the oldest ones must be the ones dropped");
+        assert_eq!(
+            got[0].text, "m10",
+            "the oldest ones must be the ones dropped"
+        );
         assert_eq!(got[MAX_MESSAGES - 1].text, format!("m{}", MAX_MESSAGES + 9));
     }
 

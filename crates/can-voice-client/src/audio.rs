@@ -159,7 +159,10 @@ mod tests {
         let far = retry_delay(99);
         assert!(far <= MAX_RETRY_DELAY, "{far:?} 超过了上界");
         for a in 0..10 {
-            assert!(retry_delay(a) <= retry_delay(a + 1), "第 {a} 次退避不该变短");
+            assert!(
+                retry_delay(a) <= retry_delay(a + 1),
+                "第 {a} 次退避不该变短"
+            );
         }
     }
 
