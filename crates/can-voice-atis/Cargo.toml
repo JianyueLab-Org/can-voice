@@ -24,3 +24,7 @@ tracing.workspace = true
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "process", "sync", "fs"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# 测试里手写一个只答一条的 HTTP 服务，理由见 weather.rs 里那段注释。
+tokio = { version = "1.52", features = ["rt", "macros", "net", "io-util"] }

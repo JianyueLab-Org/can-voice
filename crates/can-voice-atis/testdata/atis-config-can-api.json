@@ -1,0 +1,46 @@
+{
+  "_comment": "One station copied verbatim from can-api's data/atis/config.json (served unauthenticated at GET /api/v1/atis/config), plus the version field its handler injects. It pins the wire shape both sides agree on: a key renamed in can-api, or a serde field renamed in profile.rs, reads as a default rather than an error, so only a fixture like this notices. Refresh it only when can-api's shape deliberately changes.",
+  "version": "f9b4e50ead40",
+  "updated": "2026-07-31",
+  "notes": "华东、华北六个主要机场的通播配置。跑道构型分预设，中英双语播出。情报字母是运行状态，不在这份配置里。",
+  "stations": [
+    {
+      "identifier": "ZBAA",
+      "name": "Beijing Capital International Airport",
+      "chinese_name": "北京首都国际机场",
+      "frequency": "127.000",
+      "atis_type": "combined",
+      "voice_language": "both",
+      "code_range": [
+        "A",
+        "Z"
+      ],
+      "latitude": 40.07407,
+      "longitude": 116.5908,
+      "chinese_runway": "",
+      "contractions": {},
+      "presets": [
+        {
+          "name": "南向",
+          "template": "[FACILITY] information [ATIS_LETTER], [OBS_TIME]. [ARPT_COND] [WIND], [VIS] [PRESENT_WX] [CLOUDS], [TEMP], [DEW], [PRESSURE]. [NOTAMS] [CLOSING]",
+          "airport_conditions": "ARR RWY 19, 18R, DEP RWY 18L, 18R.",
+          "notams": "Delivery frequency 121.6. Set transponder to Mode S before taxi. RNAV departures available.",
+          "transition_level": "",
+          "chinese_runway": "跑道 幺九、幺八右 进港，跑道 幺八左、幺八右 出港。",
+          "closing": "advise on initial contact you have information [ATIS_LETTER] and the ability to accept RNAV procedures",
+          "chinese_extra": "放行频率 幺两幺点六，地面滑行之前把应答机设置在 S 模式。本场 RNAV 离场可用。"
+        },
+        {
+          "name": "北向",
+          "template": "[FACILITY] information [ATIS_LETTER], [OBS_TIME]. [ARPT_COND] [WIND], [VIS] [PRESENT_WX] [CLOUDS], [TEMP], [DEW], [PRESSURE]. [NOTAMS] [CLOSING]",
+          "airport_conditions": "ARR RWY 01, 36L, DEP RWY 36R, 36L.",
+          "notams": "Delivery frequency 121.6. Set transponder to Mode S before taxi. RNAV departures available.",
+          "transition_level": "",
+          "chinese_runway": "跑道 洞幺、三六左 进港，跑道 三六右、三六左 出港。",
+          "closing": "advise on initial contact you have information [ATIS_LETTER] and the ability to accept RNAV procedures",
+          "chinese_extra": "放行频率 幺两幺点六，地面滑行之前把应答机设置在 S 模式。本场 RNAV 离场可用。"
+        }
+      ]
+    }
+  ]
+}

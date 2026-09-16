@@ -123,3 +123,52 @@ export function reasonText(reason: Reason | null): string {
   if ("Connecting" in reason) return "连接中…";
   return "出错了";
 }
+
+// ——— 从外面取（#44）———
+
+/** 并完之后发生了什么。装的是呼号。和 `netconfig::Merged` 一一对应。 */
+export interface Merged {
+  added: string[];
+  replaced: string[];
+  kept: string[];
+  /** 正在播出而被跳过的。 */
+  skipped: string[];
+}
+
+export interface ImportReport {
+  /** vATIS 那份配置自己的名字，可能是空的。 */
+  source: string;
+  merged: Merged;
+  /** vATIS 那边有、这里没有对应功能的设置。 */
+  notes: string[];
+}
+
+/** 网络配置和本地那份的差异。**只是给人看的**，并不并要另一个命令。 */
+export interface NetworkPreview {
+  label: string;
+  version: string;
+  notes: string;
+  problems: string[];
+  /** 上一次整份并进来的版本，空的表示从没并过。 */
+  previous: string;
+  missing: string[];
+  differing: string[];
+  same: string[];
+  /** 有差异、但正在播出的。并的时候会被跳过。 */
+  on_air: string[];
+}
+
+/** 一句话说清楚并了什么。列表太长时截断——全列出来会刷满整块提示。 */
+export function describeMerge(m: Merged): string[] {
+  const names = (list: string[]) =>
+    list.length > 8 ? `${list.slice(0, 8).join("、")} 等 ${list.length} 个` : list.join("、");
+  const lines: string[] = [];
+  if (m.added.length) lines.push(`新增 ${m.added.length} 个：${names(m.added)}`);
+  if (m.replaced.length) lines.push(`覆盖 ${m.replaced.length} 个：${names(m.replaced)}`);
+  if (m.kept.length) lines.push(`本地已有、原样保留 ${m.kept.length} 个：${names(m.kept)}`);
+  if (m.skipped.length) {
+    lines.push(`正在播出、没有动 ${m.skipped.length} 个：${names(m.skipped)}（停播后再来一次）`);
+  }
+  if (!lines.length) lines.push("没有任何变化");
+  return lines;
+}
