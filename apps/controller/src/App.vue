@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
+import SettingsPanel from "./components/SettingsPanel.vue";
 
 type LinkState = "Connecting" | "Online" | "Reconnecting" | "Offline" | "Evicted";
 type Ended = "Offline" | "Evicted" | { Refused: string | { Other: string } };
@@ -22,7 +24,15 @@ interface Snapshot {
   denied_tx: number[];
   denied_rx: number[];
   denied_xc: number[][];
-  health: { rtt_ms: number; sent: number; received: number; lost: number } | null;
+  health: {
+    rtt_ms: number;
+    sent: number;
+    received: number;
+    lost: number;
+    unparsable: number;
+  } | null;
+  /** 服务端的其它通知：`[kind, freq_khz, reason]`，最近的在最后。 */
+  notices: [string, number, string][];
 }
 
 const cid = ref("");
@@ -33,7 +43,7 @@ const freqInput = ref("");
 const radios = ref<Radio[]>([]);
 const snap = ref<Snapshot | null>(null);
 const pressed = ref(false);
-const mouseSupported = ref(true);
+const showSettings = ref(false);
 
 let timer: number | undefined;
 
@@ -45,7 +55,8 @@ async function refresh() {
 }
 
 onMounted(async () => {
-  mouseSupported.value = await invoke<boolean>("mouse_ptt_supported");
+  // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
+  cid.value = (await invoke<{ cid: string }>("settings")).cid;
   await refresh();
   timer = window.setInterval(refresh, 200);
 });
@@ -138,6 +149,33 @@ function rxDenied(khz: number): boolean {
   return snap.value?.denied_rx?.includes(khz) ?? false;
 }
 
+/**
+ * 服务端通知的人话。
+ *
+ * **不认识的 kind 也要显示出来**：一条服务端认为值得说、而客户端太旧不认识的
+ * 通知，落到界面上是一句原文，总好过一片安静。
+ */
+function noticeText([kind, freq, reason]: [string, number, string]): string {
+  const where = freq ? ` · ${(freq / 1000).toFixed(3)}` : "";
+  switch (kind) {
+    case "audio_unavailable":
+      return "声卡不见了（拔了设备？），正在重开：现在听不见也发不出";
+    case "range_unavailable":
+      return "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听";
+    case "unknown_message":
+      return `服务端不认识客户端发的一帧（${reason}），可能需要更新客户端`;
+    default:
+      return `${kind}${where}：${reason}`;
+  }
+}
+
+/** 被夹掉的耦合对。设了不生效而界面不说，是这条最初的样子。 */
+const deniedPairs = computed(() =>
+  (snap.value?.denied_xc ?? []).map(
+    ([a, b]) => `${(a / 1000).toFixed(3)} ↔ ${(b / 1000).toFixed(3)}`,
+  ),
+);
+
 async function act(name: string, args: Record<string, unknown>) {
   await invoke(name, args);
   await refresh();
@@ -165,8 +203,26 @@ async function act(name: string, args: Record<string, unknown>) {
       <button v-else class="rounded border px-3 py-1" @click="disconnect">断开</button>
     </header>
 
+    <UpdateBanner />
+
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
+    </p>
+
+    <!-- 服务端说的话。不显示的话，"能连上、状态绿、说话没人听见"就是全部症状。 -->
+    <p
+      v-for="(n, i) in snap?.notices ?? []"
+      :key="`${n[0]}-${n[1]}-${i}`"
+      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+    >
+      {{ noticeText(n) }}
+    </p>
+
+    <p
+      v-if="deniedPairs.length"
+      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+    >
+      这些交叉耦合没有生效：{{ deniedPairs.join("、") }}
     </p>
 
     <section class="flex items-center gap-2">
@@ -177,10 +233,12 @@ async function act(name: string, args: Record<string, unknown>) {
         @keyup.enter="addFrequency"
       />
       <button class="rounded border px-3 py-1" @click="addFrequency">添加频率</button>
-      <span v-if="!mouseSupported" class="ml-auto text-xs opacity-60">
-        本系统不支持鼠标侧键作 PTT，请用键盘或手柄
-      </span>
+      <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
+        {{ showSettings ? "收起设置" : "设置" }}
+      </button>
     </section>
+
+    <SettingsPanel v-if="showSettings" :cid="cid" />
 
     <section class="flex flex-1 flex-col gap-2 overflow-auto">
       <RadioRow
@@ -211,7 +269,11 @@ async function act(name: string, args: Record<string, unknown>) {
         {{ pressed ? "发话中" : "按住发话" }}
       </button>
       <span v-if="snap?.health" class="opacity-60">
-        RTT {{ snap.health.rtt_ms }} ms · 收 {{ snap.health.received }} · 丢 {{ snap.health.lost }}
+        RTT {{ snap.health.rtt_ms }} ms · 收 {{ snap.health.received }} · 丢
+        {{ snap.health.lost }}
+        <span v-if="snap.health.unparsable" class="text-amber-700">
+          · 解不开 {{ snap.health.unparsable }}
+        </span>
       </span>
     </footer>
   </main>

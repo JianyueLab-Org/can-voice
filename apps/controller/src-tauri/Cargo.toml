@@ -21,10 +21,11 @@ can-voice-app = { path = "../../../crates/can-voice-app" }
 can-voice-client = { path = "../../../crates/can-voice-client" }
 can-voice-ptt = { path = "../../../crates/can-voice-ptt" }
 can-voice-token = { path = "../../../crates/can-voice-token" }
+can-voice-log = { path = "../../../crates/can-voice-log" }
+can-voice-update = { path = "../../../crates/can-voice-update" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
