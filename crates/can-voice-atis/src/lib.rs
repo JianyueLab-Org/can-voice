@@ -39,6 +39,7 @@
 pub mod airports;
 pub mod chinese;
 pub mod datafeed;
+pub mod default_names;
 pub mod fleet;
 pub mod metar;
 pub mod netconfig;

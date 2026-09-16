@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import LogPanel from "./LogPanel.vue";
+import { t } from "../i18n";
 
 /// 已经存下来的 CAN 号，寄日志时预填，省得再打一遍。
 /// `observer` 是观察员模式开着没有——观察员不上 FSD，拍发不了计划。
@@ -17,7 +18,11 @@ interface BindingView {
 
 const tab = ref<"plan" | "settings">("plan");
 const plan = ref<FlightPlan>(emptyFlightPlan());
-const filed = ref("");
+/**
+ * 上一次拍发的结果，`null` = 还没拍发过。**存的是哪一种结果不是那句话**：
+ * 存成句子的话，切了语言那一行还停在旧语言上。
+ */
+const filed = ref<"filed" | "offline" | null>(null);
 const inputs = ref<string[]>([]);
 const outputs = ref<string[]>([]);
 const input = ref("");
@@ -55,8 +60,8 @@ onUnmounted(() => window.clearInterval(captureTimer));
 
 async function file() {
   filed.value = (await invoke<boolean>("file_flight_plan", { plan: plan.value }))
-    ? "已拍发"
-    : "还没上线，先上线再拍发";
+    ? "filed"
+    : "offline";
 }
 
 const applyDevices = () =>
@@ -123,97 +128,99 @@ async function remove(i: number) {
   <section class="flex flex-col gap-3 rounded border p-3 text-xs">
     <div class="flex gap-2">
       <button class="rounded border px-2 py-1" :class="tab === 'plan' ? 'border-sky-500' : ''" @click="tab = 'plan'">
-        飞行计划
+        {{ t("plan.tab") }}
       </button>
       <button class="rounded border px-2 py-1" :class="tab === 'settings' ? 'border-sky-500' : ''" @click="tab = 'settings'">
-        本机
+        {{ t("local.tab") }}
       </button>
     </div>
 
     <div v-if="tab === 'plan'" class="grid grid-cols-4 gap-2">
       <label class="flex flex-col gap-1">
-        <span class="opacity-60">规则</span>
+        <span class="opacity-60">{{ t("plan.rules") }}</span>
         <select v-model="plan.rules" class="rounded border px-2 py-1">
-          <option value="I">I 仪表</option>
-          <option value="V">V 目视</option>
-          <option value="Y">Y 先仪后目</option>
-          <option value="Z">Z 先目后仪</option>
+          <option value="I">{{ t("plan.rules_i") }}</option>
+          <option value="V">{{ t("plan.rules_v") }}</option>
+          <option value="Y">{{ t("plan.rules_y") }}</option>
+          <option value="Z">{{ t("plan.rules_z") }}</option>
         </select>
       </label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">机型</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.aircraft") }}</span>
         <input v-model="plan.aircraft" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">巡航速度</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_speed") }}</span>
         <input v-model="plan.cruise_speed" placeholder="N0450" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">巡航高度</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_altitude") }}</span>
         <input v-model="plan.cruise_altitude" placeholder="F350" class="rounded border px-2 py-1" /></label>
 
-      <label class="flex flex-col gap-1"><span class="opacity-60">起飞机场</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure") }}</span>
         <input v-model="plan.departure" placeholder="ZSPD" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">目的机场</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.arrival") }}</span>
         <input v-model="plan.arrival" placeholder="ZBAA" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">备降</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.alternate") }}</span>
         <input v-model="plan.alternate" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">预计起飞 (UTC)</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure_time") }}</span>
         <input v-model="plan.departure_time" placeholder="1230" class="rounded border px-2 py-1" /></label>
 
-      <label class="flex flex-col gap-1"><span class="opacity-60">航路时间 时</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_hours") }}</span>
         <input v-model="plan.enroute_hours" placeholder="02" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">航路时间 分</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_minutes") }}</span>
         <input v-model="plan.enroute_minutes" placeholder="15" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">燃油 时</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_hours") }}</span>
         <input v-model="plan.fuel_hours" placeholder="04" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">燃油 分</span>
+      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_minutes") }}</span>
         <input v-model="plan.fuel_minutes" placeholder="00" class="rounded border px-2 py-1" /></label>
 
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">航路</span>
+      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.route") }}</span>
         <input v-model="plan.route" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">备注</span>
+      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.remarks") }}</span>
         <input v-model="plan.remarks" class="rounded border px-2 py-1" /></label>
 
       <div class="col-span-4 flex items-center gap-2">
         <!-- 观察员没有 FSD 连接，计划由机长那一端拍发。 -->
         <button class="rounded border px-3 py-1" :disabled="props.observer" @click="file">
-          拍发
+          {{ t("plan.file") }}
         </button>
-        <span v-if="props.observer" class="opacity-70">观察员不上网络，飞行计划由机长拍发</span>
-        <span v-else class="opacity-70">{{ filed }}</span>
+        <span v-if="props.observer" class="opacity-70">{{ t("plan.observer") }}</span>
+        <span v-else-if="filed" class="opacity-70">
+          {{ filed === "filed" ? t("plan.filed") : t("plan.offline") }}
+        </span>
       </div>
     </div>
 
     <div v-else class="flex flex-col gap-3">
       <label class="flex items-center gap-2">
         <input v-model="inject" type="checkbox" @change="applyInject" />
-        <span>把他机注入模拟器</span>
-        <span class="opacity-60">关掉之后天上就只剩自己，语音不受影响</span>
+        <span>{{ t("local.inject") }}</span>
+        <span class="opacity-60">{{ t("local.inject_note") }}</span>
       </label>
 
       <label class="flex items-center gap-2">
-        <span class="w-16 opacity-70">麦克风</span>
+        <span class="w-16 opacity-70">{{ t("local.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
-          <option value="">跟随系统默认</option>
+          <option value="">{{ t("local.system_default") }}</option>
           <option v-for="d in inputs" :key="d" :value="d">{{ d }}</option>
         </select>
       </label>
       <label class="flex items-center gap-2">
-        <span class="w-16 opacity-70">耳机</span>
+        <span class="w-16 opacity-70">{{ t("local.headset") }}</span>
         <select v-model="output" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
-          <option value="">跟随系统默认</option>
+          <option value="">{{ t("local.system_default") }}</option>
           <option v-for="d in outputs" :key="d" :value="d">{{ d }}</option>
         </select>
       </label>
-      <p class="opacity-60">换设备立刻生效。</p>
+      <p class="opacity-60">{{ t("local.devices_note") }}</p>
 
       <label class="flex items-center gap-2">
         <input v-model="chime" type="checkbox" @change="applyChime" />
-        <span>收到管制消息时播放提示音</span>
+        <span>{{ t("local.chime") }}</span>
       </label>
       <label class="flex items-center gap-2">
         <input v-model="chimeAll" type="checkbox" @change="applyChimeAll" />
-        <span>频率上的每条消息都提示</span>
-        <span class="opacity-60">默认只有点到你呼号的才响；私聊一定会响</span>
+        <span>{{ t("local.chime_all") }}</span>
+        <span class="opacity-60">{{ t("local.chime_all_note") }}</span>
       </label>
       <label class="flex items-center gap-2">
-        <span class="w-16 shrink-0 opacity-70">提示音量</span>
+        <span class="w-16 shrink-0 opacity-70">{{ t("local.chime_volume") }}</span>
         <input
           v-model.number="chimeVolume"
           type="range"
@@ -223,58 +230,61 @@ async function remove(i: number) {
           @change="applyChimeVolume"
         />
         <span class="w-10 text-right opacity-70">{{ chimeVolume }}%</span>
-        <button class="rounded border px-2 py-1" @click="previewChime">试听</button>
+        <button class="rounded border px-2 py-1" @click="previewChime">{{ t("local.preview") }}</button>
       </label>
       <p class="opacity-60">
-        提示音走上面选的那块耳机，不是系统默认设备。试听没声音就说明设备选错了。
+        {{ t("local.chime_note") }}
       </p>
 
       <!-- 扫不到机模的表现是"他机都是同一架小飞机"，和没装机模、和机型码
            对不上长得差不多，所以三个数都要显示出来。 -->
       <label class="flex items-center gap-2">
-        <span class="w-16 shrink-0 opacity-70">包目录</span>
+        <span class="w-16 shrink-0 opacity-70">{{ t("hangar.dir") }}</span>
         <input
           v-model="packagesDir"
-          placeholder="留空就自己去找（读 UserCfg.opt）"
+          :placeholder="t('hangar.dir_placeholder')"
           class="flex-1 rounded border px-2 py-1 font-mono"
           @change="applyPackagesDir"
           @keyup.enter="applyPackagesDir"
         />
-        <button class="rounded border px-2 py-1" @click="applyPackagesDir">重扫</button>
+        <button class="rounded border px-2 py-1" @click="applyPackagesDir">{{ t("local.rescan") }}</button>
       </label>
       <p v-if="props.hangar" class="opacity-60">
-        <template v-if="props.hangar.loading">正在扫本机机库…</template>
+        <template v-if="props.hangar.loading">{{ t("hangar.loading") }}</template>
         <template v-else-if="props.hangar.types">
-          扫到 {{ props.hangar.liveries }} 个涂装、{{ props.hangar.types }} 种机型（读了
-          {{ props.hangar.files }} 个 aircraft.cfg）
+          {{
+            t("hangar.found", {
+              liveries: props.hangar.liveries,
+              types: props.hangar.types,
+              files: props.hangar.files,
+            })
+          }}
         </template>
         <span v-else-if="props.hangar.liveries" class="text-amber-700">
-          扫到 {{ props.hangar.liveries }} 个涂装，但一个机型码都没有——多半读到的是
-          附加件而不是飞机，把包目录填对再试。
+          {{ t("hangar.no_types", { liveries: props.hangar.liveries }) }}
         </span>
         <span v-else class="text-amber-700">
-          没扫到任何机模，他机会全部退到内置的那几个第一方机型。包目录常常在另一块盘上，
-          那就把路径填在这里。
+          {{ t("hangar.empty") }}
         </span>
       </p>
 
       <div class="flex flex-col gap-2">
-        <span class="font-semibold">按键发话（PTT）</span>
+        <span class="font-semibold">{{ t("ptt.title") }}</span>
         <ul v-if="bindings.length" class="flex flex-col gap-1">
           <li v-for="(b, i) in bindings" :key="i" class="flex items-center gap-2 rounded border px-2 py-1">
             <span class="font-mono">{{ b.token || "…" }}</span>
-            <span v-if="b.unresolved" class="text-red-600">这个绑定在本系统上认不出来，请重新录</span>
-            <button class="ml-auto rounded border px-2" @click="remove(i)">删除</button>
+            <span v-if="b.unresolved" class="text-red-600">{{ t("ptt.unresolved") }}</span>
+            <button class="ml-auto rounded border px-2" @click="remove(i)">{{ t("ptt.remove") }}</button>
           </li>
         </ul>
-        <p v-else class="opacity-60">还没有绑定。</p>
+        <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
         <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
-          {{ capturing ? "按一下你要的键…" : "录制一个绑定" }}
+          {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
         </button>
         <p v-if="!keyboardOk" class="text-red-600">
-          本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。请改用手柄。
+          {{ t("ptt.wayland") }}
         </p>
-        <p v-if="!mouseOk" class="opacity-70">本系统不支持鼠标侧键作 PTT。</p>
+        <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
       </div>
 
       <LogPanel :cid="props.cid" />

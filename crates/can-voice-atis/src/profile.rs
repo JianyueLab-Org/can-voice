@@ -26,7 +26,9 @@
 //! 中英两种界面下要说两种话，而模型不该知道现在是哪一种。
 
 use crate::airports;
+use crate::default_names::{DEFAULT_PRESET_NAME, DEFAULT_PROFILE_NAME};
 use crate::template::{Contractions, DEFAULT_TEMPLATE};
+use can_voice_i18n::Message;
 use serde::{Deserialize, Serialize};
 
 const LETTERS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -79,12 +81,32 @@ pub enum ProfileError {
     LastProfile,
 }
 
+impl ProfileError {
+    /// 给人看的那一句（#29）。`Display` 是给日志的英文。
+    pub fn message(&self) -> Message {
+        match self {
+            ProfileError::DuplicateStation(callsign) => {
+                Message::new("problem.profile.duplicate_station").with("callsign", callsign)
+            }
+            ProfileError::EmptyName => Message::new("problem.profile.empty_name"),
+            ProfileError::DuplicateProfile(name) => {
+                Message::new("problem.profile.duplicate_profile").with("name", name)
+            }
+            ProfileError::MissingProfile(name) => {
+                Message::new("problem.profile.missing_profile").with("name", name)
+            }
+            ProfileError::LastProfile => Message::new("problem.profile.last_profile"),
+        }
+    }
+}
+
 fn default_template() -> String {
     DEFAULT_TEMPLATE.to_string()
 }
 
+/// 为什么是中文、为什么不翻译，见 [`crate::default_names`]。
 fn default_preset_name() -> String {
-    "默认".to_string()
+    DEFAULT_PRESET_NAME.to_string()
 }
 
 /// 一份模板，随天气或跑道构型切换。
@@ -286,11 +308,10 @@ impl Station {
     }
 }
 
-const DEFAULT_PROFILE_NAME: &str = "默认";
-
 /// 配置文件名。
 pub const DEFAULT_PROFILE_PATH: &str = "atis_profile.json";
 
+/// 为什么是中文、为什么不翻译，见 [`crate::default_names`]。
 fn default_profile_name() -> String {
     DEFAULT_PROFILE_NAME.to_string()
 }

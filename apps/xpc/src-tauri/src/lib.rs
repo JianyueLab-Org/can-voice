@@ -25,11 +25,10 @@
 
 mod install;
 
-use tauri::Manager;
 use can_voice_app::Bridge;
-use can_voice_i18n::Message;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
+use can_voice_i18n::Message;
 use can_voice_sim::chat::{ChatLog, ChatMessage};
 use can_voice_sim::controllers::{ControllerEntry, ControllerTable};
 use can_voice_sim::csl::ModelSet;
@@ -38,6 +37,7 @@ use can_voice_sim::{bridge, xplane, Snapshot};
 use can_voice_token::TokenSource;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Manager;
 
 /// 位置上报的节奏。和 [`pilot_client::POSITION_INTERVAL`] 同一个值——
 /// 这里只是把模拟器那一帧喂过去，真正决定发不发的是那边。
@@ -370,7 +370,11 @@ impl App {
 
     /// 观察员手输的频率，没填是 `None`。
     fn manual_frequency(&self) -> Option<u32> {
-        Some(self.manual_frequency.load(std::sync::atomic::Ordering::Relaxed)).filter(|&k| k != 0)
+        Some(
+            self.manual_frequency
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|&k| k != 0)
     }
 
     /// 换一条频率循环上来，旧的先停掉。
@@ -424,7 +428,6 @@ impl Default for App {
         Self::new()
     }
 }
-
 
 /// 插件那一侧的状况。
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -1379,15 +1382,19 @@ fn spawn_csl_load(
 async fn check_update(
     app: tauri::State<'_, App>,
 ) -> Result<Option<can_voice_update::Latest>, String> {
-    let (skipped, busy) = { let s = match app.settings.lock() {
+    let (skipped, busy) = {
+        let s = match app.settings.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
         };
         // 上着网就是"正在工作"。观察员没有 FSD 链路，但他同样戴着耳机在听。
         let busy = app.link.lock().expect("link").is_some() || app.observing().is_some();
-        (s.skipped_update, busy) };
+        (s.skipped_update, busy)
+    };
     let origin = app.settings_snapshot().endpoints.api_origin();
-    let Some(latest) = can_voice_update::check(&app.http, &origin, "xpc-for-can", env!("CARGO_PKG_VERSION")).await else {
+    let Some(latest) =
+        can_voice_update::check(&app.http, &origin, "xpc-for-can", env!("CARGO_PKG_VERSION")).await
+    else {
         return Ok(None);
     };
     let skipped = (!skipped.is_empty()).then_some(skipped);
@@ -1442,7 +1449,7 @@ fn plugin_install_status(app: tauri::State<'_, App>, root: Option<String>) -> in
 ///
 /// 装成功才记住这个目录：填错了路径的人不该在下次开窗口时还看着那一条。
 #[tauri::command]
-fn install_plugin(app: tauri::State<'_, App>, root: String) -> Result<String, String> {
+fn install_plugin(app: tauri::State<'_, App>, root: String) -> Result<String, Message> {
     let path = install::install(std::path::Path::new(&root))?;
     app.update_settings(|s| s.xplane_root = root);
     Ok(path.display().to_string())
@@ -1493,7 +1500,11 @@ const COMPACT_SIZE: (f64, f64) = (460.0, 340.0);
 ///
 /// `shrink` 为真时顺手把窗口缩到 [`COMPACT_SIZE`]：只在精简**刚打开**的那一刻、
 /// 和启动时照着存下来的状态还原时才这么做——不然每改一次主题窗口都跳一下。
-fn apply_window(window: &tauri::WebviewWindow, appearance: &can_voice_settings::Appearance, shrink: bool) {
+fn apply_window(
+    window: &tauri::WebviewWindow,
+    appearance: &can_voice_settings::Appearance,
+    shrink: bool,
+) {
     if let Err(e) = window.set_always_on_top(appearance.always_on_top) {
         tracing::warn!(error = %e, "could not change always-on-top");
     }
@@ -1639,7 +1650,6 @@ pub fn run() {
 mod tests {
     use super::*;
     use can_voice_fsd::pilot::XpdrMode;
-
 
     /// **界面靠 `link` 判断"上线了没有"**：`App.vue` 里 `online` 就是
     /// `link != null`，`connected` 是 `link === "Online"`。它写死 `None` 的时候，
@@ -1852,8 +1862,8 @@ mod tests {
     /// 把别的设置一起丢掉。
     #[test]
     fn a_settings_file_from_before_observer_mode_still_loads() {
-        let s: Settings = serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#)
-            .expect("parse");
+        let s: Settings =
+            serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#).expect("parse");
         assert_eq!(s.cid, "1234567");
         assert!(!s.observer);
         assert_eq!(s.follow, "");

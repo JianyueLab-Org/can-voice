@@ -1,1 +1,93 @@
-{}
+{
+  "app": {
+    "title": "Controller Voice"
+  },
+  "link": {
+    "connected": "Connected",
+    "connecting": "Connecting…",
+    "reconnecting": "Reconnecting…",
+    "evicted": "This account signed in elsewhere; voice disconnected"
+  },
+  "ended": {
+    "offline": "Disconnected",
+    "evicted": "This account signed in elsewhere",
+    "proto_unsupported": "Client version too old; update, then connect again",
+    "token_expired": "Sign-in credentials expired; please reconnect",
+    "server_refused": "The server refused this connection",
+    "refused": "Connection refused"
+  },
+  "login": {
+    "cid": "CAN ID",
+    "password": "Password",
+    "connect": "Connect",
+    "disconnect": "Disconnect"
+  },
+  "freq": {
+    "out_of_band": "Frequency must be between 118.000 and 136.975",
+    "add": "Add frequency",
+    "empty": "No frequencies yet. Enter one above, e.g. 121.800"
+  },
+  "notice": {
+    "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
+    "range_unavailable": "Position service unavailable, range filtering is off: this frequency is audible network-wide right now",
+    "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
+    "other": "{kind}: {reason}",
+    "other_on": "{kind} · {frequency}: {reason}",
+    "xc_denied": "These cross-couples did not take effect: {pairs}"
+  },
+  "duty": {
+    "off": "You are not staffing any position right now (the data feed does not list you). TX is off, but you can still hear. Once you log on in EuroScope, this updates within a minute.",
+    "dropped_tx": "All TX that was on has been switched off.",
+    "unknown": "Data feed not reached yet, position status unknown. Retrying on the next round (within a minute).",
+    "on": "Staffing {callsign}"
+  },
+  "panel": {
+    "open": "Audio & PTT",
+    "close": "Hide"
+  },
+  "online": {
+    "title": "Online controllers",
+    "none": "Nobody is online right now.",
+    "tuned": "{frequency} is already on your radio stack",
+    "add": "Add {frequency}"
+  },
+  "health": {
+    "summary": "RTT {rtt} ms · received {received} · lost {lost}",
+    "unparsable": "· unparsable {count}"
+  },
+  "radio": {
+    "select": "Select this row",
+    "staffed": "My position",
+    "staffed_tip": "This is the frequency of the position you are staffing",
+    "receiving": "Receiving",
+    "no_transmit": "You are not staffing any position right now, so you cannot transmit",
+    "unmute_tip": "Muted; click to unmute",
+    "mute_tip": "Mute this frequency (still receives packets, light still shows)",
+    "last_talk": "Last transmission",
+    "tx_denied": "TX denied",
+    "tx_denied_tip": "The server did not grant transmit on this frequency",
+    "rx_denied": "RX denied",
+    "rx_denied_tip": "The server did not grant receive on this frequency",
+    "remove": "Remove",
+    "remove_locked": "This is the frequency of the position you are staffing; log off the position before removing it"
+  },
+  "audio": {
+    "title": "Audio devices",
+    "microphone": "Microphone",
+    "headset": "Headset",
+    "system_default": "System default",
+    "applies_now": "Device changes take effect immediately."
+  },
+  "ptt": {
+    "hold": "Hold to talk",
+    "transmitting": "Transmitting",
+    "title": "Push-to-talk (PTT)",
+    "unresolved": "This binding is not recognized on this system; please record it again",
+    "delete": "Delete",
+    "none": "No bindings yet. Use the button below to record one.",
+    "capturing": "Press the key you want…",
+    "record": "Record a binding",
+    "wayland": "This system is running Wayland, which does not let ordinary programs listen for global keys, so keyboard PTT will not work. Use a joystick instead, or run under an X11 session.",
+    "no_mouse": "Mouse side buttons are not supported as PTT on this system; use the keyboard or a joystick."
+  }
+}

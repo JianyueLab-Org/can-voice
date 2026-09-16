@@ -23,13 +23,19 @@ use std::collections::BTreeMap;
 
 /// 一句还没翻译的话。
 ///
-/// 序列化成 `{ "key": "...", "values": { ... } }`，Tauri 命令把它原样当错误交给
-/// 前端。没有值时不带 `values`。
+/// 序列化成 `{ "key": "...", "values": { ... }, "details": [ ... ] }`，Tauri 命令把它
+/// 原样当错误交给前端。没有值、没有明细时不带那两项。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Message {
     pub key: &'static str,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub values: BTreeMap<&'static str, String>,
+    /// 跟在这句话后面的几条原因："没有能导入的席位：频率读不出来；缺识别码"。
+    ///
+    /// **不是塞进占位符的一串**：每一条原因自己也要翻译，而占位符里只能是一个已经
+    /// 定了语言的字符串。标题和原因之间、原因和原因之间用什么标点，归前端的字典。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<Message>,
 }
 
 impl Message {
@@ -37,12 +43,19 @@ impl Message {
         Self {
             key,
             values: BTreeMap::new(),
+            details: Vec::new(),
         }
     }
 
     /// 填一个占位符。`name` 对应字典里的 `{name}`。
     pub fn with(mut self, name: &'static str, value: impl std::fmt::Display) -> Self {
         self.values.insert(name, value.to_string());
+        self
+    }
+
+    /// 挂上几条原因，见 [`Message::details`]。
+    pub fn with_details(mut self, details: impl IntoIterator<Item = Message>) -> Self {
+        self.details.extend(details);
         self
     }
 }
@@ -52,6 +65,10 @@ impl std::fmt::Display for Message {
         f.write_str(self.key)?;
         for (name, value) in &self.values {
             write!(f, " {name}={value:?}")?;
+        }
+        if !self.details.is_empty() {
+            let details: Vec<String> = self.details.iter().map(ToString::to_string).collect();
+            write!(f, " [{}]", details.join("; "))?;
         }
         Ok(())
     }
@@ -74,6 +91,29 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Message::new("error.log.no_file")).unwrap(),
             serde_json::json!({ "key": "error.log.no_file" })
+        );
+    }
+
+    /// 带原因的那种：原因各自是一条 `Message`，前端一条条翻。
+    #[test]
+    fn the_reasons_travel_as_messages_of_their_own() {
+        let m = Message::new("problem.vatis.nothing_usable").with_details([
+            Message::new("problem.vatis.no_identifier"),
+            Message::new("problem.vatis.out_of_band").with("frequency", "1000.000"),
+        ]);
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            serde_json::json!({
+                "key": "problem.vatis.nothing_usable",
+                "details": [
+                    { "key": "problem.vatis.no_identifier" },
+                    { "key": "problem.vatis.out_of_band", "values": { "frequency": "1000.000" } },
+                ],
+            })
+        );
+        assert_eq!(
+            m.to_string(),
+            r#"problem.vatis.nothing_usable [problem.vatis.no_identifier; problem.vatis.out_of_band frequency="1000.000"]"#
         );
     }
 

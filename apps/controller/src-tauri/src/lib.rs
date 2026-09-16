@@ -16,10 +16,10 @@
 
 use tauri::Manager;
 use can_voice_app::{Bridge, Snapshot};
-use can_voice_i18n::Message;
 use can_voice_client::stack::{Radio, RadioStack};
 use can_voice_client::Config;
 use can_voice_datafeed::Position;
+use can_voice_i18n::Message;
 use can_voice_token::TokenSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ControllerEntry } from "../types";
+import { t } from "../i18n";
 
 defineProps<{ controllers: ControllerEntry[] }>();
 const emit = defineEmits<{ (e: "reply", callsign: string): void }>();
@@ -7,7 +8,9 @@ const emit = defineEmits<{ (e: "reply", callsign: string): void }>();
 
 <template>
   <div class="flex flex-col gap-1 overflow-auto text-xs">
-    <div v-if="!controllers.length" class="py-4 text-center opacity-50">附近没有在线席位</div>
+    <div v-if="!controllers.length" class="py-4 text-center opacity-50">
+      {{ t("lists.no_controllers") }}
+    </div>
     <button
       v-for="c in controllers"
       :key="c.callsign"

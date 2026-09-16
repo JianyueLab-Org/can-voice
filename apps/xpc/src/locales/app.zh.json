@@ -2,6 +2,172 @@
   "problem": {
     "observer_locked": "连接期间不能切换观察员模式。先下线，再改。",
     "nothing_to_send": "没有可发的内容：正文是空的，或者既没填收件人也没有 COM1 频率",
-    "offline": "还没上线"
+    "offline": "还没上线",
+    "not_xplane": "这个目录不像 X-Plane 装的地方（里面没有 Resources/plugins）",
+    "plugin_dir": "建不了 {path}：{detail}",
+    "plugin_write": "写不进 {path}：{detail}"
+  },
+  "app": {
+    "title": "X-Plane 飞行客户端"
+  },
+  "status": {
+    "plugin": "插件",
+    "observing": "观察员（不上网络）",
+    "no_mouse_ptt": "本系统不支持鼠标侧键作 PTT"
+  },
+  "fsd": {
+    "connecting": "FSD 连接中…",
+    "online": "FSD 已连接",
+    "reconnecting": "FSD 重连中…",
+    "error": "FSD 出错了",
+    "offline": "FSD 已下线（重连用尽）",
+    "stopped": "FSD 已停止"
+  },
+  "voice": {
+    "none": "未连接",
+    "online": "语音已连接",
+    "connecting": "语音连接中…",
+    "reconnecting": "语音重连中…",
+    "evicted": "这个账号在别处登录了，语音已断开",
+    "offline": "语音已断开"
+  },
+  "xpdr": {
+    "standby": "待机",
+    "ident": "识别中",
+    "mode_c": "C 模式"
+  },
+  "login": {
+    "observer_mode": "观察员模式（双人机组）",
+    "observer_note": "右座用：只连语音，不在网络上产生第二架飞机。两个人要用各自的账号。",
+    "cid": "CAN 号",
+    "password": "密码",
+    "follow": "跟随的呼号（机长的）",
+    "follow_tip": "机长那架飞机的呼号。语音服务端按它的位置给你算距离。",
+    "callsign": "呼号 CES123",
+    "aircraft": "机型 A320",
+    "real_name": "姓名",
+    "connect": "上线"
+  },
+  "session": {
+    "ident": "识别（8 秒）",
+    "following": "跟随",
+    "disconnect": "下线"
+  },
+  "observer": {
+    "frequency": "语音频率",
+    "frequency_placeholder": "留空跟随 COM1",
+    "frequency_tip": "观察员模式专用：手输一个频率，语音就待在那里。清空则回到跟随座舱 COM1。",
+    "manual": "手输",
+    "follow_com1": "跟随 COM1",
+    "no_frequency": "还没有频率：在这里输入一个，或者开着模拟器跟 COM1 走"
+  },
+  "cockpit": {
+    "transponder": "应答机",
+    "altitude": "高度",
+    "groundspeed": "地速",
+    "heading": "航向",
+    "pressure_delta": "气压修正"
+  },
+  "lists": {
+    "traffic": "附近的飞机（{count}）",
+    "controllers": "在线席位（{count}）",
+    "messages": "文字消息",
+    "no_traffic": "附近没有其他飞机",
+    "no_controllers": "附近没有在线席位",
+    "no_messages": "还没有文字消息"
+  },
+  "chat": {
+    "transmitting": "发话中",
+    "push_to_talk": "按住发话",
+    "recipient": "收件人（留空发到频率）",
+    "message": "文字消息，.wallop 呼叫督导",
+    "observer_no_text": "观察员不收发文字消息",
+    "send": "发送"
+  },
+  "recipient": {
+    "supervisor": "督导",
+    "broadcast": "全网广播"
+  },
+  "plan": {
+    "tab": "飞行计划",
+    "rules": "规则",
+    "rules_i": "I 仪表",
+    "rules_v": "V 目视",
+    "rules_y": "Y 先仪后目",
+    "rules_z": "Z 先目后仪",
+    "aircraft": "机型",
+    "cruise_speed": "巡航速度",
+    "cruise_altitude": "巡航高度",
+    "departure": "起飞机场",
+    "arrival": "目的机场",
+    "alternate": "备降",
+    "departure_time": "预计起飞 (UTC)",
+    "enroute_hours": "航路时间 时",
+    "enroute_minutes": "航路时间 分",
+    "fuel_hours": "燃油 时",
+    "fuel_minutes": "燃油 分",
+    "route": "航路",
+    "remarks": "备注",
+    "file": "拍发",
+    "filed": "已拍发",
+    "offline": "还没上线，先上线再拍发",
+    "observer": "观察员不上网络，飞行计划由机长拍发"
+  },
+  "local": {
+    "tab": "本机",
+    "inject": "把他机注入模拟器",
+    "inject_note": "关掉之后天上就只剩自己，语音不受影响",
+    "microphone": "麦克风",
+    "headset": "耳机",
+    "system_default": "跟随系统默认",
+    "devices_note": "换设备立刻生效。",
+    "chime": "收到管制消息时播放提示音",
+    "chime_all": "频率上的每条消息都提示",
+    "chime_all_note": "默认只有点到你呼号的才响；私聊一定会响",
+    "chime_volume": "提示音量",
+    "preview": "试听",
+    "chime_note": "提示音走上面选的那块耳机，不是系统默认设备。试听没声音就说明设备选错了。",
+    "rescan": "重扫",
+    "range": "显示距离",
+    "range_note": "海里。TCAS 只有 64 个位置，调小一点能把它们留给近处那几架。"
+  },
+  "csl": {
+    "dir": "CSL 目录",
+    "dir_placeholder": "留空就跟着 X-Plane 目录走",
+    "loading": "正在扫 {path}…",
+    "found": "扫到 {count} 个模型（{path}）",
+    "empty": "{path} 里一个模型都没有——天上不会画出任何他机。几个 GB 的 CSL 包常常在另一块盘上，那就把路径填在这里。"
+  },
+  "ptt": {
+    "title": "按键发话（PTT）",
+    "unresolved": "这个绑定在本系统上认不出来，请重新录",
+    "remove": "删除",
+    "none": "还没有绑定。",
+    "capturing": "按一下你要的键…",
+    "record": "录制一个绑定",
+    "wayland": "本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。请改用手柄。",
+    "no_mouse": "本系统不支持鼠标侧键作 PTT。"
+  },
+  "plugin": {
+    "version_mismatch": "X-Plane 插件的协议版本是 {version}，和本客户端对不上。它会丢掉每一帧，天上不会有任何飞机——到下面「本机 → X-Plane 他机插件」点一下重新安装。",
+    "not_heard": "没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——到下面「本机 → X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。",
+    "title": "X-Plane 他机插件",
+    "why": "没有它，语音和上线都正常，但天上一架别人的飞机都不会出现。",
+    "state": {
+      "no_root": "没找到 X-Plane。请在下面填它装在哪。",
+      "not_xplane": "这个目录不像 X-Plane 装的地方——里面没有 Resources/plugins。",
+      "missing": "还没装。",
+      "outdated": "装着的那份和这个客户端带的不一样，建议更新。",
+      "current": "已经是最新的。",
+      "looking": "正在看…"
+    },
+    "no_xppython3": "这个目录里没有 XPPython3。插件装了也不会跑——它跑在 XPPython3 里。请先去装 XPPython3（X-Plane 12 用 v4.x，11.52 用 v3.1.5，装错大版本是静默不工作）。",
+    "protocol_mismatch": "装着的那份说协议 {installed}，这个客户端说 {bundled}。对不上时插件会丢掉每一帧，天上不会有任何飞机，而两边日志都是干净的——按下面的按钮更新。",
+    "root": "X-Plane 目录",
+    "root_placeholder": "例如 /Applications/X-Plane 12",
+    "inspect": "看一下",
+    "install": "安装",
+    "reinstall": "重新安装",
+    "installed": "装好了：{path}。X-Plane 正开着的话，要重启它才会加载。"
   }
 }

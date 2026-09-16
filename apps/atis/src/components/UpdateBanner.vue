@@ -13,7 +13,8 @@ interface Latest {
 }
 
 const latest = ref<Latest | null>(null);
-const problem = ref("");
+/** 打不开时 Rust 交回来的原样，渲染时才翻——切了语言跟着变。 */
+const problem = ref<unknown>(null);
 
 // 启动时查一次。**查不到就安静**：连不上更新服务不值得一个对话框，
 // 更不该拖慢启动——Rust 侧每条错误路径都返回"没有更新"，这里只是再兜一层。
@@ -34,7 +35,7 @@ async function open(url: string) {
   try {
     await invoke("open_download", { url });
   } catch (e) {
-    problem.value = errorText(e);
+    problem.value = e;
   }
 }
 
@@ -70,6 +71,6 @@ async function skip() {
     <button class="rounded border px-2 py-0.5" @click="skip">{{ t("update.skip") }}</button>
   </p>
   <p v-if="problem" class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700">
-    {{ problem }}
+    {{ errorText(problem) }}
   </p>
 </template>

@@ -3,7 +3,8 @@
     "close": "Close",
     "separator": {
       "list": ", ",
-      "sentence": "; "
+      "sentence": "; ",
+      "detail": ": "
     }
   },
   "language": {

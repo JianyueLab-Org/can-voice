@@ -1,1 +1,93 @@
-{}
+{
+  "app": {
+    "title": "管制语音"
+  },
+  "link": {
+    "connected": "已连接",
+    "connecting": "连接中…",
+    "reconnecting": "重连中…",
+    "evicted": "这个账号在别处登录了，语音已断开"
+  },
+  "ended": {
+    "offline": "已断开",
+    "evicted": "这个账号在别处登录了",
+    "proto_unsupported": "客户端版本太旧，请更新后再连",
+    "token_expired": "登录凭据已过期，请重新连接",
+    "server_refused": "服务端拒绝了这次连接",
+    "refused": "连接被拒绝"
+  },
+  "login": {
+    "cid": "CAN 号",
+    "password": "密码",
+    "connect": "连接",
+    "disconnect": "断开"
+  },
+  "freq": {
+    "out_of_band": "频率要在 118.000 – 136.975 之间",
+    "add": "添加频率",
+    "empty": "还没有频率。在上面填一个，例如 121.800"
+  },
+  "notice": {
+    "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",
+    "range_unavailable": "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听",
+    "unknown_message": "服务端不认识客户端发的一帧（{reason}），可能需要更新客户端",
+    "other": "{kind}：{reason}",
+    "other_on": "{kind} · {frequency}：{reason}",
+    "xc_denied": "这些交叉耦合没有生效：{pairs}"
+  },
+  "duty": {
+    "off": "你此刻不在任何席位上（数据源里没有你），发射已关闭，但还听得见。在 EuroScope 上线之后，这里会在一分钟内跟上。",
+    "dropped_tx": "台面上原来开着的发射已经全部关掉。",
+    "unknown": "还没查到数据源，席位状态未知——下一轮（一分钟内）会再试。",
+    "on": "在席位 {callsign}"
+  },
+  "panel": {
+    "open": "音频与 PTT",
+    "close": "收起"
+  },
+  "online": {
+    "title": "在线席位",
+    "none": "此刻没有人在线。",
+    "tuned": "{frequency} 已经在台面上",
+    "add": "加上 {frequency}"
+  },
+  "health": {
+    "summary": "RTT {rtt} ms · 收 {received} · 丢 {lost}",
+    "unparsable": "· 解不开 {count}"
+  },
+  "radio": {
+    "select": "选中这一行",
+    "staffed": "本席",
+    "staffed_tip": "这是你正在管的席位频率",
+    "receiving": "正在接收",
+    "no_transmit": "你此刻不在任何席位上，不能发射",
+    "unmute_tip": "已静音，点一下恢复",
+    "mute_tip": "静音这个频率（仍然收包、仍然亮灯）",
+    "last_talk": "最后一次通话",
+    "tx_denied": "发射被拒",
+    "tx_denied_tip": "服务端没有给这个频率的发射权",
+    "rx_denied": "接收被拒",
+    "rx_denied_tip": "服务端没有给这个频率的接收",
+    "remove": "移除",
+    "remove_locked": "这是你正在管的席位频率，先下席位再删"
+  },
+  "audio": {
+    "title": "音频设备",
+    "microphone": "麦克风",
+    "headset": "耳机",
+    "system_default": "跟随系统默认",
+    "applies_now": "换设备立刻生效。"
+  },
+  "ptt": {
+    "hold": "按住发话",
+    "transmitting": "发话中",
+    "title": "按键发话（PTT）",
+    "unresolved": "这个绑定在本系统上认不出来，请重新录一次",
+    "delete": "删除",
+    "none": "还没有绑定。按下面的按钮录一个。",
+    "capturing": "按一下你要的键…",
+    "record": "录制一个绑定",
+    "wayland": "本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。请改用手柄，或者在 X11 会话下使用。",
+    "no_mouse": "本系统不支持鼠标侧键作 PTT，请用键盘或手柄。"
+  }
+}

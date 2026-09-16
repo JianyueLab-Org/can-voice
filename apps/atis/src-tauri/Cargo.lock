@@ -323,6 +323,7 @@ name = "can-voice-atis"
 version = "0.1.0"
 dependencies = [
  "can-voice-client",
+ "can-voice-i18n",
  "can-voice-proto",
  "can-voice-token",
  "regex",

@@ -1,3 +1,5 @@
+import { t, type Message } from "./i18n";
+
 // 这些形状是 Rust 侧序列化出来的。改那边的字段名，这里要跟着改。
 export type XpdrMode = "Standby" | "ModeC" | "Ident";
 
@@ -53,7 +55,8 @@ export interface HangarView {
 
 export interface View {
   sim_connected: boolean;
-  sim_problem: string | null;
+  /** 连不上 SimConnect 的原因。渲染时用 `errorText` 翻。 */
+  sim_problem: Message | null;
   sim: SimSnapshot | null;
   link: FsdState | null;
   traffic: TrafficEntry[];
@@ -90,15 +93,15 @@ export interface ObserverView {
   manual: boolean;
 }
 
-/** 应答机档位对人怎么说。 */
+/** 应答机档位对人怎么说。在模板里调：切了语言要跟着变。 */
 export function xpdrText(mode: XpdrMode | undefined): string {
   switch (mode) {
     case "Standby":
-      return "待机";
+      return t("xpdr.standby");
     case "Ident":
-      return "识别中";
+      return t("xpdr.ident");
     case "ModeC":
-      return "C 模式";
+      return t("xpdr.mode_c");
     default:
       return "—";
   }
@@ -179,20 +182,45 @@ export interface VoiceSnapshot {
   notices: [string, number, string][];
 }
 
-/** 语音链路对人怎么说。 */
+/** 语音链路对人怎么说。在模板里调：切了语言要跟着变。 */
 export function voiceText(v: VoiceSnapshot | null | undefined): string {
-  if (!v) return "未连接";
+  if (!v) return t("voice.none");
   switch (v.link) {
     case "Online":
-      return "语音已连接";
+      return t("voice.online");
     case "Connecting":
-      return "语音连接中…";
+      return t("voice.connecting");
     case "Reconnecting":
-      return "语音重连中…";
+      return t("voice.reconnecting");
     case "Evicted":
-      return "这个账号在别处登录了，语音已断开";
+      return t("voice.evicted");
     default:
-      return "语音已断开";
+      return t("voice.offline");
+  }
+}
+
+/**
+ * FSD 链路对人怎么说。在模板里调：切了语言要跟着变。
+ *
+ * 取值和 Rust 那边的 `FsdState` 一一对应，每一种都要有一句——漏掉的那种会在
+ * 界面上显示成空白。
+ */
+export function linkText(link: FsdState | null | undefined): string {
+  switch (link) {
+    case "Connecting":
+      return t("fsd.connecting");
+    case "Online":
+      return t("fsd.online");
+    case "Reconnecting":
+      return t("fsd.reconnecting");
+    case "Error":
+      return t("fsd.error");
+    case "Offline":
+      return t("fsd.offline");
+    case "Stopped":
+      return t("fsd.stopped");
+    default:
+      return "";
   }
 }
 
@@ -224,8 +252,8 @@ export interface ControllerEntry {
  * 而频率消息和点名叫你的私聊是两件事。
  */
 export function recipientText(to: string): string {
-  if (to === "*S") return "督导";
-  if (to === "*") return "全网广播";
+  if (to === "*S") return t("recipient.supervisor");
+  if (to === "*") return t("recipient.broadcast");
   if (to.startsWith("@")) {
     const digits = to.slice(1);
     if (/^\d{5}$/.test(digits)) return `1${digits.slice(0, 2)}.${digits.slice(2)}`;

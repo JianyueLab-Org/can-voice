@@ -55,8 +55,9 @@ pub struct SimLink {
 struct SimState {
     connected: bool,
     snapshot: Option<Snapshot>,
-    /// 打不开时的原因，界面要说得出来。
-    problem: Option<String>,
+    /// 打不开时的原因，界面要说得出来。SimConnect 自己给的那句英文原样放在
+    /// `detail` 里——"DLL 太旧"和"模拟器没开"要做的事不一样，丢掉它就分不开了。
+    problem: Option<Message>,
 }
 
 impl SimLink {
@@ -75,7 +76,7 @@ impl SimLink {
         self.state.lock().expect("sim").connected
     }
 
-    pub fn problem(&self) -> Option<String> {
+    pub fn problem(&self) -> Option<Message> {
         self.state.lock().expect("sim").problem.clone()
     }
 
@@ -92,7 +93,11 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
             {
                 let mut state = state.lock().expect("sim");
                 state.connected = false;
-                state.problem = Some(e);
+                state.problem = Some(if can_voice_sim::msfs::available() {
+                    Message::new("simconnect.not_running").with("detail", e)
+                } else {
+                    Message::new("simconnect.unavailable")
+                });
             }
             // 模拟器没开是常态，不是错误。隔几秒再试一次。
             std::thread::sleep(Duration::from_secs(5));
@@ -112,7 +117,7 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
                 Err(e) => {
                     let mut state = state.lock().expect("sim");
                     state.connected = false;
-                    state.problem = Some(e);
+                    state.problem = Some(Message::new("simconnect.lost").with("detail", e));
                     break;
                 }
             }
@@ -409,7 +414,11 @@ impl App {
 
     /// 观察员手输的频率，没填是 `None`。
     fn manual_frequency(&self) -> Option<u32> {
-        Some(self.manual_frequency.load(std::sync::atomic::Ordering::Relaxed)).filter(|&k| k != 0)
+        Some(
+            self.manual_frequency
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|&k| k != 0)
     }
 
     /// 换一条频率循环上来，旧的先停掉。
@@ -446,7 +455,7 @@ pub struct View {
     pub sim_connected: bool,
     /// 连不上时的原因。**非 Windows 上就是"这个系统没有 SimConnect"**，
     /// 界面要直说，而不是让人对着一个永远灰着的灯猜。
-    pub sim_problem: Option<String>,
+    pub sim_problem: Option<Message>,
     pub sim: Option<Snapshot>,
     pub link: Option<can_voice_fsd::session::FsdState>,
     pub reason: Option<can_voice_fsd::session::Reason>,
@@ -1438,7 +1447,8 @@ async fn check_update(
         };
         // 上着网就是"正在工作"。观察员没有 FSD 链路，但他同样戴着耳机在听。
         let busy = app.link.lock().expect("link").is_some() || app.observing().is_some();
-        (s.skipped_update, busy) };
+        (s.skipped_update, busy)
+    };
     let origin = app.settings_snapshot().endpoints.api_origin();
     let Some(latest) = can_voice_update::check(&app.http, &origin, "msfs-for-can", env!("CARGO_PKG_VERSION")).await else {
         return Ok(None);
@@ -1759,8 +1769,8 @@ mod tests {
     /// 把别的设置一起丢掉。
     #[test]
     fn a_settings_file_from_before_observer_mode_still_loads() {
-        let s: Settings = serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#)
-            .expect("parse");
+        let s: Settings =
+            serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#).expect("parse");
         assert_eq!(s.cid, "1234567");
         assert!(!s.observer);
         assert_eq!(s.follow, "");

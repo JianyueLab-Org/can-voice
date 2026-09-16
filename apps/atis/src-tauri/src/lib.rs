@@ -14,14 +14,16 @@
 //! 这一层只有 Tauri 命令、一个状态容器，和每个在播席位那条盯报文的循环。
 
 use can_voice_atis::datafeed::Online;
-use can_voice_i18n::Message;
 use can_voice_atis::metar::Metar;
 use can_voice_atis::netconfig::{self, Comparison, Merged, NetworkConfig};
-use can_voice_atis::profile::{Preset, Profile, ProfileSet, Station, DEFAULT_PROFILE_PATH};
+use can_voice_atis::profile::{
+    Preset, Profile, ProfileError, ProfileSet, Station, DEFAULT_PROFILE_PATH,
+};
 use can_voice_atis::script::{self, Rendered};
 use can_voice_atis::{vatis, weather};
 use can_voice_fsd::client::{self, Config, FsdEvent, FsdHandle, FsdState, Reason};
 use can_voice_fsd::packet::{self, Identity, Position, FACILITY_ATIS, RATING_OBSERVER};
+use can_voice_i18n::Message;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -311,25 +313,25 @@ fn save(set: &ProfileSet) {
 }
 
 #[tauri::command]
-fn add_profile(app: tauri::State<'_, App>, name: String) -> Result<(), String> {
+fn add_profile(app: tauri::State<'_, App>, name: String) -> Result<(), Message> {
     let mut set = app.profiles.lock().expect("profiles");
-    set.add(&name).map_err(|e| e.to_string())?;
+    set.add(&name).map_err(|e| e.message())?;
     save(&set);
     Ok(())
 }
 
 #[tauri::command]
-fn rename_profile(app: tauri::State<'_, App>, old: String, new: String) -> Result<(), String> {
+fn rename_profile(app: tauri::State<'_, App>, old: String, new: String) -> Result<(), Message> {
     let mut set = app.profiles.lock().expect("profiles");
-    set.rename(&old, &new).map_err(|e| e.to_string())?;
+    set.rename(&old, &new).map_err(|e| e.message())?;
     save(&set);
     Ok(())
 }
 
 #[tauri::command]
-fn remove_profile(app: tauri::State<'_, App>, name: String) -> Result<bool, String> {
+fn remove_profile(app: tauri::State<'_, App>, name: String) -> Result<bool, Message> {
     let mut set = app.profiles.lock().expect("profiles");
-    let gone = set.remove(&name).map_err(|e| e.to_string())?;
+    let gone = set.remove(&name).map_err(|e| e.message())?;
     save(&set);
     Ok(gone)
 }
@@ -345,14 +347,12 @@ fn select_profile(app: tauri::State<'_, App>, name: String) -> bool {
 }
 
 #[tauri::command]
-fn add_station(app: tauri::State<'_, App>, identifier: String) -> Result<Station, String> {
+fn add_station(app: tauri::State<'_, App>, identifier: String) -> Result<Station, Message> {
     let station = Station::new(&identifier);
     // 呼号不合规就**在这里**说，而不是等连上去被服务端拒。
-    packet::check_atis_callsign(&station.callsign()).map_err(|e| e.to_string())?;
+    packet::check_atis_callsign(&station.callsign()).map_err(|e| e.message())?;
     let mut set = app.profiles.lock().expect("profiles");
-    set.active()
-        .add(station.clone())
-        .map_err(|e| e.to_string())?;
+    set.active().add(station.clone()).map_err(|e| e.message())?;
     save(&set);
     Ok(station)
 }
@@ -374,17 +374,17 @@ fn save_station(
     app: tauri::State<'_, App>,
     callsign: String,
     mut station: Station,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     station.normalise();
-    packet::check_atis_callsign(&station.callsign()).map_err(|e| e.to_string())?;
+    packet::check_atis_callsign(&station.callsign()).map_err(|e| e.message())?;
     let mut set = app.profiles.lock().expect("profiles");
     let profile: &mut Profile = set.active();
-    // 换了呼号就等于换了一个席位，重名要挡住。
+    // 换了呼号就等于换了一个席位，重名要挡住。说法和 `Profile::add` 撞上重名时同一句。
     if station.callsign() != callsign && profile.get(&station.callsign()).is_some() {
-        return Err(format!("{} already exists", station.callsign()));
+        return Err(ProfileError::DuplicateStation(station.callsign()).message());
     }
     profile.remove(&callsign);
-    profile.add(station).map_err(|e| e.to_string())?;
+    profile.add(station).map_err(|e| e.message())?;
     save(&set);
     Ok(())
 }
@@ -408,19 +408,22 @@ fn on_air(app: &App) -> Vec<String> {
 /// 没有它的话，"先起客户端把稿子写好，再上线播"做不成：问报文的 `$AX` 要求已经
 /// 连着 FSD，于是写模板的人只能对着一份编出来的电码调格式。
 #[tauri::command]
-async fn fetch_metar(app: tauri::State<'_, App>, icao: String) -> Result<String, String> {
+async fn fetch_metar(app: tauri::State<'_, App>, icao: String) -> Result<String, Message> {
     let url = metar_url(&app.settings_snapshot().endpoints);
     weather::fetch(&app.http, &url, &icao, weather::RETRIES)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.message())
 }
 
 /// 导进来的结果：并了什么、跳过了什么、vATIS 那边有哪些这里没有对应功能。
+///
+/// 后两样是两张 [`Message`] 单子，前端按当前语言拼成提示（#29）。
 #[derive(serde::Serialize)]
 pub struct ImportReport {
     source: String,
     merged: Merged,
-    notes: Vec<String>,
+    failures: Vec<Message>,
+    skipped: Vec<Message>,
 }
 
 /// 导入 vATIS 的配置。文件是界面那一侧读出来递过来的——为一个选文件的框引一个
@@ -429,8 +432,8 @@ pub struct ImportReport {
 /// **只补缺，不覆盖**：同呼号的席位原样保留，和旧版一致。本地那一份多半是值班时
 /// 调过的，别人的导出文件不该盖掉它。
 #[tauri::command]
-fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport, String> {
-    let imported = vatis::from_text(&body).map_err(|e| e.to_string())?;
+fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport, Message> {
+    let imported = vatis::from_text(&body).map_err(|e| e.message())?;
     let protected = on_air(&app);
     let mut set = app.profiles.lock().expect("profiles");
     let merged = netconfig::merge(set.active(), &imported.stations, false, &protected);
@@ -438,7 +441,8 @@ fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport
     Ok(ImportReport {
         source: imported.name,
         merged,
-        notes: imported.notes,
+        failures: imported.failures,
+        skipped: imported.skipped,
     })
 }
 
@@ -447,7 +451,7 @@ fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport
 /// 这一步省掉的**只是查机场和频率**：模板、预设、跑道构型数据源给不了，要那些
 /// 得走 [`check_network_config`]。只补缺，已有的呼号不动。
 #[tauri::command]
-async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, String> {
+async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, Message> {
     let url = can_voice_settings::endpoints::endpoint(
         "CAN_FSD_DATAFEED",
         &app.settings_snapshot().endpoints.datafeed_url,
@@ -455,7 +459,7 @@ async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, String> {
     );
     let feed = can_voice_datafeed::fetch(&app.http, &url)
         .await
-        .ok_or_else(|| format!("取不到数据源（{url}）"))?;
+        .ok_or_else(|| Message::new("problem.datafeed.unreachable").with("url", &url))?;
     let stations: Vec<Station> = can_voice_atis::datafeed::online_stations(&feed)
         .iter()
         .map(Online::to_station)
@@ -470,10 +474,11 @@ async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, String> {
 /// 给人看的那份差异。装的是呼号，不是整个席位——界面只要列出来。
 #[derive(serde::Serialize)]
 pub struct NetworkPreview {
-    label: String,
+    label: Message,
     version: String,
+    /// 服务端写的那一行说明，原样显示。
     notes: String,
-    problems: Vec<String>,
+    problems: Vec<Message>,
     /// 上一次整份并进来的版本。空的表示从没并过。
     previous: String,
     missing: Vec<String>,
@@ -487,7 +492,7 @@ pub struct NetworkPreview {
 ///
 /// 值班时"按一下就变了"很难接受，所以动手是另一个命令，而且只动人勾了的那些。
 #[tauri::command]
-async fn check_network_config(app: tauri::State<'_, App>) -> Result<NetworkPreview, String> {
+async fn check_network_config(app: tauri::State<'_, App>) -> Result<NetworkPreview, Message> {
     let url = can_voice_settings::endpoints::endpoint(
         "CAN_ATIS_CONFIG_URL",
         &app.settings_snapshot().endpoints.atis_config_url,
@@ -495,8 +500,8 @@ async fn check_network_config(app: tauri::State<'_, App>) -> Result<NetworkPrevi
     );
     let document = netconfig::fetch(&app.http, &url)
         .await
-        .map_err(|e| e.to_string())?;
-    let config = netconfig::parse(&document).map_err(|e| e.to_string())?;
+        .map_err(|e| e.message())?;
+    let config = netconfig::parse(&document).map_err(|e| e.message())?;
     let comparison = {
         let mut set = app.profiles.lock().expect("profiles");
         netconfig::compare(set.active(), &config.stations)
@@ -527,9 +532,9 @@ fn apply_network_config(
     app: tauri::State<'_, App>,
     add_missing: bool,
     overwrite: bool,
-) -> Result<Merged, String> {
+) -> Result<Merged, Message> {
     let Some((config, comparison)) = app.network.lock().expect("network").take() else {
-        return Err("先取一次网络配置，看过差异再并".to_string());
+        return Err(Message::new("problem.network.not_checked"));
     };
     let protected = on_air(&app);
     let merged = {
@@ -558,17 +563,17 @@ fn preview(
     preset: String,
     metar: String,
     letter: String,
-) -> Result<Rendered, String> {
+) -> Result<Rendered, Message> {
     let mut set = app.profiles.lock().expect("profiles");
     let station = set
         .active()
         .get(&callsign)
-        .ok_or_else(|| format!("no station {callsign}"))?
+        .ok_or_else(|| Message::new("problem.station.missing").with("callsign", &callsign))?
         .clone();
     let chosen: Preset = station
         .preset(&preset)
         .cloned()
-        .ok_or_else(|| "this station has no presets".to_string())?;
+        .ok_or_else(|| Message::new("problem.station.no_presets"))?;
     let letter = letter.chars().next().unwrap_or(station.letter);
     Ok(script::render(
         &station,
@@ -615,23 +620,23 @@ async fn start(
     preset: String,
     cid: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let station = {
         let mut set = app.profiles.lock().expect("profiles");
         set.active()
             .get(&callsign)
-            .ok_or_else(|| format!("no station {callsign}"))?
+            .ok_or_else(|| Message::new("problem.station.missing").with("callsign", &callsign))?
             .clone()
     };
     let chosen = station
         .preset(&preset)
         .cloned()
-        .ok_or_else(|| "this station has no presets".to_string())?;
+        .ok_or_else(|| Message::new("problem.station.no_presets"))?;
     // 频率在这里就要能解析。等连上去才发现的话，席位已经挂在网上了，
     // 而位置包会一直发不出去。
-    station
-        .frequency_khz()
-        .ok_or_else(|| format!("{} is not a frequency", station.frequency))?;
+    station.frequency_khz().ok_or_else(|| {
+        Message::new("problem.station.bad_frequency").with("frequency", &station.frequency)
+    })?;
 
     // **等级跟着本人**：写死观察员的话，一个 C1 管制员开的通播在雷达图上显示成
     // 观察员，而管制席位上的同一个人是 C1。设置里指定了就用指定的；0 表示自动，
@@ -650,7 +655,7 @@ async fn start(
     let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let mut running = app.running.lock().expect("running");
     if running.contains_key(&callsign) {
-        return Err(format!("{callsign} is already on the air"));
+        return Err(Message::new("problem.station.already_on_air").with("callsign", &callsign));
     }
 
     let config = Config {
@@ -758,17 +763,17 @@ fn refresh(app: tauri::State<'_, App>, callsign: String) -> bool {
 /// Bravo" 这个名字底下的内容被悄悄换掉了，而手里拿着 Bravo 的机组无从知道。
 /// 只想换个字母不动构型的，用 [`advance_letter`]。
 #[tauri::command]
-fn set_preset(app: tauri::State<'_, App>, callsign: String, preset: String) -> Result<(), String> {
+fn set_preset(app: tauri::State<'_, App>, callsign: String, preset: String) -> Result<(), Message> {
     let running = app.running.lock().expect("running");
     let r = running
         .get(&callsign)
-        .ok_or_else(|| format!("{callsign} is not on the air"))?;
+        .ok_or_else(|| Message::new("problem.station.not_on_air").with("callsign", &callsign))?;
     let mut a = r.airing.lock().expect("airing");
     let chosen = a
         .station
         .preset(&preset)
         .cloned()
-        .ok_or_else(|| format!("no preset {preset}"))?;
+        .ok_or_else(|| Message::new("problem.station.no_preset").with("preset", &preset))?;
     a.preset = chosen;
     a.letter = next_letter(&a.station, a.letter);
     publish(&a, &r.fsd, &r.live);
@@ -780,11 +785,11 @@ fn set_preset(app: tauri::State<'_, App>, callsign: String, preset: String) -> R
 /// 播错了、或者报文没变但场面条件变了（跑道积水、某条滑行道关闭），都要靠它。
 /// 自动推进只认报文变化，而那两件事报文里没有。
 #[tauri::command]
-fn advance_letter(app: tauri::State<'_, App>, callsign: String) -> Result<char, String> {
+fn advance_letter(app: tauri::State<'_, App>, callsign: String) -> Result<char, Message> {
     let running = app.running.lock().expect("running");
     let r = running
         .get(&callsign)
-        .ok_or_else(|| format!("{callsign} is not on the air"))?;
+        .ok_or_else(|| Message::new("problem.station.not_on_air").with("callsign", &callsign))?;
     let mut a = r.airing.lock().expect("airing");
     a.letter = next_letter(&a.station, a.letter);
     publish(&a, &r.fsd, &r.live);

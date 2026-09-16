@@ -15,7 +15,8 @@ import appEn from "./locales/app.en.json";
  * - `locales/common.*.json`：四个共用组件和共用 crate 的话，四个客户端逐字节相同。
  * - `locales/app.*.json`：这个客户端自己的。两份的顶层命名空间不许重名。
  *
- * Rust 侧交过来的错误是 `{ key, values }`（`can_voice_i18n::Message`），用 `errorText` 翻。
+ * Rust 侧交过来的话是 `can_voice_i18n::Message`：命令失败用 `errorText` 翻，版本标签、
+ * 导入说明这类不是错误的用 `messageText` 翻。
  */
 
 /** 能显示的语言。 */
@@ -98,10 +99,26 @@ export function t(key: Key, values?: Record<string, string | number>): string {
 export interface Message {
   key: string;
   values?: Record<string, string>;
+  /** 跟在这句话后面的几条原因，各自再翻。 */
+  details?: Message[];
 }
 
 function isMessage(e: unknown): e is Message {
   return typeof e === "object" && e !== null && typeof (e as Message).key === "string";
+}
+
+/**
+ * 翻一条 Rust 交过来的 `Message`。**不只是错误**：版本标签、跳过了哪些设置这类
+ * 说明也是它。带原因的写成"标题：原因；原因"，两处标点都归当前语言的字典。
+ */
+export function messageText(m: Message): string {
+  const head = translators[language.value](m.key, m.values);
+  if (!m.details?.length) return head;
+  return (
+    head +
+    t("common.separator.detail") +
+    m.details.map(messageText).join(t("common.separator.sentence"))
+  );
 }
 
 /**
@@ -113,7 +130,7 @@ function isMessage(e: unknown): e is Message {
  */
 export function errorText(e: unknown): string {
   if (Array.isArray(e)) return e.map(errorText).join(t("common.separator.sentence"));
-  if (isMessage(e)) return translators[language.value](e.key, e.values);
+  if (isMessage(e)) return messageText(e);
   return String(e);
 }
 

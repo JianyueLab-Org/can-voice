@@ -24,6 +24,11 @@ const ENGLISH_MAY_CONTAIN_CHINESE: &[(&str, &str)] = &[
     // 语言选择器里每种语言用它自己的名字：看不懂中文的人也认得出"中文"两个字
     // 是一个选项，而一个叫 "Chinese" 的选项对只读中文的人没有用。
     ("*", "language.zh"),
+    // 通播客户端"中文台名""中文跑道"两格的示例：填进去的是中文通播要念的内容，
+    // 示例只能是中文，写成 "Shanghai Pudong" 反倒教人填错。旧版 can-audio 的
+    // station.chinese_name_hint / chinese_runway_hint 也是这么豁免的。
+    ("atis", "station.chinese_name_hint"),
+    ("atis", "station.chinese_runway_hint"),
 ];
 
 /// 界面代码里允许出现汉字的文件。**每一条都要说得出为什么。**
@@ -36,6 +41,10 @@ const RUST_FILES_MAY_CONTAIN_CHINESE: &[&str] = &[
     "crates/can-voice-atis/src/chinese.rs",
     "crates/can-voice-atis/src/readback.rs",
     "crates/can-voice-atis/src/template.rs",
+    // 写进通播配置文件的默认名字（"默认""未命名"）：存下来就是那份配置、那份构型
+    // 的名字，界面按它选中和改名，是数据不是界面文字；旧版存的也是这几个字。
+    // 单独一个文件，profile.rs / vatis.rs 里的报错照样被扫。
+    "crates/can-voice-atis/src/default_names.rs",
     // CSL / MSFS 机模的类别名是匹配用的内部键，从来不上界面。
     "crates/can-voice-sim/src/csl.rs",
     "crates/can-voice-sim/src/msfs_models.rs",

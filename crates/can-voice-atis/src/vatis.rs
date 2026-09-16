@@ -36,41 +36,94 @@
 //! vATIS 有而这边没有的（细粒度格式设置、IDS 端点、语音录制……）原样跳过，并在
 //! 结果里列出来——免得用户以为全都导进来了，到了台上才发现少一半。
 
+use crate::default_names::UNNAMED_PRESET_NAME;
 use crate::profile::{AtisType, Preset, Station};
 use crate::template::Contractions;
+use can_voice_i18n::Message;
 use serde_json::Value;
 
-/// vATIS 里有、这边没有对应实现的字段。导入时跳过并提示。
-const UNSUPPORTED: &[(&str, &str)] = &[
-    (
-        "atisFormat",
-        "细粒度的格式设置（风、能见度等各自的读法选项）",
-    ),
-    ("idsEndpoint", "IDS 推送端点"),
-    ("airportConditionDefinitions", "预置的机场条件短语库"),
-    ("notamDefinitions", "预置的 NOTAM 短语库"),
-    ("atisVoice", "语音录制设置"),
-    ("externalGenerator", "外部生成器"),
+/// 一项跳过的设置怎么跟人说。写成函数，是为了 key 能以字面量写在 `Message::new` 里。
+type Describe = fn() -> Message;
+
+/// vATIS 里有、这边没有对应实现的字段，和给人看的说明。导入时跳过并提示。
+///
+/// 说明是字典 key 不是一句话（#29）：同一项设置在中英两种界面下各说各的。
+const UNSUPPORTED: &[(&str, Describe)] = &[
+    ("atisFormat", || {
+        Message::new("import.unsupported.atis_format")
+    }),
+    ("idsEndpoint", || {
+        Message::new("import.unsupported.ids_endpoint")
+    }),
+    ("airportConditionDefinitions", || {
+        Message::new("import.unsupported.airport_condition_definitions")
+    }),
+    ("notamDefinitions", || {
+        Message::new("import.unsupported.notam_definitions")
+    }),
+    ("atisVoice", || {
+        Message::new("import.unsupported.atis_voice")
+    }),
+    ("externalGenerator", || {
+        Message::new("import.unsupported.external_generator")
+    }),
 ];
 
+/// `Display` 是给日志的英文；界面上的走 [`ImportError::message`] /
+/// [`ImportError::messages`]（#29）。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ImportError {
-    #[error("打不开文件：{0}")]
+    #[error("could not open the file: {0}")]
     Unreadable(String),
-    #[error("不是合法的 JSON：{0}")]
+    #[error("not valid JSON: {0}")]
     NotJson(String),
-    #[error("这个文件看起来不是 vATIS 的配置")]
+    #[error("this file does not look like a vATIS profile")]
     NotAProfile,
-    #[error("配置里没有任何席位（stations / composites 都是空的）")]
+    #[error("the profile has no stations (stations / composites are both empty)")]
     NoStations,
-    #[error("席位缺少 identifier")]
+    #[error("a station has no identifier")]
     NoIdentifier,
-    #[error("频率 {0} 无法识别")]
+    #[error("frequency {0} cannot be read")]
     NotAFrequency(String),
-    #[error("频率 {0} 超出甚高频范围")]
+    #[error("frequency {0} is outside the VHF band")]
     OutOfBand(String),
-    #[error("没有能导入的席位：{0}")]
-    NothingUsable(String),
+    /// 装的是前三个席位各自的问题。
+    #[error("no station could be imported: {}", joined(.0))]
+    NothingUsable(Vec<ImportError>),
+}
+
+fn joined(problems: &[ImportError]) -> String {
+    problems
+        .iter()
+        .map(ImportError::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+impl ImportError {
+    /// 给人看的那一句。
+    pub fn message(&self) -> Message {
+        match self {
+            ImportError::Unreadable(detail) => {
+                Message::new("problem.vatis.unreadable").with("detail", detail)
+            }
+            ImportError::NotJson(detail) => {
+                Message::new("problem.vatis.not_json").with("detail", detail)
+            }
+            ImportError::NotAProfile => Message::new("problem.vatis.not_a_profile"),
+            ImportError::NoStations => Message::new("problem.vatis.no_stations"),
+            ImportError::NoIdentifier => Message::new("problem.vatis.no_identifier"),
+            ImportError::NotAFrequency(frequency) => {
+                Message::new("problem.vatis.bad_frequency").with("frequency", frequency)
+            }
+            ImportError::OutOfBand(frequency) => {
+                Message::new("problem.vatis.out_of_band").with("frequency", frequency)
+            }
+            // 后面跟着是哪几个、为什么；标题和原因之间的标点归前端的字典。
+            ImportError::NothingUsable(problems) => Message::new("problem.vatis.nothing_usable")
+                .with_details(problems.iter().map(ImportError::message)),
+        }
+    }
 }
 
 /// 导进来的一份配置。
@@ -79,8 +132,13 @@ pub struct Imported {
     /// vATIS 那份配置自己的名字。
     pub name: String,
     pub stations: Vec<Station>,
-    /// 给用户看的提示：哪些席位没进来、哪些设置这边没有对应功能。
-    pub notes: Vec<String>,
+    /// 没进来的席位，各自为什么。
+    ///
+    /// 给用户看的提示原先在这里拼成一句中文。现在拆成两张单子交出去，由前端按
+    /// 当前语言拼（#29）：一句话里夹着一串要各自翻译的项，Rust 这边拼不出来。
+    pub failures: Vec<Message>,
+    /// vATIS 那边有、这边没有对应功能而跳过的设置，每一项是它的说明。
+    pub skipped: Vec<Message>,
 }
 
 /// vATIS 的频率 → 这边的十进制兆赫字符串。
@@ -160,7 +218,7 @@ fn presets_from(entries: Option<&Value>) -> Vec<Preset> {
             let name = text(entry, "name");
             Some(Preset {
                 name: if name.is_empty() {
-                    "未命名".into()
+                    UNNAMED_PRESET_NAME.into()
                 } else {
                     name
                 },
@@ -218,10 +276,12 @@ pub fn parse_station(entry: &Value) -> Result<(Station, Vec<&'static str>), Impo
     // 别人导出的更是。
     station.normalise();
 
+    // 交出去的是 vATIS 的字段名，说明到 `parse` 那里再查：同一项在二十个席位上
+    // 各出现一次，只该提示一次。
     let skipped = UNSUPPORTED
         .iter()
         .filter(|(key, _)| entry.get(*key).is_some_and(|v| !v.is_null()))
-        .map(|(_, description)| *description)
+        .map(|(key, _)| *key)
         .collect();
     Ok((station, skipped))
 }
@@ -248,42 +308,25 @@ pub fn parse(document: &Value) -> Result<Imported, ImportError> {
                 stations.push(station);
                 skipped.extend(unsupported);
             }
-            Err(e) => failures.push(e.to_string()),
+            Err(e) => failures.push(e),
         }
     }
     if stations.is_empty() {
-        return Err(ImportError::NothingUsable(first_few(&failures)));
+        // 报前三条。全列出来的话一份坏文件会刷满整个对话框。
+        failures.truncate(3);
+        return Err(ImportError::NothingUsable(failures));
     }
 
-    let mut notes = Vec::new();
-    if !failures.is_empty() {
-        notes.push(format!(
-            "{} 个席位无法导入：{}",
-            failures.len(),
-            first_few(&failures)
-        ));
-    }
-    if !skipped.is_empty() {
-        notes.push(format!(
-            "以下 vATIS 设置本客户端没有对应功能，已跳过：{}",
-            skipped.into_iter().collect::<Vec<_>>().join("、")
-        ));
-    }
     Ok(Imported {
         name: text(document, "name"),
         stations,
-        notes,
+        failures: failures.iter().map(ImportError::message).collect(),
+        skipped: UNSUPPORTED
+            .iter()
+            .filter(|(key, _)| skipped.contains(key))
+            .map(|(_, describe)| describe())
+            .collect(),
     })
-}
-
-/// 报前三条。全列出来的话一份坏文件会刷满整个对话框。
-fn first_few(problems: &[String]) -> String {
-    problems
-        .iter()
-        .take(3)
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join("；")
 }
 
 /// 一份 vATIS 配置的文本 → [`Imported`]。
@@ -442,7 +485,21 @@ mod tests {
     fn what_this_client_has_no_answer_for_is_reported_rather_than_dropped_in_silence() {
         let (_, skipped) =
             parse_station(&station(json!({"idsEndpoint": "https://ids.example/"}))).unwrap();
-        assert_eq!(skipped, ["IDS 推送端点"]);
+        assert_eq!(skipped, ["idsEndpoint"]);
+
+        // 二十个席位都带着同一项，也只提示一次。
+        let imported = parse(&json!({"stations": [
+            station(json!({"idsEndpoint": "https://ids.example/"})),
+            station(json!({"idsEndpoint": "https://ids.example/", "atisVoice": {}})),
+        ]}))
+        .unwrap();
+        assert_eq!(
+            imported.skipped,
+            [
+                Message::new("import.unsupported.ids_endpoint"),
+                Message::new("import.unsupported.atis_voice"),
+            ]
+        );
     }
 
     #[test]
@@ -461,10 +518,26 @@ mod tests {
         ]}))
         .unwrap();
         assert_eq!(imported.stations.len(), 1);
-        assert!(
-            imported.notes.iter().any(|n| n.contains("1")),
-            "{:?}",
-            imported.notes
+        assert_eq!(
+            imported.failures,
+            [Message::new("problem.vatis.no_identifier")]
+        );
+    }
+
+    /// 一个都进不来时要说出是哪几个、为什么。
+    #[test]
+    fn nothing_importable_says_why_for_the_first_few() {
+        let err = parse(&json!({"stations": [
+            {"name": "没有识别码"},
+            station(json!({"frequency": 1_000})),
+        ]}))
+        .expect_err("nothing importable");
+        assert_eq!(
+            err.message(),
+            Message::new("problem.vatis.nothing_usable").with_details([
+                Message::new("problem.vatis.no_identifier"),
+                Message::new("problem.vatis.out_of_band").with("frequency", "1000.000"),
+            ])
         );
     }
 

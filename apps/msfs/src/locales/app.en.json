@@ -3,5 +3,149 @@
     "observer_locked": "Observer mode cannot be switched while connected. Disconnect first, then change it.",
     "nothing_to_send": "Nothing to send: the message is empty, or there is neither a recipient nor a COM1 frequency",
     "offline": "Not connected yet"
+  },
+  "app": {
+    "title": "MSFS Pilot Client"
+  },
+  "status": {
+    "observing": "Observer (not on the network)",
+    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system"
+  },
+  "fsd": {
+    "connecting": "FSD connecting…",
+    "online": "FSD connected",
+    "reconnecting": "FSD reconnecting…",
+    "error": "FSD error",
+    "offline": "FSD offline (reconnect attempts used up)",
+    "stopped": "FSD stopped"
+  },
+  "voice": {
+    "none": "Not connected",
+    "online": "Voice connected",
+    "connecting": "Voice connecting…",
+    "reconnecting": "Voice reconnecting…",
+    "evicted": "This account signed in elsewhere; voice disconnected",
+    "offline": "Voice disconnected"
+  },
+  "xpdr": {
+    "standby": "Standby",
+    "ident": "IDENT",
+    "mode_c": "Mode C"
+  },
+  "login": {
+    "observer_mode": "Observer mode (shared cockpit)",
+    "observer_note": "For the right seat: voice only, without a second aircraft on the network. Each pilot needs their own account.",
+    "cid": "CAN ID",
+    "password": "Password",
+    "follow": "Callsign to follow (the captain's)",
+    "follow_tip": "The callsign of the captain's aircraft. The voice server measures your range from its position.",
+    "callsign": "Callsign CES123",
+    "aircraft": "Aircraft A320",
+    "real_name": "Name",
+    "connect": "Connect"
+  },
+  "session": {
+    "ident": "IDENT (8 s)",
+    "following": "Following",
+    "disconnect": "Disconnect"
+  },
+  "observer": {
+    "frequency": "Voice frequency",
+    "frequency_placeholder": "Leave blank to follow COM1",
+    "frequency_tip": "Observer mode only: type a frequency and voice stays on it. Clear it to follow the cockpit COM1 again.",
+    "manual": "manual",
+    "follow_com1": "following COM1",
+    "no_frequency": "No frequency yet: type one here, or keep the simulator running to follow COM1"
+  },
+  "cockpit": {
+    "transponder": "Transponder",
+    "altitude": "Altitude",
+    "groundspeed": "Ground speed",
+    "heading": "Heading",
+    "pressure_delta": "Baro correction"
+  },
+  "lists": {
+    "traffic": "Nearby traffic ({count})",
+    "controllers": "Online ATC ({count})",
+    "messages": "Text messages",
+    "no_traffic": "No other aircraft nearby",
+    "no_controllers": "No ATC online nearby",
+    "no_messages": "No text messages yet"
+  },
+  "chat": {
+    "transmitting": "Transmitting",
+    "push_to_talk": "Hold to talk",
+    "recipient": "Recipient (leave blank to send on frequency)",
+    "message": "Text message; .wallop calls a supervisor",
+    "observer_no_text": "Observers do not send or receive text messages",
+    "send": "Send"
+  },
+  "recipient": {
+    "supervisor": "Supervisors",
+    "broadcast": "Network broadcast"
+  },
+  "plan": {
+    "tab": "Flight plan",
+    "rules": "Rules",
+    "rules_i": "I IFR",
+    "rules_v": "V VFR",
+    "rules_y": "Y IFR then VFR",
+    "rules_z": "Z VFR then IFR",
+    "aircraft": "Aircraft",
+    "cruise_speed": "Cruise speed",
+    "cruise_altitude": "Cruise altitude",
+    "departure": "Departure",
+    "arrival": "Destination",
+    "alternate": "Alternate",
+    "departure_time": "Departure time (UTC)",
+    "enroute_hours": "Enroute hours",
+    "enroute_minutes": "Enroute minutes",
+    "fuel_hours": "Fuel hours",
+    "fuel_minutes": "Fuel minutes",
+    "route": "Route",
+    "remarks": "Remarks",
+    "file": "File",
+    "filed": "Filed",
+    "offline": "Not connected yet. Connect first, then file.",
+    "observer": "Observers are not on the network; the captain files the flight plan"
+  },
+  "local": {
+    "tab": "Local setup",
+    "inject": "Inject traffic into the simulator",
+    "inject_note": "When off, you have the sky to yourself; voice is unaffected",
+    "microphone": "Microphone",
+    "headset": "Headset",
+    "system_default": "System default",
+    "devices_note": "Device changes take effect immediately.",
+    "chime": "Play a chime for ATC messages",
+    "chime_all": "Chime for every message on frequency",
+    "chime_all_note": "By default only messages naming your callsign chime; private messages always do",
+    "chime_volume": "Chime volume",
+    "preview": "Preview",
+    "chime_note": "The chime plays on the headset selected above, not the system default device. If the preview is silent, the wrong device is selected.",
+    "rescan": "Rescan"
+  },
+  "hangar": {
+    "dir": "Packages folder",
+    "dir_placeholder": "Leave blank to detect automatically (reads UserCfg.opt)",
+    "loading": "Scanning the local hangar…",
+    "found": "Liveries: {liveries}, aircraft types: {types} (read from {files} aircraft.cfg files)",
+    "no_types": "Liveries found: {liveries}, but not a single type code. These are probably add-ons rather than aircraft; correct the packages folder and try again.",
+    "empty": "No aircraft models found, so all traffic falls back to the few built-in first-party types. The packages folder often lives on another drive; if so, enter that path here."
+  },
+  "ptt": {
+    "title": "Push to talk (PTT)",
+    "unresolved": "This binding is not recognised on this system; record it again",
+    "remove": "Remove",
+    "none": "No bindings yet.",
+    "capturing": "Press the key you want…",
+    "record": "Record a binding",
+    "wayland": "This system runs Wayland, which does not let ordinary programs listen for global keys, so keyboard PTT will not work. Use a joystick button instead.",
+    "no_mouse": "Mouse side buttons cannot be used for PTT on this system."
+  },
+  "simconnect": {
+    "unavailable": "SimConnect is not available on this system: the MSFS client can only reach the simulator on Windows",
+    "not_running": "Could not connect to MSFS: {detail}",
+    "lost": "Lost the connection to MSFS: {detail}"
   }
 }
