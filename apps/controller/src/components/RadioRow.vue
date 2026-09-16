@@ -6,6 +6,7 @@ interface Radio {
   xc: boolean;
   gain: number;
   selected: boolean;
+  callsign: string;
 }
 
 const props = defineProps<{
@@ -13,6 +14,10 @@ const props = defineProps<{
   receiving: boolean;
   txDenied: boolean;
   rxDenied: boolean;
+  /** 这是数据源上本人正在管的那个席位频率。**它不许删。** */
+  locked: boolean;
+  /** 此刻允不允许发射。不在席位上时 TX / XC 是灰的。 */
+  transmitAllowed: boolean;
 }>();
 
 defineEmits<{
@@ -35,6 +40,13 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
 
     <span class="w-20 font-mono tabular-nums">{{ mhz(radio.freq_khz) }}</span>
 
+    <!-- 频率上那个人是谁。只有一个数字的电台行读起来是"121.800"，
+         而管制员要找的是"ZSPD_TWR"。 -->
+    <span class="w-24 truncate font-mono text-xs opacity-70" :title="radio.callsign">
+      {{ radio.callsign }}
+    </span>
+    <span v-if="locked" class="text-xs text-sky-600" title="这是你正在管的席位频率">本席</span>
+
     <!-- RX 灯：这个频率上**有人在讲**，不是"最后一个开口的人还在讲"。 -->
     <span
       class="h-2.5 w-2.5 rounded-full"
@@ -45,8 +57,19 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
     <!-- 三个开关。**耦合规则在核心库里**，这里只发意图：
          关 RX 会连带清掉 TX/XC，开 TX 会强制开 RX，开 XC 会强制开 RX+TX。
          前端不要自己实现一遍，否则同一条规则就有了两份。 -->
-    <label v-for="s in (['rx', 'tx', 'xc'] as const)" :key="s" class="flex items-center gap-1 uppercase">
-      <input type="checkbox" :checked="radio[s]" @change="$emit('switch', s, ($event.target as HTMLInputElement).checked)" />
+    <label
+      v-for="s in (['rx', 'tx', 'xc'] as const)"
+      :key="s"
+      class="flex items-center gap-1 uppercase"
+      :class="s !== 'rx' && !transmitAllowed ? 'opacity-40' : ''"
+      :title="s !== 'rx' && !transmitAllowed ? '你此刻不在任何席位上，不能发射' : ''"
+    >
+      <input
+        type="checkbox"
+        :checked="radio[s]"
+        :disabled="s !== 'rx' && !transmitAllowed"
+        @change="$emit('switch', s, ($event.target as HTMLInputElement).checked)"
+      />
       {{ s }}
     </label>
 
@@ -65,6 +88,15 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
     <span v-if="txDenied" class="text-xs text-amber-600" title="服务端没有给这个频率的发射权">发射被拒</span>
     <span v-if="rxDenied" class="text-xs text-amber-600" title="服务端没有给这个频率的接收">接收被拒</span>
 
-    <button class="ml-auto text-xs opacity-60 hover:opacity-100" @click="$emit('remove')">移除</button>
+    <!-- 本席频率删不掉：删掉它的人还坐在席位上，而飞行员在那个频率上叫他
+         听不见，两边都以为对方在。 -->
+    <button
+      class="ml-auto text-xs opacity-60 hover:opacity-100 disabled:opacity-25 disabled:hover:opacity-25"
+      :disabled="locked"
+      :title="locked ? '这是你正在管的席位频率，先下席位再删' : ''"
+      @click="$emit('remove')"
+    >
+      移除
+    </button>
   </div>
 </template>

@@ -34,6 +34,12 @@ pub struct Radio {
     /// 一定会想把它们连起来。判错的代价很具体：恰好在"双订阅 + 交叉耦合"这个
     /// 情况下，音频会显示在错误的电台行上。
     pub selected: bool,
+    /// 这个频率上那个席位的呼号。查不到就是空的。
+    ///
+    /// `#[serde(default)]`：老的设置文件里没有这一项，缺了它整份电台栈就读不
+    /// 回来——而读不回来的表现是"一升级，我的频率全没了"。
+    #[serde(default)]
+    pub callsign: String,
 }
 
 /// 一次全量声明，连同客户端自己夹掉的部分。
@@ -50,9 +56,27 @@ pub struct Declaration {
 }
 
 /// 一组频率。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RadioStack {
     radios: Vec<Radio>,
+    /// 数据源上本人正在管的那个席位频率。**它不许删。**
+    locked_khz: Option<u32>,
+    /// 此刻允不允许发射。
+    ///
+    /// **默认放行。** 飞行员端（xpc / msfs）没有"在不在席位上"这件事，把默认值
+    /// 设成 `false` 会让他们一句话也说不出去；只有管制端会按数据源上的席位把它
+    /// 关掉。所以 [`Default`] 是手写的，不是 derive 的。
+    transmit_allowed: bool,
+}
+
+impl Default for RadioStack {
+    fn default() -> Self {
+        Self {
+            radios: Vec::new(),
+            locked_khz: None,
+            transmit_allowed: true,
+        }
+    }
 }
 
 impl RadioStack {
@@ -62,7 +86,18 @@ impl RadioStack {
 
     /// 加一个频率。已存在则什么也不做。新加的频率默认接收。
     pub fn add(&mut self, freq_khz: u32) {
-        if self.radios.iter().any(|r| r.freq_khz == freq_khz) {
+        self.add_named(freq_khz, "");
+    }
+
+    /// 加一个频率，并记下它是谁的席位。
+    ///
+    /// 已经在栈里的频率**补呼号而不是跳过**：频率常常先被手工加进来，过一轮
+    /// 数据源才知道那上面是谁。
+    pub fn add_named(&mut self, freq_khz: u32, callsign: &str) {
+        if let Some(r) = self.get_mut(freq_khz) {
+            if !callsign.is_empty() {
+                r.callsign = callsign.to_string();
+            }
             return;
         }
         let selected = self.radios.is_empty();
@@ -73,10 +108,63 @@ impl RadioStack {
             xc: false,
             gain: 1.0,
             selected,
+            callsign: callsign.to_string(),
         });
     }
 
-    pub fn remove(&mut self, freq_khz: u32) {
+    /// 把"正在管的那个频率"标出来。`None` = 此刻不在管任何席位。
+    pub fn set_locked(&mut self, freq_khz: Option<u32>) {
+        self.locked_khz = freq_khz;
+    }
+
+    /// 这个频率是不是本人正在管的那个席位。
+    pub fn is_locked(&self, freq_khz: u32) -> bool {
+        self.locked_khz == Some(freq_khz)
+    }
+
+    /// 允不允许发射。界面靠它把 TX / XC 画灰。
+    pub fn transmit_allowed(&self) -> bool {
+        self.transmit_allowed
+    }
+
+    /// 开关发射权，返回**有没有真的丢掉过什么**。
+    ///
+    /// 关掉时把每个电台的 TX / XC 都清掉：只把按钮画灰是不够的，一个下了席位却
+    /// 还标着 TX 的电台会在下一次声明里照样把 TX 发上去。返回值是给上层说话用的
+    /// ——"你已经不在席位上了，发射已关闭"这句话只有真的关掉了什么才该说。
+    ///
+    /// 重新打开时**不恢复**任何 TX：恢复的话，一个人在两个席位之间换班会突然在
+    /// 上一个席位的频率上具备发射能力，而他并没有按过任何东西。
+    pub fn set_transmit_allowed(&mut self, allowed: bool) -> bool {
+        self.transmit_allowed = allowed;
+        if allowed {
+            return false;
+        }
+        let mut dropped = false;
+        for r in &mut self.radios {
+            if r.tx || r.xc {
+                dropped = true;
+            }
+            r.tx = false;
+            r.xc = false;
+        }
+        dropped
+    }
+
+    /// 删一个频率，返回删掉了没有。
+    ///
+    /// **正在管的那个席位频率删不掉**：删掉它的人还坐在席位上，而飞行员在那个
+    /// 频率上叫他他听不见，两边都以为对方在。界面上那个按钮本来就该是灰的，
+    /// 所以这里只记一条日志，不当成错误往上报。
+    pub fn remove(&mut self, freq_khz: u32) -> bool {
+        if self.is_locked(freq_khz) {
+            tracing::info!(
+                freq_khz,
+                "this is the frequency of the position being staffed, refusing to remove it"
+            );
+            return false;
+        }
+        let before = self.radios.len();
         self.radios.retain(|r| r.freq_khz != freq_khz);
         // 移掉的正好是选中的那一行时，把标记交给第一个。
         if !self.radios.iter().any(|r| r.selected) {
@@ -84,6 +172,7 @@ impl RadioStack {
                 first.selected = true;
             }
         }
+        self.radios.len() != before
     }
 
     /// 关掉 RX 同时清掉 TX 和 XC：不接收，那么发送和耦合都没有意义。
@@ -103,6 +192,13 @@ impl RadioStack {
     /// 都能发（服务端的 `normaliseXC` 拿**授权后**的 TX 集合当依据），
     /// 一个关了 TX 却还标着 XC 的电台只会产出一对必然被拒的耦合。
     pub fn set_tx(&mut self, freq_khz: u32, on: bool) {
+        if on && !self.transmit_allowed {
+            tracing::info!(
+                freq_khz,
+                "not staffing a position on the datafeed, refusing to turn TX on"
+            );
+            return;
+        }
         if let Some(r) = self.get_mut(freq_khz) {
             r.tx = on;
             if on {
@@ -115,6 +211,13 @@ impl RadioStack {
 
     /// 打开 XC 强制打开 RX 和 TX。
     pub fn set_xc(&mut self, freq_khz: u32, on: bool) {
+        if on && !self.transmit_allowed {
+            tracing::info!(
+                freq_khz,
+                "not staffing a position on the datafeed, refusing to turn XC on"
+            );
+            return;
+        }
         if let Some(r) = self.get_mut(freq_khz) {
             r.xc = on;
             if on {
@@ -217,6 +320,81 @@ mod tests {
             .iter()
             .find(|r| r.freq_khz == freq)
             .expect("radio present")
+    }
+
+    /// **正在管的那个席位频率不许删。**
+    ///
+    /// 删掉它的人还坐在席位上，而飞行员在那个频率上叫他，他听不见——两边都
+    /// 以为对方在。按钮该画灰，但状态本身也得拦一道：热键、脚本、以及下一个
+    /// 接线的人都够得着这个方法。
+    #[test]
+    fn the_frequency_of_the_position_i_am_staffing_cannot_be_removed() {
+        let mut s = stack_with(&[118_350, 121_800]);
+        s.set_locked(Some(118_350));
+
+        assert!(!s.remove(118_350));
+        assert_eq!(s.radios().len(), 2);
+        // 别的照删不误。
+        assert!(s.remove(121_800));
+        assert_eq!(s.radios().len(), 1);
+    }
+
+    /// **不在席位上就不许发射。**
+    ///
+    /// 只把按钮画灰是不够的：状态本身要真的关掉，否则一个下了席位却还标着 TX
+    /// 的电台，在下一次声明里照样把 TX 发上去。
+    #[test]
+    fn off_duty_clears_every_transmit_and_refuses_new_ones() {
+        let mut s = stack_with(&[118_350, 121_800]);
+        s.set_tx(118_350, true);
+        s.set_xc(121_800, true);
+
+        assert!(s.set_transmit_allowed(false));
+
+        assert!(!radio(&s, 118_350).tx);
+        assert!(!radio(&s, 121_800).tx);
+        assert!(!radio(&s, 121_800).xc);
+        // 关着的时候再想打开也不行。
+        s.set_tx(118_350, true);
+        s.set_xc(118_350, true);
+        assert!(!radio(&s, 118_350).tx);
+        assert!(!radio(&s, 118_350).xc);
+        // RX 不受影响：下了席位还是可以听。
+        assert!(radio(&s, 118_350).rx);
+    }
+
+    /// 重新上席位**不自动把 TX 恢复回来**。
+    ///
+    /// 恢复的话，一个人在两个席位之间换班时会突然在上一个席位的频率上具备发射
+    /// 能力，而他并没有按过任何东西。该开哪一个由数据源上的席位频率决定。
+    #[test]
+    fn coming_back_on_duty_does_not_silently_restore_transmit() {
+        let mut s = stack_with(&[118_350]);
+        s.set_tx(118_350, true);
+        s.set_transmit_allowed(false);
+
+        // 第二次关是空操作：没有东西可丢了。
+        assert!(!s.set_transmit_allowed(false));
+        s.set_transmit_allowed(true);
+
+        assert!(!radio(&s, 118_350).tx);
+        s.set_tx(118_350, true);
+        assert!(radio(&s, 118_350).tx);
+    }
+
+    /// 频率上那个人是谁，电台行上要认得出来。
+    ///
+    /// 只有一个数字的电台行读起来是"121.800"，而管制员要找的是"ZSPD_TWR"。
+    #[test]
+    fn a_radio_remembers_whose_frequency_it_is() {
+        let mut s = RadioStack::new();
+        s.add_named(118_350, "ZSPD_TWR");
+        assert_eq!(radio(&s, 118_350).callsign, "ZSPD_TWR");
+
+        // 已经在栈里的频率后来才查到呼号：补上，而不是当成"已存在"什么都不做。
+        s.add(121_800);
+        s.add_named(121_800, "ZSPD_GND");
+        assert_eq!(radio(&s, 121_800).callsign, "ZSPD_GND");
     }
 
     // 以下三条耦合规则抄自 TrackAudio 的 radio.tsx，

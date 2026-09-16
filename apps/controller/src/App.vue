@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import OnlineList from "./components/OnlineList.vue";
 
 type LinkState = "Connecting" | "Online" | "Reconnecting" | "Offline" | "Evicted";
 type Ended = "Offline" | "Evicted" | { Refused: string | { Other: string } };
@@ -15,6 +16,32 @@ interface Radio {
   xc: boolean;
   gain: number;
   selected: boolean;
+  /** 这个频率上那个席位的呼号。查不到就是空的。 */
+  callsign: string;
+}
+
+/** 一个在线席位，来自 can-fsd 的 datafeed。 */
+interface Position {
+  cid: string;
+  callsign: string;
+  freq_khz: number;
+  facility: number;
+}
+
+/**
+ * 数据源那一份快照。
+ *
+ * **语音服务端不知道谁在管哪个席位**，那是 FSD 的事实。所以"我在管什么"
+ * 只能从 datafeed 查，而查不到（`reachable === false`）和"确实不在管制"
+ * 是两件不同的事。
+ */
+interface FeedView {
+  duty: { callsign: string; freq_khz: number | null; dropped_tx: boolean };
+  online: Position[];
+  roster: Record<string, string>;
+  /** 此刻允不允许发射。台面自己的状态，界面照着画灰。 */
+  transmit_allowed: boolean;
+  reachable: boolean;
 }
 
 interface Snapshot {
@@ -42,6 +69,7 @@ const error = ref("");
 const freqInput = ref("");
 const radios = ref<Radio[]>([]);
 const snap = ref<Snapshot | null>(null);
+const feed = ref<FeedView | null>(null);
 const pressed = ref(false);
 const showSettings = ref(false);
 
@@ -52,6 +80,7 @@ async function refresh() {
   snap.value = await invoke<Snapshot>("snapshot");
   radios.value = await invoke<Radio[]>("radios");
   pressed.value = await invoke<boolean>("ptt_pressed");
+  feed.value = await invoke<FeedView>("feed");
 }
 
 onMounted(async () => {
@@ -135,9 +164,20 @@ async function addFrequency() {
   }
   error.value = "";
   freqInput.value = "";
-  await invoke("add_frequency", { freqKhz: khz });
+  await invoke("add_frequency", { freqKhz: khz, callsign: null });
   await refresh();
 }
+
+/** 从在线一览点过来的，把呼号一起带上。 */
+const addOnline = (khz: number, callsign: string) =>
+  act("add_frequency", { freqKhz: khz, callsign });
+
+/** 在席位上没有。**查不到不算不在**——那两句话要分开说。 */
+const onDuty = computed(() => !!feed.value?.duty.callsign);
+const tuned = computed(() => radios.value.map((r) => r.freq_khz));
+const locked = (khz: number) => feed.value?.duty.freq_khz === khz;
+/** 画灰与否照着台面的真相，不自己推：推出来的那份迟早和它对不上。 */
+const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
 
 function isReceiving(khz: number): boolean {
   return (snap.value?.receiving?.[String(khz)]?.length ?? 0) > 0;
@@ -225,6 +265,30 @@ async function act(name: string, args: Record<string, unknown>) {
       这些交叉耦合没有生效：{{ deniedPairs.join("、") }}
     </p>
 
+    <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->
+    <p
+      v-if="connected && !onDuty"
+      class="rounded border px-3 py-2 text-xs"
+      :class="
+        feed?.reachable
+          ? 'border-amber-400 text-amber-700'
+          : 'border-neutral-400 opacity-70'
+      "
+    >
+      <template v-if="feed?.reachable">
+        你此刻不在任何席位上（数据源里没有你），发射已关闭，但还听得见。
+        在 EuroScope 上线之后，这里会在一分钟内跟上。
+        <span v-if="feed?.duty.dropped_tx">台面上原来开着的发射已经全部关掉。</span>
+      </template>
+      <template v-else>还没查到数据源，席位状态未知——下一轮（一分钟内）会再试。</template>
+    </p>
+    <p v-else-if="connected" class="text-xs text-sky-700">
+      在席位 {{ feed?.duty.callsign }}
+      <span v-if="feed?.duty.freq_khz" class="font-mono opacity-70">
+        · {{ (feed.duty.freq_khz / 1000).toFixed(3) }}
+      </span>
+    </p>
+
     <section class="flex items-center gap-2">
       <input
         v-model="freqInput"
@@ -251,11 +315,19 @@ async function act(name: string, args: Record<string, unknown>) {
         @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
         @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
         @select="act('set_selected', { freqKhz: r.freq_khz })"
+        :locked="locked(r.freq_khz)"
+        :transmit-allowed="mayTransmit"
         @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
       />
       <p v-if="!radios.length" class="py-6 text-center text-xs opacity-50">
         还没有频率。在上面填一个，例如 121.800
       </p>
+
+      <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
+      <div v-if="connected" class="mt-2 flex flex-col gap-1 border-t pt-2">
+        <p class="text-xs opacity-60">在线席位</p>
+        <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
+      </div>
     </section>
 
     <footer class="flex items-center justify-between gap-3 border-t pt-3 text-xs">

@@ -12,6 +12,7 @@ members = [
     "crates/can-voice-update",
     "crates/can-voice-log",
     "crates/can-voice-app",
+    "crates/can-voice-datafeed",
 ]
 
 # Tauri 应用不进 workspace。

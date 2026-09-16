@@ -100,12 +100,34 @@ impl Bridge {
         }
     }
 
-    /// 改台面。**每次都重发一份全量声明**——没有"这次改了哪一个"的增量路径。
-    pub fn with_stack(&self, f: impl FnOnce(&mut RadioStack)) {
-        if let Ok(mut s) = self.inner.stack.lock() {
-            f(&mut s);
-        }
+    /// 改台面，并把闭包的答案带出来。
+    ///
+    /// **每次都重发一份全量声明**——没有"这次改了哪一个"的增量路径。
+    ///
+    /// 带返回值是因为有些改动会被台面自己拒绝（正在管的席位频率删不掉），
+    /// 而调用方得知道到底删没删掉。中毒的锁照用：台面是纯数据，没有"改到一半"
+    /// 的不变量，而放弃它意味着从此一个开关都动不了。
+    pub fn with_stack<R>(&self, f: impl FnOnce(&mut RadioStack) -> R) -> R {
+        let answer = {
+            let mut s = match self.inner.stack.lock() {
+                Ok(s) => s,
+                Err(p) => p.into_inner(),
+            };
+            f(&mut s)
+        };
         self.inner.push_declaration();
+        answer
+    }
+
+    /// 此刻允不允许发射。**只读，不触发重新声明。**
+    ///
+    /// 界面每几百毫秒读一次这个值来决定 TX / XC 画不画灰；走 [`Bridge::with_stack`]
+    /// 的话每一次读都会顺手推一份全量声明出去。
+    pub fn transmit_allowed(&self) -> bool {
+        match self.inner.stack.lock() {
+            Ok(s) => s.transmit_allowed(),
+            Err(p) => p.into_inner().transmit_allowed(),
+        }
     }
 
     /// 当前台面。

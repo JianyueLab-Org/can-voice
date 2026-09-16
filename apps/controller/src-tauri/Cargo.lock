@@ -104,6 +104,7 @@ version = "27.0.3"
 dependencies = [
  "can-voice-app",
  "can-voice-client",
+ "can-voice-datafeed",
  "can-voice-log",
  "can-voice-ptt",
  "can-voice-token",
@@ -356,6 +357,16 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-datafeed"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
