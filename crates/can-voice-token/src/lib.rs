@@ -17,6 +17,15 @@ use can_voice_client::{Config, VoiceClient};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// **凭据不对**——和网络不通分开的理由是：要用户做的事完全不同。
+    /// 两者以前是同一句 `could not reach can-api`，于是一个打错密码的人
+    /// 被送去查网络。
+    #[error("can-api rejected the CAN ID or password")]
+    Credentials,
+    /// can-api 答了，但答的不是成功。状态码原样带出来：这一类要看的是它，
+    /// 而把它归到密码上会让人去改一个本来对的密码。
+    #[error("can-api refused the token exchange: HTTP {0}")]
+    Rejected(reqwest::StatusCode),
     #[error("could not reach can-api: {0}")]
     Http(#[from] reqwest::Error),
     #[error("voice: {0}")]
@@ -58,16 +67,24 @@ impl TokenSource {
     /// **每次连接都现换。** can-api 签的是 60 秒的票，攒着没有意义——而票的短寿命
     /// 就是这套设计里唯一的吊销机制。
     pub async fn fetch(&self) -> Result<String, Error> {
-        let reply: Reply = self
+        let resp = self
             .http
             .post(&self.endpoint)
             .json(&serde_json::json!({ "cid": self.cid, "password": self.password }))
             .send()
-            .await?
-            .error_for_status()?
-            .json()
             .await?;
-        Ok(reply.token)
+        // 状态码在解 JSON **之前**分类：`error_for_status()` 把 401 和一个连不上
+        // 的 socket 包成同一个 `reqwest::Error`，而那正是要分开的两件事。
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(match status {
+                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+                    Error::Credentials
+                }
+                other => Error::Rejected(other),
+            });
+        }
+        Ok(resp.json::<Reply>().await?.token)
     }
 }
 
@@ -189,6 +206,67 @@ mod tests {
     fn an_ordinary_connection_failure_is_not_a_token_problem() {
         let e = ClientError::Conn(ConnError::Io(std::io::Error::other("refused")));
         assert!(!should_renew(&e, false));
+    }
+
+    // ——— 换票失败要说对是哪一种失败 ———
+
+    /// 起一个只答一次的 HTTP 服务，返回它的 origin。
+    ///
+    /// 手写而不是拉一个 mock 库：要断言的是"状态码归到哪一类错误"，
+    /// 而那只需要一条真的 HTTP 响应。
+    async fn serve_once(status_line: &'static str, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept");
+            // 请求体不关心，读一轮把它从缓冲里拿走就行。
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 {status_line}\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// **密码打错不是网络不通。** 两者以前是同一句 `could not reach can-api`,
+    /// 于是一个打错密码的人被送去查网络。
+    #[tokio::test]
+    async fn wrong_credentials_are_not_reported_as_a_network_problem() {
+        let origin = serve_once("401 Unauthorized", r#"{"error":"bad credentials"}"#).await;
+        let src = TokenSource::new(&origin, "1001", "wrong", reqwest::Client::new());
+
+        let err = src.fetch().await.expect_err("401 must not be a success");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains("could not reach"),
+            "401 报成了网络问题: {msg}"
+        );
+        assert!(
+            msg.contains("password"),
+            "401 该说到密码: {msg}"
+        );
+    }
+
+    /// 而 can-api 自己坏了要看得出来是它坏了，不要归到密码上。
+    #[tokio::test]
+    async fn a_server_error_is_not_blamed_on_the_password() {
+        let origin = serve_once("500 Internal Server Error", "{}").await;
+        let src = TokenSource::new(&origin, "1001", "right", reqwest::Client::new());
+
+        let err = src.fetch().await.expect_err("500 must not be a success");
+        let msg = err.to_string();
+
+        assert!(!msg.contains("password"), "500 归到了密码上: {msg}");
+        assert!(msg.contains("500"), "500 该把状态码说出来: {msg}");
     }
 
     // ——— 没有一条塞票进来的路 ———

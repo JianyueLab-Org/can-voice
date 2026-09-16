@@ -26,6 +26,13 @@ pub struct Config {
     pub client_id: String,
     /// 观察员模式跟随的呼号；不是观察员时留空。
     pub follow: String,
+    /// 席位标记：同一个账号下的哪一路。**整队共用一个 CID 时必须填。**
+    ///
+    /// 顶号按 `(cid, station)` 判。四个桌面客户端留空——它们一人一个账号，
+    /// 留空时的行为和以前完全一样：同一个成员号第二次登录顶掉第一条。
+    /// 服务端 ATIS 机队不能留空：整队一个 `ATIS_CID`，不带席位标记的话
+    /// 每一路都在顶掉另一路，而两端日志都写着"成功"。
+    pub station: String,
     pub input_device: Option<String>,
     pub output_device: Option<String>,
     /// 要不要打开声卡。
@@ -121,7 +128,11 @@ pub enum Event {
         rtt_ms: u32,
         sent: u64,
         received: u64,
+        /// QUIC 自己认定丢掉的包。**不是包头解不开的那些**——见 `unparsable`。
         lost: u64,
+        /// 包头解不开的数据报。这是协议漂移，不是网络丢包，
+        /// 混进 `lost` 会让后者在正常运行里恒为 0。
+        unparsable: u64,
     },
 }
 
@@ -151,6 +162,11 @@ pub(crate) enum Command {
     },
     /// 直接注入 48 kHz 单声道 PCM，绕过麦克风。
     PushAudio(Vec<i16>),
+    /// 换录音 / 播放设备。
+    Devices {
+        input: Option<String>,
+        output: Option<String>,
+    },
     Shutdown,
 }
 
@@ -171,9 +187,12 @@ impl VoiceClient {
         let link = conn::connect(
             addr,
             &cfg.server_name,
-            &cfg.token,
-            &cfg.client_id,
-            &cfg.follow,
+            conn::Identity {
+                token: &cfg.token,
+                client_id: &cfg.client_id,
+                follow: &cfg.follow,
+                station: &cfg.station,
+            },
             cfg.trust_roots(),
         )
         .await?;
@@ -211,6 +230,14 @@ impl VoiceClient {
     /// ——序号、首帧尾帧、扇出到每个 TX 频率，走的是同一条路。
     pub fn push_audio(&self, pcm48: &[i16]) {
         let _ = self.commands.send(Command::PushAudio(pcm48.to_vec()));
+    }
+
+    /// 换录音 / 播放设备。`None` 是跟系统默认。
+    ///
+    /// **立刻生效**，不必重连——重建在音频线程上做，因为 `cpal::Stream`
+    /// 是 `!Send`。设备没变时是空操作：重建会让声音断一下。
+    pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
+        let _ = self.commands.send(Command::Devices { input, output });
     }
 
     /// 订阅事件流。
@@ -380,6 +407,7 @@ mod tests {
             sent: 1000,
             received: 995,
             lost: 5,
+            unparsable: 0,
         };
         match e {
             Event::Health {
@@ -387,6 +415,7 @@ mod tests {
                 sent,
                 received,
                 lost,
+                ..
             } => {
                 assert_eq!(rtt_ms, 42);
                 assert_eq!(sent - received, lost);
@@ -408,6 +437,7 @@ mod tests {
             token: "t".into(),
             client_id: "test/0".into(),
             follow: String::new(),
+            station: String::new(),
             input_device: None,
             output_device: None,
             audio_devices: false,
@@ -429,6 +459,7 @@ mod tests {
             token: "t".into(),
             client_id: "test/0".into(),
             follow: "bad callsign".into(),
+            station: String::new(),
             input_device: None,
             output_device: None,
             audio_devices: false,
@@ -437,6 +468,31 @@ mod tests {
         let err = VoiceClient::connect(cfg)
             .await
             .expect_err("must reject the callsign");
+        assert!(
+            matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
+            "got {err:?}"
+        );
+    }
+
+    /// `station` 走的是同一道闸。服务端对不合规则的席位标记只回一条 `refused`，
+    /// 而通播机队是无人值守的——它会照着那条"被拒绝"一直重连下去。
+    #[tokio::test]
+    async fn an_invalid_station_fails_before_any_network_traffic() {
+        let cfg = Config {
+            server: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            token: "t".into(),
+            client_id: "test/0".into(),
+            follow: String::new(),
+            station: "not a callsign".into(),
+            input_device: None,
+            output_device: None,
+            audio_devices: false,
+            extra_roots: Vec::new(),
+        };
+        let err = VoiceClient::connect(cfg)
+            .await
+            .expect_err("must reject the station");
         assert!(
             matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
             "got {err:?}"

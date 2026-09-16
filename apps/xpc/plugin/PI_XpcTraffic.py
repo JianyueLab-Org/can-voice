@@ -28,6 +28,10 @@ except ImportError:      # 在 X-Plane 之外被导入（比如跑测试）时�
     xp = None
 
 PLUGIN_PORT = 49900
+# 插件 → 客户端。客户端靠它知道插件到底装没装、协议对不对得上。
+CLIENT_PORT = 49901
+# 多久回报一次状态。客户端拿"多久没听到"判断插件还在不在。
+STATUS_EVERY = 1.0
 # v2：分片按字节切、负载 base64。和 bridge.py 保持一致（有测试钉着）。
 PROTOCOL_VERSION = 2
 
@@ -143,6 +147,7 @@ class PythonInterface:
         self.reassembler = Reassembler()
         self.aircraft = {}          # 呼号 -> RenderedAircraft
         self.last_message = 0.0
+        self.last_status = 0.0
         self.tcas_written = 0       # 上一帧写了多少个 TCAS 槽位
         self.have_planes = False
         self.accessors = []
@@ -286,6 +291,7 @@ class PythonInterface:
     def _pump(self):
         message = self._receive_latest()
         now = xp.getElapsedTime()
+        self._report_status(now)
 
         if message is not None:
             self.last_message = now
@@ -294,6 +300,27 @@ class PythonInterface:
             # 客户端断了，把天上清空，别留一堆冻住的飞机
             self.last_message = 0.0
             self._clear_all()
+
+    def _report_status(self, now):
+        """告诉客户端"我在，我的协议版本是几"。
+
+        没有这一条的话，没装插件的人看到的是"能连能说、天上是空的"，而客户端
+        界面上 X-Plane 那盏灯还是绿的——它代表 UDP 数据源，不代表插件。
+        协议版本不一致时插件会**静默丢弃每一帧**，那种故障两边日志都干净，
+        所以版本要跟着报回去。
+        """
+        if now - self.last_status < STATUS_EVERY:
+            return
+        self.last_status = now
+        packet = json.dumps(
+            {"type": "status", "v": PROTOCOL_VERSION, "drawn": len(self.aircraft)}
+        ).encode()
+        try:
+            self.socket.sendto(packet, ("127.0.0.1", CLIENT_PORT))
+        except OSError:
+            # 客户端没在听是正常的（它可能还没起）。这条不值得记日志：
+            # 每秒一次的 OSError 会把 X-Plane 的日志刷满。
+            pass
 
     def _receive_latest(self):
         """把收到的包都读干净，只保留最后一条完整消息。

@@ -2,8 +2,12 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import TrafficList from "./components/TrafficList.vue";
+import UpdateBanner from "./components/UpdateBanner.vue";
+import ChatLog from "./components/ChatLog.vue";
+import ControllerList from "./components/ControllerList.vue";
+import PilotPanel from "./components/PilotPanel.vue";
 import type { View } from "./types";
-import { mhz, xpdrText } from "./types";
+import { mhz, xpdrText, voiceText } from "./types";
 
 const cid = ref("");
 const password = ref("");
@@ -29,6 +33,12 @@ async function refresh() {
 }
 
 onMounted(async () => {
+  // 上次用的那一组预填。密码不存：它换的是一张短寿命的票。
+  const saved = await invoke<import("./types").Settings>("settings");
+  cid.value = saved.cid;
+  callsign.value = saved.callsign;
+  aircraft.value = saved.aircraft;
+  realName.value = saved.real_name;
   mouseSupported.value = await invoke<boolean>("mouse_ptt_supported");
   await refresh();
   // 轮询而不是订阅：事件流是广播，窗口重开之前发生的事收不到。
@@ -65,6 +75,11 @@ const connect = () =>
 const disconnect = () => guard(() => invoke("disconnect"));
 const ident = () => guard(() => invoke("ident"));
 
+/** 点席位或者点发件人就把他填进收件人框——管制员叫你的时候，回话要快。 */
+function setRecipient(callsign: string) {
+  recipient.value = callsign;
+}
+
 const send = () =>
   guard(async () => {
     if (!message.value.trim()) return;
@@ -90,6 +105,9 @@ const send = () =>
         MSFS
       </span>
       <span v-if="online" class="text-xs opacity-70">{{ view?.link }}</span>
+      <!-- 语音是另一条链路。不显示的话，被顶号或者声卡打不开时飞行员戴着耳机
+           等人回话，而两边都不知道他听不见。 -->
+      <span class="text-xs opacity-70">· {{ voiceText(view?.voice) }}</span>
       <!-- 连不上要说得出原因。非 Windows 上就是"这个系统没有 SimConnect"——
            让人对着一个永远灰着的灯猜，是这个项目反复要躲开的那类故障。 -->
       <span v-if="!view?.sim_connected && view?.sim_problem" class="text-xs text-amber-600">
@@ -99,6 +117,8 @@ const send = () =>
         本系统不支持鼠标侧键作 PTT
       </span>
     </header>
+
+    <UpdateBanner />
 
     <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ error }}
@@ -151,9 +171,26 @@ const send = () =>
       </div>
     </section>
 
-    <section class="flex min-h-0 flex-1 flex-col gap-2">
-      <p class="text-xs opacity-60">附近的飞机（{{ view?.traffic.length ?? 0 }}）</p>
-      <TrafficList :traffic="view?.traffic ?? []" />
+    <PilotPanel :cid="cid" />
+
+    <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
+         飞行员看不见，而他会以为对方没理他。 -->
+    <section class="grid min-h-0 flex-1 gap-3 md:grid-cols-2">
+      <div class="flex min-h-0 flex-col gap-2">
+        <p class="text-xs opacity-60">附近的飞机（{{ view?.traffic.length ?? 0 }}）</p>
+        <TrafficList :traffic="view?.traffic ?? []" />
+      </div>
+      <div class="flex min-h-0 flex-col gap-2">
+        <p class="text-xs opacity-60">在线席位（{{ view?.controllers.length ?? 0 }}）</p>
+        <!-- 点一行就把那个席位填进收件人框。 -->
+        <ControllerList
+          class="max-h-28 shrink-0"
+          :controllers="view?.controllers ?? []"
+          @reply="setRecipient"
+        />
+        <p class="text-xs opacity-60">文字消息</p>
+        <ChatLog :messages="view?.messages ?? []" @reply="setRecipient" />
+      </div>
     </section>
 
     <footer class="flex items-center gap-2 border-t pt-3">

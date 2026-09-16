@@ -20,6 +20,32 @@ pub fn mouse_supported() -> bool {
     !cfg!(target_os = "macos")
 }
 
+/// 本平台能不能全局监听键盘。
+///
+/// **Wayland 下不能。** 它不允许一个普通程序监听全局按键，而 rdev 走的是 Xlib。
+/// 后果和 macOS 上的鼠标侧键一模一样：绑好了、界面显示正常、按下去从来不响。
+/// README 和 release notes 都写了这条限制，程序里一直没写——而用户读的是程序。
+pub fn keyboard_supported() -> bool {
+    keyboard_supported_on(
+        cfg!(target_os = "linux"),
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+    )
+}
+
+/// [`keyboard_supported`] 的纯函数部分。
+///
+/// 两个变量都要看：只看 `XDG_SESSION_TYPE` 的话，没设它的合成器漏网；
+/// 只看 `WAYLAND_DISPLAY` 的话，一个从 X11 会话里启动的 Wayland 应用会误判。
+fn keyboard_supported_on(linux: bool, wayland_display: Option<&str>, session_type: Option<&str>) -> bool {
+    if !linux {
+        return true;
+    }
+    let wayland = wayland_display.is_some_and(|v| !v.is_empty())
+        || session_type.is_some_and(|v| v.eq_ignore_ascii_case("wayland"));
+    !wayland
+}
+
 /// 可以绑定的鼠标按钮。**只有侧键。**
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -229,6 +255,30 @@ mod tests {
 
     /// `token()` 是给界面拼文案用的**短标识**，不是文案本身。
     /// 措辞由上层的 i18n 决定——这个 crate 一个界面字符串都不产生。
+    /// **Wayland 下键盘 PTT 不响，界面必须先说出来。**
+    #[test]
+    fn a_wayland_session_cannot_watch_the_keyboard() {
+        assert!(!keyboard_supported_on(true, Some("wayland-0"), None));
+        assert!(!keyboard_supported_on(true, None, Some("wayland")));
+        // 大小写不该决定一个人能不能说话。
+        assert!(!keyboard_supported_on(true, None, Some("Wayland")));
+    }
+
+    /// X11 可以，其余平台也可以——Wayland 是 Linux 独有的问题。
+    #[test]
+    fn x11_and_the_other_platforms_can() {
+        assert!(keyboard_supported_on(true, None, Some("x11")));
+        assert!(keyboard_supported_on(true, None, None));
+        assert!(keyboard_supported_on(false, Some("wayland-0"), Some("wayland")));
+    }
+
+    /// 空串等于没设。**照 `is_some` 判会把它当成 Wayland**，
+    /// 于是一个 X11 用户被告知键盘 PTT 用不了。
+    #[test]
+    fn an_empty_wayland_display_is_not_a_wayland_session() {
+        assert!(keyboard_supported_on(true, Some(""), None));
+    }
+
     #[test]
     fn tokens_are_short_and_stable() {
         assert_eq!(Binding::key("KeyV").token(), "V");

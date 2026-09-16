@@ -29,6 +29,33 @@ const TICK: Duration = Duration::from_millis(20);
 /// PING 的间隔。
 const PING_EVERY: Duration = Duration::from_secs(5);
 
+/// 一条连接上的收发记账。
+///
+/// 抽出来是为了让"哪个数字进哪个字段"这件事可测——它在 `select!` 里是不可测的，
+/// 而它恰恰错过一次：`lost` 填的是 `unparsable`。
+#[derive(Debug, Default, Clone, Copy)]
+struct Counters {
+    /// 交给 QUIC 的数据报数。
+    sent: u64,
+    /// 收下并且包头解开了的数据报数。
+    received: u64,
+    /// 包头解不开的数据报数。**这不是丢包**，是协议漂移。
+    unparsable: u64,
+}
+
+impl Counters {
+    /// 组装一条 `Health`。`lost_packets` 是 QUIC 自己的丢包计数。
+    fn health(&self, rtt_ms: u32, lost_packets: u64) -> Event {
+        Event::Health {
+            rtt_ms,
+            sent: self.sent,
+            received: self.received,
+            lost: lost_packets,
+            unparsable: self.unparsable,
+        }
+    }
+}
+
 /// 这一条连接是怎么结束的。
 enum Outcome {
     /// 上层要求关闭。
@@ -165,9 +192,12 @@ async fn dial(cfg: &Config) -> Result<Link, conn::Error> {
     conn::connect(
         addr,
         &cfg.server_name,
-        &cfg.token,
-        &cfg.client_id,
-        &cfg.follow,
+        conn::Identity {
+            token: &cfg.token,
+            client_id: &cfg.client_id,
+            follow: &cfg.follow,
+            station: &cfg.station,
+        },
         cfg.trust_roots(),
     )
     .await
@@ -208,9 +238,9 @@ async fn pump(
     let epoch = Instant::now();
     let mut last_ping = Instant::now();
     let mut rtt_ms = 0u32;
-    let mut sent = 0u64;
-    let mut received = 0u64;
-    let mut unparsable = 0u64;
+    let mut counters = Counters::default();
+    // 音频一开始是好的：建不起来的话 `AudioIo::start` 已经报过了。
+    let mut audio_ok = true;
 
     loop {
         // 有待发的声明就先推出去。`SubscriptionState` 保证这是幂等的全量声明，
@@ -231,6 +261,13 @@ async fn pump(
                 Some(Command::PushAudio(pcm)) => {
                     if let Some(t) = tx.as_mut() {
                         t.push(&pcm);
+                    }
+                }
+                // 换设备**立刻生效**，不必等到下一次连接：重建在音频线程上做，
+                // 因为 `cpal::Stream` 是 `!Send`。
+                Some(Command::Devices { input, output }) => {
+                    if let Some(io) = audio {
+                        io.set_devices(input.as_deref(), output.as_deref());
                     }
                 }
                 Some(Command::Shutdown) | None => {
@@ -266,13 +303,13 @@ async fn pump(
             dg = quic.read_datagram() => match dg {
                 Ok(bytes) => match Header::parse(&bytes) {
                     Ok((h, opus)) => {
-                        received += 1;
+                        counters.received += 1;
                         if let Some(e) = mixer.feed(&h, opus) {
                             send_rx_event(events, e);
                         }
                     }
                     Err(e) => {
-                        unparsable += 1;
+                        counters.unparsable += 1;
                         tracing::debug!(error = %e, "dropping an unparsable datagram");
                     }
                 },
@@ -283,6 +320,26 @@ async fn pump(
             },
 
             _ = ticker.tick() => {
+                // **声卡掉了要说一句。** 只在日志里 warn 一行的后果是
+                // "能连上、状态绿、说话没人听见"，而拔一次耳机就是这样。
+                // 恢复也要说，那一条会把前一条撤掉（见 Snapshot::apply）。
+                if let Some(io) = audio {
+                    let ok = io.running();
+                    if ok != audio_ok {
+                        audio_ok = ok;
+                        let (kind, reason) = if ok {
+                            ("audio_restored", "the audio devices are open again")
+                        } else {
+                            ("audio_unavailable", "the audio devices went away; reopening")
+                        };
+                        let _ = events.send(Event::Notice {
+                            kind: kind.into(),
+                            freq_khz: 0,
+                            reason: reason.into(),
+                        });
+                    }
+                }
+
                 // 接收：混音器每一拍都出恰好一帧，直接送去播放。
                 let (pcm, rx_events) = mixer.tick();
                 if let Some(io) = audio {
@@ -307,7 +364,7 @@ async fn pump(
                         for freq in subs.acknowledged().tx.clone() {
                             let dg = bytes::Bytes::from(frame.datagram(freq));
                             match quic.send_datagram(dg) {
-                                Ok(()) => sent += 1,
+                                Ok(()) => counters.sent += 1,
                                 Err(e) => {
                                     // 发不出去只丢这一帧：数据报本来就是不可靠的，
                                     // 为一帧音频断开整条连接是过度反应。
@@ -326,7 +383,8 @@ async fn pump(
                     }
                     // **掉线必须自己解释。** RTT 和收发计数正是区分"上行真的扛不住"
                     // 和"抖了一下"的东西，而那两者的处置完全不同。
-                    let _ = events.send(Event::Health { rtt_ms, sent, received, lost: unparsable });
+                    let _ = events
+                        .send(counters.health(rtt_ms, quic.stats().path.lost_packets));
                 }
             },
         }
@@ -408,5 +466,32 @@ fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice)
             freq_khz: n.freq,
             reason: n.reason,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **包头解不开不是丢包。** 前者是协议漂移（对端版本不对、字段改了名），
+    /// 后者是网络。两者填进同一个字段的后果是 `lost` 在正常运行里恒为 0——
+    /// 而它的用途正是回答"上行是真的扛不住，还是抖了一下"。
+    #[test]
+    fn unparsable_datagrams_are_not_counted_as_packet_loss() {
+        let c = Counters {
+            sent: 1000,
+            received: 995,
+            unparsable: 7,
+        };
+
+        match c.health(42, 3) {
+            Event::Health {
+                lost, unparsable, ..
+            } => {
+                assert_eq!(lost, 3, "lost 该是 QUIC 的丢包计数，不是 unparsable");
+                assert_eq!(unparsable, 7, "包头解不开的要自己有一个字段");
+            }
+            other => panic!("expected Health, got {other:?}"),
+        }
     }
 }

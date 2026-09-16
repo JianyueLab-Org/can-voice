@@ -18,6 +18,13 @@ use std::process::Stdio;
 /// 一帧的采样数，与 `can-voice-client` 的 20 毫秒帧一致。
 pub const FRAME_SAMPLES: usize = 960;
 
+/// 合成结果最多缓存几条。
+///
+/// 一份 45 秒的通播是 48 kHz 16 位单声道，约 4 MB。留几条是为了覆盖"改了一版又
+/// 改回去"和多语言那两半，**不是为了留住历史**：一个跑了几天的机队要是把每一版
+/// 稿子都留着，光缓存就能吃掉几个 G。
+pub const CACHE_ENTRIES: usize = 4;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("tts command failed: {0}")]
@@ -26,6 +33,53 @@ pub enum Error {
     Ffmpeg(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// 合成结果的缓存，键是**整篇稿子**。
+///
+/// 播报循环每三秒要同一段 PCM。不缓存的话，一份一整天不变的通播会一天几千次去开
+/// `edge-tts` 和 `ffmpeg` 两个子进程——白烧 CPU，也白打人家的接口。键是整篇稿子
+/// 而不是席位：报文一变、模板一改就该是新的一条，而那正是要重新合成的时候。
+///
+/// LRU 而不是先进先出：一个在两套跑道构型之间来回切的席位，两篇稿子都该留着。
+#[derive(Debug)]
+pub struct PcmCache {
+    /// 最久没用过的在前。条数以个位数计，线性扫比哈希表加链表简单得多。
+    entries: Vec<(String, std::sync::Arc<Vec<i16>>)>,
+    limit: usize,
+}
+
+impl PcmCache {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// 取一条，并把它记成"刚用过"。
+    pub fn get(&mut self, text: &str) -> Option<std::sync::Arc<Vec<i16>>> {
+        let i = self.entries.iter().position(|(k, _)| k == text)?;
+        let entry = self.entries.remove(i);
+        let pcm = entry.1.clone();
+        self.entries.push(entry);
+        Some(pcm)
+    }
+
+    /// 放一条。同一篇稿子再放一次是替换，不是多一条。
+    pub fn put(&mut self, text: String, pcm: std::sync::Arc<Vec<i16>>) {
+        self.entries.retain(|(k, _)| *k != text);
+        self.entries.push((text, pcm));
+        while self.entries.len() > self.limit {
+            self.entries.remove(0);
+        }
+    }
+}
+
+impl Default for PcmCache {
+    fn default() -> Self {
+        Self::new(CACHE_ENTRIES)
+    }
 }
 
 /// 用外部命令合成语音。
@@ -252,5 +306,53 @@ mod tests {
     #[test]
     fn an_exact_multiple_does_not_get_an_empty_tail_frame() {
         assert_eq!(frames_of(&vec![1i16; FRAME_SAMPLES * 2]).len(), 2);
+    }
+
+    fn pcm(n: i16) -> std::sync::Arc<Vec<i16>> {
+        std::sync::Arc::new(vec![n; 4])
+    }
+
+    /// **报文没变就不重新合成。**
+    ///
+    /// 播报循环每三秒要同一段 PCM。不缓存的话，一份一整天不变的通播会一天几千次
+    /// 去开 `edge-tts` 和 `ffmpeg` 两个子进程——白烧 CPU，也白打人家的接口。
+    #[test]
+    fn the_same_report_is_not_synthesised_twice() {
+        let mut c = PcmCache::new(4);
+        c.put("ZSPD ATIS A".into(), pcm(1));
+
+        assert_eq!(c.get("ZSPD ATIS A").map(|p| p[0]), Some(1));
+        // 报文一变就是新的一条：键是整篇稿子，而不是席位。
+        assert!(c.get("ZSPD ATIS B").is_none());
+    }
+
+    /// 缓存**有上限**，满了先丢最久没用过的那条。
+    ///
+    /// 一份 45 秒的通播是 48 kHz 16 位单声道，约 4 MB。不设上限的话，一个跑了
+    /// 几天的机队会把每一版稿子都留着。
+    #[test]
+    fn the_cache_drops_the_least_recently_used_entry() {
+        let mut c = PcmCache::new(2);
+        c.put("a".into(), pcm(1));
+        c.put("b".into(), pcm(2));
+        // 读一下 a，它就不再是"最久没用过的"那条了。
+        assert!(c.get("a").is_some());
+        c.put("c".into(), pcm(3));
+
+        assert!(c.get("b").is_none(), "b was the least recently used");
+        assert!(c.get("a").is_some());
+        assert!(c.get("c").is_some());
+    }
+
+    /// 同一篇稿子放两次不会把缓存撑大。
+    #[test]
+    fn putting_the_same_text_again_replaces_it() {
+        let mut c = PcmCache::new(2);
+        c.put("a".into(), pcm(1));
+        c.put("a".into(), pcm(9));
+        c.put("b".into(), pcm(2));
+
+        assert_eq!(c.get("a").map(|p| p[0]), Some(9));
+        assert!(c.get("b").is_some());
     }
 }

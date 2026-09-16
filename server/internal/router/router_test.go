@@ -926,3 +926,62 @@ func TestAnOrdinaryPartialRejectionIsNotMarkedTruncated(t *testing.T) {
 		t.Fatal("RejectedTruncated is true for an ACK that lists every rejected frequency; the flag means \"this list is incomplete\", and a client that sees it on every ACK will stop reading it")
 	}
 }
+
+// TestTwoStationsOnOneCidDoNotEvictEachOther 钉住通播机队能整队上线。
+//
+// 机队的每一路席位共用**一个** ATIS 账号（`ATIS_CID`），而顶号按 CID。所以在
+// station 标记存在之前，两个以上 `_ATIS` 席位时同一时刻只有一路在播：被顶掉的
+// 那一路重连、再顶掉下一个，全队每秒互踢一轮，而两端日志都写着"成功"。
+//
+// 设计文档 §6 本来就说 ATIS 会话是"普通会话，带一个 station 标记"。
+func TestTwoStationsOnOneCidDoNotEvictEachOther(t *testing.T) {
+	r := New()
+	closed := make(chan SessionID, 4)
+
+	pvg := r.Add(SessionOpts{
+		CID: "9001", Station: "ZSPD_ATIS", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 1 },
+	})
+	pek := r.Add(SessionOpts{
+		CID: "9001", Station: "ZBAA_ATIS", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 2 },
+	})
+
+	if _, ok := r.Get(pvg.ID); !ok {
+		t.Fatal("the first station was evicted by the second — the whole fleet would take turns")
+	}
+	if _, ok := r.Get(pek.ID); !ok {
+		t.Fatal("the second station is gone")
+	}
+	select {
+	case id := <-closed:
+		t.Fatalf("session %d was closed; two stations on one account must coexist", id)
+	default:
+	}
+}
+
+// TestTheSameStationOnOneCidStillEvicts 钉住 station 标记**没有**把顶号关掉。
+//
+// 同一个席位重启（崩了、被手动重开）要顶掉上一条，否则半开的那条会继续订阅、
+// 继续被扇出——这正是顶号一开始要解决的问题。
+func TestTheSameStationOnOneCidStillEvicts(t *testing.T) {
+	r := New()
+	closed := make(chan SessionID, 2)
+
+	first := r.Add(SessionOpts{
+		CID: "9001", Station: "ZSPD_ATIS", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 1 },
+	})
+	r.Add(SessionOpts{
+		CID: "9001", Station: "ZSPD_ATIS", MaxTX: 8, MaxRX: 64,
+		Send:  func([]byte) {},
+		Close: func() { closed <- 2 },
+	})
+
+	if _, ok := r.Get(first.ID); ok {
+		t.Fatal("the same station restarting must evict its own previous session")
+	}
+}

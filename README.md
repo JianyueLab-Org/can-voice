@@ -10,12 +10,23 @@ crates/can-voice-proto  Rust：线协议。与 Go 侧共测 server/testdata/wire
 crates/can-voice-client Rust：客户端核心库（P3）
 crates/can-voice-ptt    Rust：PTT（键盘 / 鼠标侧键 / 手柄），四个桌面端共用
 crates/can-voice-token  Rust：拿凭据换短期票，四个桌面端共用
-crates/can-voice-app    Rust：四个桌面端共用的快照 / 更新检查 / 命令面
+crates/can-voice-app    Rust：四个桌面端共用的快照 / 会话监管 / 命令面
+crates/can-voice-settings Rust：设置读写。单独一个 crate，见下
+crates/can-voice-update Rust：更新检查（问 can-api，只报告不动手）。同上
+crates/can-voice-log    Rust：日志落盘（4 份 × 1 MiB）、panic 钩子、回传。同上
 crates/can-voice-fsd    Rust：FSD 协议客户端那一侧，通播端与飞行员端共用
+crates/can-voice-sim    Rust：两个飞行员客户端共用——模拟器链路、他机表、
+                        在线席位表、文字消息记录
 crates/can-voice-atis   Rust：通播的逻辑（报文 / 模板 / 读法）＋服务端通播机器人
 apps/controller         Tauri：管制语音客户端 audio-for-can（P4 Task 4）
 apps/atis               Tauri：通播制作客户端 atis-for-can（P4 Task 5）
+apps/xpc / apps/msfs    Tauri：两个飞行员客户端 xpc-for-can / msfs-for-can
 ```
+
+`can-voice-settings` 和 `can-voice-update` 各自一个 crate 而不是
+`can-voice-app` 里的两个模块，是同一条理由：**通播制作客户端不该为了读一个 JSON
+文件、或者查一次更新，把 `can-voice-ptt` 拉进来**——那条路上挂着 rdev/gilrs，
+Linux 上要 libx11 和 libudev，而它连 PTT 都没有。
 
 **桌面端不在 workspace 里**（根 `Cargo.toml` 的 `exclude = ["apps"]`）：它们各自
 拖着 wry/webkit 一整棵树，进来的话 `cargo test --workspace` 每次都要构建一个 GUI
@@ -33,19 +44,23 @@ Linux 版，而管制端和通播端跟模拟器无关。
 **Linux 上的键盘 PTT 只在 X11 下有效。** 全局按键监听走 Xlib，而 Wayland 不允许
 一个普通程序监听全局按键。手柄 PTT 和界面上那个「按住发话」按钮不受影响。
 
-## 通播是谁出声，还没有定
+## 通播由服务端机队出声，桌面那支只做稿子
 
-服务端机队播的是 datafeed 里每一个 `_ATIS` 席位，而席位之所以在 datafeed 里，
-正是因为有人开着 `atis-for-can` 把它挂上了 FSD。所以只要桌面那一支自己也出声，
-同一个频率上就有两个声音，**而且念的还不是同一份稿子**——机队手上只有
-`text_atis`，念的是电码原文的读法；本地合成念的是模板渲染出来的语音形态。
-详见 `crates/can-voice-atis/src/lib.rs` 的模块头。在此之前 `apps/atis` 只做稿子。
+`atis-for-can` 挂 FSD 席位、发文字、答查询，**不出声**；声音归
+`crates/can-voice-atis` 的可执行文件那一半，部署上是
+`server/docker-compose.yml` 里的第二个容器。
+
+这条线要划清楚，因为它一旦模糊，同一个频率上就会有两个声音——can-audio 那边
+就是这样（桌面那支开自己的 Mumble 连接，服务端机队又把 datafeed 里的全播一遍），
+而它的文档从没提过。
+
+选机队的理由是它**不会睡觉**。代价是它手上只有 `text_atis`，念的是电码原文
+（`09004MPS` → "zero niner zero zero four MPS"）而不是模板渲染出来的语音形态。
+详见 `crates/can-voice-atis/src/lib.rs` 的模块头。
 
 ## 怎么从 Mumble 切过来
 
-`docs/切换方案.md`。**已经拍板：一并替换，没有共存期。**
-
-三条结论值得在这里就写一句：
+**已经拍板：一并替换，没有共存期。** 三条结论：
 
 - **没有"改一行数据库就把所有人挪过去"这条路。** Mumble 的主机名写死在老客户端
   里，只有 xpc / msfs 把它当可改的默认值。换的单位是"人换客户端"。
@@ -53,9 +68,8 @@ Linux 版，而管制端和通播端跟模拟器无关。
   can-voice 的 QUIC 要 UDP 64738）——在一并替换这条路上这是**帮手**：can-voice
   接管同一个地址，老客户端握手就失败。而分阶段方案里最难被报告的故障，正是
   掉队的人待在一个正常但空无一人的频率里。
-- **还缺一件功能：服务端通播出声。** `can-audio/server/ATIS/` 是一队用 edge-tts
-  念稿、以 pymumble 播出去的机器人，can-voice 这边没有对应的东西。照现在的状态
-  替换，全网通播会**哑掉**。
+- **通播由服务端机队出声**，见上一节。它是 compose 里的第二个容器，拿一个真实
+  成员账号换票，对语音服务端而言就是个普通客户端。
 
 ## 传输只有 datagram，没有 stream 回退
 

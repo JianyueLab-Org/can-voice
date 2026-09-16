@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strconv"
+
+	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 )
 
 // Config 是进程的全部配置。
@@ -19,6 +21,8 @@ type Config struct {
 	PubKey  ed25519.PublicKey
 	FeedURL string
 	MaxRX   int
+	// Ranges 是席位后缀的兜底半径表。只在 datafeed 的 visual_range 为 0 时用得上。
+	Ranges *geo.Table
 }
 
 // defaultFeedURL 是 can-fsd 的 SSE 流。射程过滤的输入就来自这里；
@@ -76,6 +80,15 @@ func LoadConfig(get func(string) string) (Config, error) {
 		}
 		cfg.MaxRX = n
 	}
+
+	// 兜底半径表。逐条覆盖内置那份估出来的数值，形如 `CTR=300,FSS=700,*=120`。
+	// **写坏了起不来**：悄悄回退的话，一个打错了一个字符的运维以为自己校准过了。
+	ranges, err := geo.ParseTable(get("CAN_VOICE_SUFFIX_RANGES"))
+	if err != nil {
+		return Config{}, fmt.Errorf("CAN_VOICE_SUFFIX_RANGES: %w", err)
+	}
+	cfg.Ranges = ranges
+
 	return cfg, nil
 }
 

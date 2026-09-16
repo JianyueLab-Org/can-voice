@@ -1,6 +1,18 @@
-# 构建上下文只需要 go.mod / go.sum / server/。其余全部排除——target/ 是 Rust
-# 的构建产物，几个 GB，不排掉的话每次构建光传上下文就要等半天。
+# 构建上下文只需要两个镜像各自要的源码：
+#
+#   server/Dockerfile        go.mod / go.sum / server/
+#   server/Dockerfile.atis   Cargo.toml / Cargo.lock / crates/
+#
+# 其余全部排除。**target/ 是 Rust 的构建产物，几个 GB**，不排掉的话每次构建
+# 光传上下文就要等半天。
 *
 !go.mod
 !go.sum
 !server/
+# 通播机队要的。**漏掉这三行的症状是 Dockerfile.atis 的 COPY 失败**，报
+# "not found"——读起来像文件不存在，而文件就在仓库里。
+!Cargo.toml
+!Cargo.lock
+!crates/
+# 上面 `!crates/` 把整棵树都放了进来，这里再把构建产物排掉。
+**/target/

@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
+	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
 	"github.com/JianyueLab-Org/can-voice/server/internal/transport"
 )
@@ -37,6 +38,10 @@ func main() {
 	defer stop()
 
 	r := router.New()
+	// 兜底半径表在**开始服务之前**装好：`geo.UseTable` 是 set-once，
+	// 之后每一包的扇出路径都在读它。
+	geo.UseTable(cfg.Ranges)
+
 	feed := fsdfeed.NewFeed(cfg.FeedURL)
 	r.SetLocator(feed)
 	go feed.Run(ctx)

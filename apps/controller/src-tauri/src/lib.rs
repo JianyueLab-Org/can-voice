@@ -15,10 +15,46 @@
 //! 历史错位，**沿用**。
 
 use can_voice_app::{Bridge, Snapshot};
-use can_voice_client::stack::Radio;
+use can_voice_client::stack::{Radio, RadioStack};
 use can_voice_client::Config;
+use can_voice_datafeed::Position;
 use can_voice_token::TokenSource;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// 多久去问一次 datafeed。和旧版一样 60 秒。
+///
+/// 上席位、下席位都不是每秒会变的事，而这是一个挡着 Cloudflare 的公共端点：
+/// 问得太密对谁都没有好处。
+const FEED_INTERVAL: Duration = Duration::from_secs(60);
+
+/// 存下来的设置。
+///
+/// **密码不在里面。** 它只用来换一张 60 秒的票，之后重连带的是票；
+/// 把一份长期凭据留在磁盘上买不到任何东西。
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Settings {
+    /// 上次用的 CAN 号，下次启动预填。
+    #[serde(default)]
+    pub cid: String,
+    /// 频率台面。
+    #[serde(default)]
+    pub radios: Vec<Radio>,
+    /// PTT 绑定。
+    #[serde(default)]
+    pub ptt: Vec<can_voice_ptt::Binding>,
+    /// 录音设备。`None` 是系统默认。
+    #[serde(default)]
+    pub input_device: Option<String>,
+    /// 播放设备。`None` 是系统默认。
+    #[serde(default)]
+    pub output_device: Option<String>,
+    /// 用户说过"这一版不用再问我"的那个版本号。**跳过的是那一个版本，
+    /// 不是从此闭嘴**——下一版照样提示。
+    #[serde(default)]
+    pub skipped_update: String,
+}
 
 /// 应用的运行时状态。
 pub struct App {
@@ -26,17 +62,71 @@ pub struct App {
     http: reqwest::Client,
     /// PTT 监听。**懒起**：只有真的绑了键盘或鼠标才会去要辅助功能授权。
     ptt: std::sync::Mutex<Option<can_voice_ptt::PttWatcher>>,
+    store: can_voice_app::Store,
+    settings: std::sync::Mutex<Settings>,
+    /// 数据源上的最新结论。界面读的就是它。
+    feed: Arc<std::sync::Mutex<FeedView>>,
+    /// 用户**手工删掉过**的频率。它们不会被自动加回来。
+    user_removed: Arc<std::sync::Mutex<HashSet<u32>>>,
+    /// 那条 60 秒的轮询。上线时起，下线时停。
+    feed_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl App {
     pub fn new() -> Self {
+        // 产品名就是设置目录名。四个产品名是 can-api 的固定白名单，
+        // 拿它当目录名等于不再多发明一个。
+        let store = can_voice_app::Store::for_product("audio-for-can");
+        let settings: Settings = store.load();
+        let bridge = Arc::new(Bridge::new());
+        // 上次的台面先装回去，**在任何连接之前**：声明是幂等全量的，
+        // 连上的那一刻会把它整份推出去。
+        bridge.with_stack(|s| restore_stack(s, &settings.radios));
         Self {
-            bridge: Arc::new(Bridge::new()),
+            bridge,
             http: reqwest::Client::builder()
                 .user_agent(concat!("audio-for-can/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_default(),
             ptt: std::sync::Mutex::new(None),
+            store,
+            settings: std::sync::Mutex::new(settings),
+            feed: Arc::new(std::sync::Mutex::new(FeedView::default())),
+            user_removed: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            feed_task: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 停掉那条轮询。
+    ///
+    /// **下线时必须停**：不停的话，下了线的客户端每 60 秒还在替一个已经不在的
+    /// 会话改台面，而用户看到的是"我明明下线了，频率还在自己动"。
+    fn stop_feed(&self) {
+        if let Some(task) = locked(&self.feed_task).take() {
+            task.abort();
+        }
+    }
+
+    /// 改一份设置并存下去。
+    ///
+    /// **每次改动都写**：改动都是用户动作，一次几百字节，而"存得住"就是
+    /// 这件事的全部意义。台面每次都从桥那边重新取——它才是那份真相。
+    fn update_settings(&self, f: impl FnOnce(&mut Settings)) {
+        let mut s = match self.settings.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        f(&mut s);
+        s.radios = self.bridge.radios();
+        if let Err(e) = self.store.save(&*s) {
+            tracing::warn!(error = %e, "could not save the settings");
+        }
+    }
+
+    fn settings(&self) -> Settings {
+        match self.settings.lock() {
+            Ok(s) => s.clone(),
+            Err(p) => p.into_inner().clone(),
         }
     }
 }
@@ -47,8 +137,175 @@ impl Default for App {
     }
 }
 
+/// 把存下来的台面装回去。
+///
+/// **顺序是承重的**：重放要走核心库的耦合规则（关 RX 会清掉 TX/XC），
+/// 所以先 RX 再 TX 再 XC。反过来的话，一个存着 TX 的频率装回来变成只能听不能发，
+/// 而界面看起来完全正常——正是这个项目反复要躲开的那一类。
+fn restore_stack(stack: &mut can_voice_client::stack::RadioStack, saved: &[Radio]) {
+    for r in saved {
+        stack.add_named(r.freq_khz, &r.callsign);
+        stack.set_rx(r.freq_khz, r.rx);
+        stack.set_tx(r.freq_khz, r.tx);
+        stack.set_xc(r.freq_khz, r.xc);
+        stack.set_gain(r.freq_khz, r.gain);
+        stack.set_muted(r.freq_khz, r.muted);
+        if r.selected {
+            stack.set_selected(r.freq_khz);
+        }
+    }
+}
+
+/// 拿一把锁，中毒了也照用。
+///
+/// 这里面装的都是纯数据（一组频率号、一份快照），没有"改到一半"的不变量；
+/// 放弃它只会让一个已经出过错的程序连界面都不再更新。
+fn locked<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match m.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    }
+}
+
 fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+// ——— 数据源 ———
+//
+// **语音服务端不知道谁在管哪个席位，也不该知道。** 那是 FSD 的事实，只在
+// datafeed 上。所以"本席频率"这件事只能在客户端查出来：查到了就自动加进台面，
+// 查不到就说明这个人此刻没在管制，不该发射。
+//
+// 旧版（`can-audio/controller/gui.py`）就是这么做的，新版一条都没有——症状是
+// 管制员要自己记住并手敲本席频率，忘了加就是"我在 121.8 守着"而实际没订阅，
+// 而且谁都可以在任何频率上发射。
+
+/// 数据源上关于"我"的结论。界面直接照着画。
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct DutyView {
+    /// 在管的席位呼号。空 = 此刻不在管制。
+    pub callsign: String,
+    /// 那个席位的频率。
+    pub freq_khz: Option<u32>,
+    /// 这一轮有没有真的把发射关掉过。
+    ///
+    /// 只有真关掉了才该跟用户说"你已经不在席位上了，发射已关闭"——一句没有
+    /// 对应事实的警告，下一次就没人看了。
+    pub dropped_tx: bool,
+}
+
+/// 界面读的那一份数据源快照。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct FeedView {
+    pub duty: DutyView,
+    /// 此刻在线、守得住的席位，按频率排。
+    pub online: Vec<Position>,
+    /// CAN 号 → 呼号。
+    ///
+    /// 语音那一侧下发的"谁在说话"是一个 CAN 号；电台行上要显示的是呼号。
+    pub roster: HashMap<String, String>,
+    /// 此刻允不允许发射。
+    ///
+    /// **由 [`feed`] 命令在读的那一刻填，不是轮询存进来的**：它是台面自己的状态，
+    /// 存一份副本就会有两个真相，而对不上的那一刻界面画的是灰的、实际却发得出去。
+    pub transmit_allowed: bool,
+    /// 最近一次取 datafeed 成功了没有。
+    ///
+    /// **取不到不等于下席位**，界面要把这两件事分开说：前者是"查不到"，
+    /// 后者是"确实没在管制"，而处理方法完全不同。
+    pub reachable: bool,
+}
+
+/// 把一次 datafeed 的结论落到台面上。
+///
+/// `feed` 是 `None` 表示**这一轮没取到**——那就什么都不动，返回 `None`。上游抖
+/// 一下就把一个正在管制的人的发射权收走，比"自动加频率不工作"糟得多：他还坐在
+/// 席位上，飞行员还在那个频率上叫他。
+///
+/// `user_removed` 是用户手工删掉过的频率。**它们不会被加回来**——每 60 秒跟用户
+/// 抢一次是最招人烦的那种智能。
+fn apply_feed(
+    stack: &mut RadioStack,
+    cid: &str,
+    feed: Option<&serde_json::Value>,
+    user_removed: &HashSet<u32>,
+) -> Option<FeedView> {
+    let feed = feed?;
+    let mine = can_voice_datafeed::controller_for(cid, feed);
+
+    // 顺序是承重的：先放行再开 TX，否则 `set_tx` 会被发射权那道闸拦掉。
+    let dropped_tx = stack.set_transmit_allowed(mine.is_some());
+    stack.set_locked(mine.as_ref().map(|p| p.freq_khz));
+
+    if let Some(p) = &mine {
+        if !user_removed.contains(&p.freq_khz) {
+            let known = stack.radios().iter().any(|r| r.freq_khz == p.freq_khz);
+            // 呼号每一轮都补：频率常常先被手工加进来，过一轮才知道那上面是谁。
+            stack.add_named(p.freq_khz, &p.callsign);
+            if !known {
+                // **只有第一次才动开关。** 管制员可能刚刚有意把 TX 关掉（换班
+                // 交接、跨席位借用）；自动加是为了不让人忘了加，不是不让人改。
+                stack.set_tx(p.freq_khz, true);
+                stack.set_selected(p.freq_khz);
+                tracing::info!(freq_khz = p.freq_khz, callsign = %p.callsign,
+                    "adopted the frequency of the position being staffed");
+            }
+        }
+    }
+
+    Some(FeedView {
+        duty: DutyView {
+            callsign: mine
+                .as_ref()
+                .map(|p| p.callsign.clone())
+                .unwrap_or_default(),
+            freq_khz: mine.as_ref().map(|p| p.freq_khz),
+            dropped_tx,
+        },
+        online: can_voice_datafeed::online_positions(feed),
+        roster: can_voice_datafeed::roster(feed),
+        // 读的那一刻才填，见 `FeedView::transmit_allowed`。
+        transmit_allowed: false,
+        reachable: true,
+    })
+}
+
+/// 每 60 秒问一次数据源，把结论落到台面上。
+///
+/// 只在上着线的时候跑。第一轮**立刻**跑：刚上线的人正等着他的席位频率出现，
+/// 让他先等满一分钟是那种"看起来没反应"的故障。
+fn spawn_feed(app: &App, cid: String) {
+    let bridge = app.bridge.clone();
+    let url = env_or("CAN_FSD_DATAFEED", can_voice_datafeed::DEFAULT_URL);
+    let http = app.http.clone();
+    let slot = app.feed.clone();
+    let removed = app.user_removed.clone();
+    let task = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(FEED_INTERVAL);
+        loop {
+            tick.tick().await;
+            let feed = can_voice_datafeed::fetch(&http, &url).await;
+            let removed = locked(&removed).clone();
+            let view = bridge.with_stack(|s| apply_feed(s, &cid, feed.as_ref(), &removed));
+            match view {
+                Some(v) => *locked(&slot) = v,
+                // 取不到就只把"查不到"这件事说出来，别的一律不动。
+                None => locked(&slot).reachable = false,
+            }
+        }
+    });
+    if let Some(old) = locked(&app.feed_task).replace(task) {
+        old.abort();
+    }
+}
+
+/// 界面读的那一份数据源快照。
+#[tauri::command]
+fn feed(state: tauri::State<'_, App>) -> FeedView {
+    let mut v = locked(&state.feed).clone();
+    v.transmit_allowed = state.bridge.transmit_allowed();
+    v
 }
 
 // ——— 命令 ———
@@ -63,6 +320,7 @@ async fn connect(
     cid: String,
     password: String,
 ) -> Result<(), String> {
+    let remembered = cid.clone();
     let tokens = TokenSource::new(
         &env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net"),
         cid,
@@ -71,6 +329,7 @@ async fn connect(
     );
     let server = env_or("CAN_VOICE_SERVER", "audio.ceruleanavi.net:64738");
     let server_name = server.split(':').next().unwrap_or("localhost").to_string();
+    let saved = state.settings();
 
     state
         .bridge
@@ -82,19 +341,36 @@ async fn connect(
                 token: String::new(),
                 client_id: concat!("audio-for-can/", env!("CARGO_PKG_VERSION")).into(),
                 follow: String::new(),
-                input_device: None,
-                output_device: None,
+                // 一人一个账号，没有席位标记：同一个成员号第二次登录顶掉第一条。
+                station: String::new(),
+                input_device: saved.input_device.clone(),
+                output_device: saved.output_device.clone(),
                 audio_devices: true,
                 extra_roots: Vec::new(),
             },
             &tokens,
         )
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // 连上了才记住这个号——连不上的那个多半是打错了。
+    state.update_settings(|s| s.cid = remembered.clone());
+    // 席位频率只有数据源知道。这条起来之前，界面上那句"你不在席位上"是"还没查"
+    // 而不是结论——`FeedView::reachable` 就是用来分开这两件事的。
+    spawn_feed(&state, remembered);
+    Ok(())
 }
 
 #[tauri::command]
 async fn disconnect(state: tauri::State<'_, App>) -> Result<(), String> {
+    state.stop_feed();
+    // 下线就不再"在席位上"了，那道闸也就没有意义：它拦的是"上着线却不在席位上
+    // 发射"。**下了线反而要放开**——不放的话，一个下线的人连自己的台面都摆不了，
+    // 而他多半正是为了下一次上线在摆。锁也解开：留着的话那个频率删不掉。
+    state.bridge.with_stack(|s| {
+        s.set_transmit_allowed(true);
+        s.set_locked(None);
+    });
+    *locked(&state.feed) = FeedView::default();
     state.bridge.disconnect().await;
     Ok(())
 }
@@ -112,14 +388,35 @@ fn radios(state: tauri::State<'_, App>) -> Vec<Radio> {
     state.bridge.radios()
 }
 
+/// 加一个频率。`callsign` 是从在线一览里点过来时带上的，手敲的那条是空的。
+///
+/// 加回来就把"用户删过它"那条记录清掉：不然自动加频率对这个频率永久失效，
+/// 而那只有下一次重开程序才会恢复。
 #[tauri::command]
-fn add_frequency(state: tauri::State<'_, App>, freq_khz: u32) {
-    state.bridge.with_stack(|s| s.add(freq_khz));
+fn add_frequency(state: tauri::State<'_, App>, freq_khz: u32, callsign: Option<String>) {
+    let callsign = callsign.unwrap_or_default();
+    state
+        .bridge
+        .with_stack(|s| s.add_named(freq_khz, &callsign));
+    locked(&state.user_removed).remove(&freq_khz);
+    state.update_settings(|_| {});
 }
 
+/// 删一个频率。
+///
+/// **正在管的那个席位频率删不掉**，返回 `false` 而不是报错——界面上那个按钮本来
+/// 就该是灰的，走到这里多半是热键或者别的路子。
+///
+/// 删掉的记下来：**不会每 60 秒被自动加回来**。每一分钟跟用户抢一次是最招人烦的
+/// 那种智能。
 #[tauri::command]
-fn remove_frequency(state: tauri::State<'_, App>, freq_khz: u32) {
-    state.bridge.with_stack(|s| s.remove(freq_khz));
+fn remove_frequency(state: tauri::State<'_, App>, freq_khz: u32) -> bool {
+    let removed = state.bridge.with_stack(|s| s.remove(freq_khz));
+    if removed {
+        locked(&state.user_removed).insert(freq_khz);
+    }
+    state.update_settings(|_| {});
+    removed
 }
 
 /// 三个开关。**耦合规则在核心库里，前端不要自己实现一遍**：关 RX 清 TX/XC、
@@ -132,11 +429,21 @@ fn set_switch(state: tauri::State<'_, App>, freq_khz: u32, switch: String, on: b
         "xc" => s.set_xc(freq_khz, on),
         other => tracing::warn!(other, "unknown switch"),
     });
+    state.update_settings(|_| {});
 }
 
 #[tauri::command]
 fn set_volume(state: tauri::State<'_, App>, freq_khz: u32, gain: f32) {
     state.bridge.set_volume(freq_khz, gain);
+    state.update_settings(|_| {});
+}
+
+/// 单频静音。**和关 RX 是两件事**：静音只是不播出来，包照收、灯照亮；
+/// 关 RX 是退订，下一次有人叫你时连灯都不亮。
+#[tauri::command]
+fn set_muted(state: tauri::State<'_, App>, freq_khz: u32, on: bool) {
+    state.bridge.set_muted(freq_khz, on);
+    state.update_settings(|_| {});
 }
 
 /// 界面上选中的那一行。**不发给服务端**——它和服务端的"主频率"是两件毫不相干
@@ -144,6 +451,7 @@ fn set_volume(state: tauri::State<'_, App>, freq_khz: u32, gain: f32) {
 #[tauri::command]
 fn set_selected(state: tauri::State<'_, App>, freq_khz: u32) {
     state.bridge.with_stack(|s| s.set_selected(freq_khz));
+    state.update_settings(|_| {});
 }
 
 /// 手动按下 / 松开（界面上那个按钮）。绑定的 PTT 走 [`set_ptt_bindings`]。
@@ -159,6 +467,7 @@ fn set_transmitting(state: tauri::State<'_, App>, on: bool) {
 /// 被要求授权键盘监控，读起来像恶意软件）。
 #[tauri::command]
 fn set_ptt_bindings(state: tauri::State<'_, App>, bindings: Vec<can_voice_ptt::Binding>) {
+    state.update_settings(|s| s.ptt = bindings.clone());
     let mut slot = match state.ptt.lock() {
         Ok(s) => s,
         Err(p) => p.into_inner(),
@@ -213,6 +522,64 @@ fn spawn_ptt_pump(bridge: std::sync::Arc<Bridge>, flag: std::sync::Arc<std::sync
     });
 }
 
+/// 当前设置。**前端一挂上就读它**：CAN 号、设备、PTT 绑定都在里面。
+#[tauri::command]
+fn settings(state: tauri::State<'_, App>) -> Settings {
+    state.settings()
+}
+
+/// 换录音 / 播放设备。`None` 是"跟系统默认"。
+///
+/// **立刻生效**，不必重连：核心库在音频线程上重建两条流。
+#[tauri::command]
+fn set_audio_devices(
+    state: tauri::State<'_, App>,
+    input: Option<String>,
+    output: Option<String>,
+) {
+    state.bridge.set_audio_devices(input.clone(), output.clone());
+    state.update_settings(|s| {
+        s.input_device = input;
+        s.output_device = output;
+    });
+}
+
+/// 一个绑定加上它给界面看的短标识。
+///
+/// `token()` 在 Rust 侧，措辞和"认不出来"的判断都只有一份——前端照着 `kind`
+/// 自己拼一遍的话，换平台失效的那种绑定会显示成一个正常的键。
+#[derive(Debug, serde::Serialize)]
+pub struct BindingView {
+    pub token: String,
+    /// 读进来但认不出来的（换了平台的扫描码）。界面要说"它失效了"。
+    pub unresolved: bool,
+    pub binding: can_voice_ptt::Binding,
+}
+
+/// 当前的 PTT 绑定。
+#[tauri::command]
+fn ptt_bindings(state: tauri::State<'_, App>) -> Vec<BindingView> {
+    state
+        .settings()
+        .ptt
+        .into_iter()
+        .map(|b| BindingView {
+            token: b.token(),
+            unresolved: matches!(b, can_voice_ptt::Binding::Unresolved { .. }),
+            binding: b,
+        })
+        .collect()
+}
+
+/// 本系统能不能全局监听键盘。**Wayland 下不能。**
+///
+/// 和 [`mouse_ptt_supported`] 同一个理由：一个绑好了、显示正常、却从来不响的
+/// PTT，是这个项目反复要躲开的那类故障。
+#[tauri::command]
+fn keyboard_ptt_supported() -> bool {
+    can_voice_ptt::keyboard_supported()
+}
+
 /// 本系统能不能用鼠标侧键做 PTT。
 ///
 /// **macOS 上不能**，而界面要把这件事说在前面：一个绑好了、显示正常、
@@ -230,21 +597,110 @@ fn audio_devices() -> serde_json::Value {
     })
 }
 
+// ——— 更新检查 ———
+
+/// 查一次有没有新版。
+///
+/// **失败一律当成"没有更新"**，而且不打断正在工作的人：连着的时候一个模态框
+/// 盖在台面上比晚一次更新糟得多，跳过的那一版也不再问。
+#[tauri::command]
+async fn check_update(
+    app: tauri::State<'_, App>,
+) -> Result<Option<can_voice_update::Latest>, String> {
+    let (skipped, busy) = { let s = match app.settings.lock() {
+            Ok(s) => s.clone(),
+            Err(p) => p.into_inner().clone(),
+        };
+        // 连着的时候就是"正在工作"：PTT 是全局热键，弹窗抢了焦点就按不出去了。
+        let busy = matches!(app.bridge.snapshot().link, can_voice_client::LinkState::Online);
+        (s.skipped_update, busy) };
+    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    let Some(latest) = can_voice_update::check(
+        &app.http,
+        &origin,
+        "audio-for-can",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await else {
+        return Ok(None);
+    };
+    let skipped = (!skipped.is_empty()).then_some(skipped);
+    Ok(can_voice_update::should_prompt(
+        &latest.version,
+        env!("CARGO_PKG_VERSION"),
+        skipped.as_deref(),
+        busy,
+    )
+    .then_some(latest))
+}
+
+/// 记住"这一版不用再问我"。**跳过的是那一个版本，不是从此闭嘴。**
+#[tauri::command]
+fn skip_update(app: tauri::State<'_, App>, version: String) {
+    app.update_settings(|s| s.skipped_update = version);
+}
+
+/// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
+#[tauri::command]
+fn open_download(url: String) -> Result<(), String> {
+    can_voice_update::open_in_browser(&url)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+// ——— 日志 ———
+
+/// 当前这份日志在哪。界面上显示给用户，让他知道要发的是哪个文件。
+#[tauri::command]
+fn log_file() -> Option<String> {
+    can_voice_log::path().map(|p| p.display().to_string())
+}
+
+/// 把日志寄回去。
+///
+/// **要 CAN 号和密码**：can-api 的 `/api/v1/logs` 认的是这一对，不是会话。
+/// 密码用完就丢，不进设置文件。
+#[tauri::command]
+async fn send_log(
+    app: tauri::State<'_, App>,
+    cid: String,
+    password: String,
+) -> Result<(), String> {
+    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    can_voice_log::upload(
+        &app.http,
+        &origin,
+        "audio-for-can",
+        env!("CARGO_PKG_VERSION"),
+        &cid,
+        &password,
+    )
+    .await
+}
+
 pub fn run() {
-    tracing_subscriber::fmt().with_env_filter(env_or("RUST_LOG", "info")).init();
+    // **日志要落盘。** 打包出来的是一个没有控制台的 GUI 进程，`stdout` 写到哪里
+    // 谁也看不见；用户报"连不上"的时候手里得有一份能发出来的东西。
+    // 这一步同时装上 panic 钩子——崩溃不留记录的话，窗口没了、日志干净。
+    can_voice_log::init("audio-for-can", std::env::args().any(|a| a == "--debug"));
 
     tauri::Builder::default()
         .manage(App::new())
         .invoke_handler(tauri::generate_handler![
+            log_file,
+            send_log,
+            check_update,
+            skip_update,
+            open_download,
             connect,
             disconnect,
             snapshot,
             radios,
+            feed,
             add_frequency,
             remove_frequency,
             set_switch,
             set_volume,
+            set_muted,
             set_selected,
             set_transmitting,
             set_ptt_bindings,
@@ -253,7 +709,164 @@ pub fn run() {
             take_captured_binding,
             mouse_ptt_supported,
             audio_devices,
+            settings,
+            set_audio_devices,
+            ptt_bindings,
+            keyboard_ptt_supported,
         ])
         .run(tauri::generate_context!())
         .expect("error while running audio-for-can");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use can_voice_client::stack::RadioStack;
+    use serde_json::json;
+
+    fn one_controller(
+        cid: &str,
+        callsign: &str,
+        frequency: &str,
+        facility: i64,
+    ) -> serde_json::Value {
+        json!({
+            "controllers": [{
+                "cid": cid, "callsign": callsign,
+                "frequency": frequency, "facility": facility,
+            }],
+            "pilots": [], "atis": [],
+        })
+    }
+
+    /// 上了席位，那个频率自动加进台面并且键到发射上。
+    ///
+    /// 不自动加的话，管制员要自己记住并手敲本席频率；忘了加就是"我在 121.8
+    /// 守着"而实际上根本没订阅——两边都以为对方在。
+    #[test]
+    fn the_frequency_i_am_staffing_is_added_and_keyed_for_transmit() {
+        let mut stack = RadioStack::new();
+        let feed = one_controller("1000", "ZSPD_TWR", "118.350", 4);
+
+        let v = apply_feed(&mut stack, "1000", Some(&feed), &HashSet::new()).expect("a feed");
+
+        assert_eq!(v.duty.callsign, "ZSPD_TWR");
+        assert_eq!(v.duty.freq_khz, Some(118_350));
+        let r = &stack.radios()[0];
+        assert_eq!(r.freq_khz, 118_350);
+        assert!(r.tx, "the position frequency has to be keyed for transmit");
+        assert!(r.selected);
+        assert_eq!(r.callsign, "ZSPD_TWR");
+        // 而且它删不掉。
+        assert!(!stack.remove(118_350));
+    }
+
+    /// **取不到 datafeed 不等于下了席位。**
+    ///
+    /// 上游抖一下就把一个正在管制的人的发射权收走，比"自动加频率不工作"糟得多：
+    /// 他还坐在席位上，飞行员还在那个频率上叫他。取不到就什么都不动，等下一轮。
+    #[test]
+    fn a_datafeed_that_did_not_come_back_changes_nothing() {
+        let mut stack = RadioStack::new();
+        let mine = one_controller("1000", "ZSPD_TWR", "118.350", 4);
+        apply_feed(&mut stack, "1000", Some(&mine), &HashSet::new());
+
+        assert!(apply_feed(&mut stack, "1000", None, &HashSet::new()).is_none());
+
+        assert!(stack.transmit_allowed());
+        assert!(stack.radios()[0].tx);
+        assert!(stack.is_locked(118_350));
+    }
+
+    /// **手工删掉的频率不会每 60 秒被加回来。**
+    ///
+    /// 每一分钟跟用户抢一次是最招人烦的那种智能。
+    #[test]
+    fn a_frequency_i_removed_by_hand_is_not_added_back() {
+        let mut stack = RadioStack::new();
+        let feed = one_controller("1000", "ZSPD_TWR", "118.350", 4);
+        let removed = HashSet::from([118_350]);
+
+        apply_feed(&mut stack, "1000", Some(&feed), &removed);
+
+        assert!(stack.radios().is_empty());
+    }
+
+    /// 下了席位，发射就得真的关掉。
+    ///
+    /// 只把按钮画灰不够：一个下了席位却还标着 TX 的电台，在下一次声明里照样把
+    /// TX 发上去。挂观察员（`facility == 0`）算下席位。
+    #[test]
+    fn stepping_off_the_position_takes_transmit_away() {
+        let mut stack = RadioStack::new();
+        let mine = one_controller("1000", "ZSPD_TWR", "118.350", 4);
+        let observing = one_controller("1000", "ZSPD_OBS", "118.350", 0);
+        apply_feed(&mut stack, "1000", Some(&mine), &HashSet::new());
+
+        let v = apply_feed(&mut stack, "1000", Some(&observing), &HashSet::new()).expect("a feed");
+
+        assert!(v.duty.callsign.is_empty());
+        assert!(
+            v.duty.dropped_tx,
+            "the user has to be told his transmit just went away"
+        );
+        assert!(!stack.transmit_allowed());
+        assert!(!stack.radios()[0].tx);
+        // 但还听得见，而且现在删得掉了。
+        assert!(stack.radios()[0].rx);
+        assert!(stack.remove(118_350));
+    }
+
+    /// 已经在台面上的席位频率，**不每 60 秒把 TX 抢回来**。
+    ///
+    /// 管制员可能刚刚有意把它关掉（换班交接、跨席位借用）。自动加是为了不让人
+    /// 忘了加，不是为了不让人改。
+    #[test]
+    fn an_adopted_frequency_keeps_the_switches_i_left_it_with() {
+        let mut stack = RadioStack::new();
+        let feed = one_controller("1000", "ZSPD_TWR", "118.350", 4);
+        apply_feed(&mut stack, "1000", Some(&feed), &HashSet::new());
+        stack.set_tx(118_350, false);
+
+        apply_feed(&mut stack, "1000", Some(&feed), &HashSet::new());
+
+        assert!(!stack.radios()[0].tx);
+    }
+
+    /// **存下来的台面要原样装回去。**
+    ///
+    /// 重放要走耦合规则（关 RX 会清掉 TX/XC），所以顺序是承重的：先 RX 再 TX
+    /// 再 XC。顺序反了的话，一个存着 TX 的频率装回来是只能听不能发，
+    /// 而界面看起来完全正常。
+    #[test]
+    fn a_saved_stack_is_restored_switch_for_switch() {
+        let saved = vec![
+            Radio {
+                freq_khz: 118_000,
+                rx: true,
+                tx: false,
+                xc: false,
+                gain: 0.5,
+                selected: false,
+                muted: false,
+                callsign: String::new(),
+            },
+            Radio {
+                freq_khz: 121_800,
+                rx: true,
+                tx: true,
+                xc: false,
+                gain: 1.0,
+                selected: true,
+                muted: true,
+                callsign: "ZSPD_TWR".into(),
+            },
+        ];
+
+        let mut stack = can_voice_client::stack::RadioStack::new();
+        restore_stack(&mut stack, &saved);
+
+        assert_eq!(stack.radios(), saved.as_slice());
+    }
 }

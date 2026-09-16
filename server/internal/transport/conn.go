@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -242,8 +243,9 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 			"dropped", out.dropped())
 	}()
 
-	go readDatagrams(ctx, conn, r, sess.ID)
-	if code, reason, ok := closeAfterControl(readControl(st, r, sess)); ok {
+	cw := &controlWriter{st: st}
+	go readDatagrams(ctx, conn, r, sess.ID, cw)
+	if code, reason, ok := closeAfterControl(readControl(st, cw, r, sess)); ok {
 		// 关在这里而不是靠外层那条 defer：那条发的是 CloseNormal，
 		// 而 CloseNormal 的意思是"你可以重连"，在这里恰恰是错的答案。
 		// 先关的那次生效（quic-go 的 closeOnce），所以 defer 变成空操作。
@@ -341,6 +343,11 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	if h.Follow != "" && !isValidCallsign(h.Follow) {
 		return nil, errFollowNotACallsign
 	}
+	// Station 同样进 map 的键（router 的顶号表），同样要先校形状。
+	// 它装的是席位呼号（`ZSPD_ATIS`），和 Follow 一个形状，所以用同一条规则。
+	if h.Station != "" && !isValidCallsign(h.Station) {
+		return nil, errStationNotACallsign
+	}
 	claims, err := auth.Verify(cfg.PublicKey, h.Token, time.Now())
 	if err != nil {
 		return nil, err
@@ -365,6 +372,9 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	sess := r.Add(router.SessionOpts{
 		CID:    claims.CID,
 		Follow: h.Follow,
+		// Station 把顶号的键从 CID 变成 (CID, station)。不传下去的话通播
+		// 机队还是整队互踢——字段收下了、校验过了、然后丢掉，是最难查的那种。
+		Station: h.Station,
 		// MaxTX 来自 token（鉴权的一部分），MaxRX 来自服务端配置（资源上限）。
 		// MaxRX 必须真的传下去：只在 READY 里通告的话那个数字就只是一句建议，
 		// 一个已鉴权的会话可以声明一万个频率，每个都要在写锁里进倒排索引，
@@ -426,6 +436,9 @@ const errProtoUnsupported = helloError("the client declared a control-plane prot
 
 // errFollowNotACallsign 是"观察员跟随的那个呼号不是一个呼号"。
 const errFollowNotACallsign = helloError("the follow field is not a valid callsign")
+
+// errStationNotACallsign 是"席位标记不是一个呼号"。
+const errStationNotACallsign = helloError("the station field is not a valid callsign")
 
 // 呼号的形状，照抄 can-fsd 的 IsValidCallsign（internal/fsd/packet.go）：
 // 2–10 个字符，只许 A-Z、0-9、`-`、`_`。
@@ -544,7 +557,7 @@ const noticeBudget = 8
 //
 // 返回 errControlWriteStalled 表示对端不再读控制流了（见 controlWriteTimeout）；
 // 其余情况返回 nil——读到头、对端挂断、连接已经没了，都走正常收尾。
-func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
+func readControl(st quic.Stream, cw *controlWriter, r *router.Router, sess *router.Session) error {
 	// 每条会话一份预算，随连接一起消失。
 	notices := noticeBudget
 	fr := &framedReader{st: st}
@@ -579,7 +592,7 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 			// 失败形态。
 			if notices > 0 {
 				notices--
-				if err := sendUnknownNotice(st, b); err != nil {
+				if err := sendUnknownNotice(cw, b); err != nil {
 					return err
 				}
 				if notices == 0 {
@@ -610,7 +623,7 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 					"error", err)
 				return errAckUndeliverable
 			}
-			if err := writeControl(st, out); err != nil {
+			if err := cw.write(out); err != nil {
 				if len(out) > control.MaxFrame {
 					// 同上，另一半：编得出来但超过帧上限。声明有了上界之后这条路应当
 					// 不可达（声明本身有上界，maxRejected 和 maxXCPairs 又各自
@@ -625,7 +638,7 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 			}
 		case *control.Ping:
 			if out, err := control.Encode(&control.Pong{T: v.T, ServerT: time.Now().UnixMilli()}); err == nil {
-				if err := writeControl(st, out); err != nil {
+				if err := cw.write(out); err != nil {
 					return err
 				}
 			}
@@ -642,8 +655,40 @@ func readControl(st quic.Stream, r *router.Router, sess *router.Session) error {
 	}
 }
 
+// controlWriter 串行化控制流的写入。
+//
+// 在 tx_denied 之前控制流只有一个写者——readControl 那条 goroutine——所以不需要
+// 它。而 tx_denied 要从 readDatagrams 发出去，于是有了第二个写者，
+// 而 control.WriteFrame 是"长度前缀 + 载荷"两次 Write：两个 goroutine 交错写会把
+// 这条流写成乱码，症状是对端解析失败、断开、重连，没有一处指回这里。
+type controlWriter struct {
+	mu sync.Mutex
+	st quic.Stream
+}
+
+func (w *controlWriter) write(b []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return writeControl(w.st, b)
+}
+
+// txDeniedEvery 是同一个频率上两条 tx_denied 之间的最小间隔。
+//
+// 按住 PTT 的客户端每秒发 50 个包，一包一条 NOTICE 就是一场针对控制流的拒绝
+// 服务——而同一条流上还跑着 SUBACK 和 PONG。**第一条不等**：按下去要立刻知道。
+const txDeniedEvery = 3 * time.Second
+
+// txDeniedFreqs 是记账表的上界。
+//
+// 频率是对端随便填的 32 位数（服务端不做范围校验，见 wire.Header），
+// 不封顶的话一个乱发的客户端能让这张表一直长下去。
+const txDeniedFreqs = 64
+
 // readDatagrams 把上行音频交给 router 扇出。
-func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, id router.SessionID) {
+func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, id router.SessionID, cw *controlWriter) {
+	// 这两样只有这一条 goroutine 碰，所以不用锁。
+	denied := make(map[uint32]time.Time)
+	toldDegraded := false
 	for {
 		p, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
@@ -653,8 +698,62 @@ func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, 
 			// 这里刻意是 Debug：一个还没发完 SUB 就开始说话的客户端
 			// 会刷满日志，而它并不是服务端的问题。
 			slog.Debug("dropped an inbound packet", "session", id, "error", err)
+			var td *router.TxDeniedError
+			if errors.As(err, &td) {
+				sendTxDenied(cw, td.FreqKHz, denied)
+			}
+			continue
 		}
+		// 降级一次说一句，不是一帧说一句——它会持续几分钟到几小时，
+		// 而上行是每秒五十帧。恢复之后重新上弦，第二次降级还会说。
+		//
+		// **只告诉正在发言的人。** 纯听众也受影响（他听得见全世界），但控制面
+		// 今天没有服务端主动广播的路子，而为这一条消息造一个不值得：
+		// 语音传到不该传到的地方，才是那个要当场知道的方向。
+		degraded := r.PositionsDegraded()
+		if degraded && !toldDegraded {
+			sendRangeUnavailable(cw)
+		}
+		toldDegraded = degraded
 	}
+}
+
+// sendRangeUnavailable 回一条"射程过滤现在不生效"。
+func sendRangeUnavailable(cw *controlWriter) {
+	out, err := control.Encode(&control.Notice{
+		Kind:   control.KindRangeUnavailable,
+		Reason: "the position snapshot is unavailable; every frequency is global until it returns",
+	})
+	if err != nil {
+		return
+	}
+	_ = cw.write(out)
+}
+
+// sendTxDenied 回一条"你没有在这个频率上声明发射"，按频率节流。
+//
+// 不发的话，一个在没声明 TX 的频率上按住 PTT 的人，界面、日志、对端三处都
+// 看不出任何异常——而客户端那边 pump.rs 的接收分支早就写好了，一直是死代码。
+func sendTxDenied(cw *controlWriter, freq uint32, last map[uint32]time.Time) {
+	now := time.Now()
+	if t, ok := last[freq]; ok && now.Sub(t) < txDeniedEvery {
+		return
+	}
+	if len(last) >= txDeniedFreqs {
+		clear(last)
+	}
+	last[freq] = now
+	out, err := control.Encode(&control.Notice{
+		Kind:   control.KindTxDenied,
+		Freq:   freq,
+		Reason: "transmit was not declared on this frequency",
+	})
+	if err != nil {
+		return
+	}
+	// 写失败在这里不处理：控制流坏了的话 readControl 那条会先撞上并关掉连接，
+	// 而这条 goroutine 没有权力替它做那个决定。
+	_ = cw.write(out)
 }
 
 // sendUnknownNotice 回一条"这一帧我解不开"。
@@ -665,7 +764,7 @@ func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, 
 //
 // 这不是放大攻击面：QUIC 面向连接且验证过地址，NOTICE 只回到同一条**已鉴权**的
 // 连接上，到不了第三方那里。
-func sendUnknownNotice(st quic.Stream, frame []byte) error {
+func sendUnknownNotice(cw *controlWriter, frame []byte) error {
 	reason := control.TypeOf(frame)
 	if reason == "" {
 		reason = "unparseable"
@@ -677,7 +776,7 @@ func sendUnknownNotice(st quic.Stream, frame []byte) error {
 	if err != nil {
 		return nil
 	}
-	return writeControl(st, out)
+	return cw.write(out)
 }
 
 // errControlWriteStalled 是"对端不再读控制流了"。

@@ -336,7 +336,7 @@ func TestAnUndeliverableSubAckClosesLoudly(t *testing.T) {
 	}
 
 	st := &memStream{in: bytes.NewReader(framed.Bytes())}
-	if err := readControl(st, r, s); !errors.Is(err, errAckUndeliverable) {
+	if err := readControl(st, &controlWriter{st: st}, r, s); !errors.Is(err, errAckUndeliverable) {
 		t.Fatalf("readControl returned %v, want errAckUndeliverable — a SUB that took effect and got no ACK must end the session loudly, not drift into CloseNormal and invite the client to replay it forever", err)
 	}
 	// 前提：这份 SUB 确实生效了。没生效的话上面那句说的就是另一件事。
@@ -355,7 +355,7 @@ func TestAnUndeliverableSubAckClosesLoudly(t *testing.T) {
 		t.Fatalf("WriteFrame: %v", err)
 	}
 	st = &memStream{in: bytes.NewReader(framed.Bytes())}
-	if err := readControl(st, r, s); err != nil {
+	if err := readControl(st, &controlWriter{st: st}, r, s); err != nil {
 		t.Fatalf("readControl returned %v for an ordinary SUB, want nil", err)
 	}
 }

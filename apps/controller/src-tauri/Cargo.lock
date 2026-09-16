@@ -104,8 +104,11 @@ version = "27.0.3"
 dependencies = [
  "can-voice-app",
  "can-voice-client",
+ "can-voice-datafeed",
+ "can-voice-log",
  "can-voice-ptt",
  "can-voice-token",
+ "can-voice-update",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -113,7 +116,6 @@ dependencies = [
  "tauri-build",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -329,6 +331,7 @@ dependencies = [
  "can-voice-client",
  "can-voice-proto",
  "can-voice-ptt",
+ "can-voice-settings",
  "can-voice-token",
  "serde",
  "serde_json",
@@ -358,6 +361,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-datafeed"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-log"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "can-voice-proto"
 version = "0.1.0"
 dependencies = [
@@ -378,6 +402,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "can-voice-token"
 version = "0.1.0"
 dependencies = [
@@ -386,6 +419,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-update"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 

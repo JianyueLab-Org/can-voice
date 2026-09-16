@@ -1,0 +1,10 @@
+[package]
+name = "can-voice-settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true

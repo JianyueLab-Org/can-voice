@@ -43,6 +43,8 @@ type Session struct {
 	// Follow 只有观察员模式填：观察员没有 FSD 连接，
 	// 位置取自它跟随的那架飞机（spec 7.3）。
 	Follow string
+	// Station 是同一个账号下的第几个席位，空串表示"就一个"。见 evictionKey。
+	Station string
 	// MaxTX 来自 token：客户端最多能在几个频率上发送。
 	MaxTX int
 	// MaxRX 来自服务端配置：客户端最多能订阅几个纯 RX 频率。

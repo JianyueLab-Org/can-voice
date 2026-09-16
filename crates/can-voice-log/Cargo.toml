@@ -1,0 +1,18 @@
+[package]
+name = "can-voice-log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+# 又一个"不该为它拖进 can-voice-ptt"的共用件，理由同 can-voice-settings 和
+# can-voice-update：四个客户端都要落盘日志，而通播制作端没有 PTT。
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1.52", features = ["rt", "macros", "net", "io-util"] }

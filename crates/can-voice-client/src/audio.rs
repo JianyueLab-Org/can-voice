@@ -123,6 +123,46 @@ fn devices(input: bool) -> Vec<DeviceInfo> {
 mod tests {
     use super::*;
 
+    // ——— 音频线程什么时候重建 ———
+
+    /// **叫停压过一切。** 一条正在失败的流不该拦住关闭：那会让
+    /// `AudioIo::drop` 在 join 上等到重建成功为止。
+    #[test]
+    fn stopping_wins_over_a_failed_stream() {
+        assert_eq!(next_action(true, true, 7, 3), Next::Stop);
+    }
+
+    /// 设备报错就重开。不重开的表现是"突然听不见了，而界面全绿"——
+    /// 拔一次耳机就是这样。
+    #[test]
+    fn a_failed_stream_is_rebuilt() {
+        assert_eq!(next_action(false, true, 3, 3), Next::Rebuild);
+    }
+
+    /// 换了设备也重开，而且**不必等到下一次连接**。
+    #[test]
+    fn a_new_device_choice_is_rebuilt() {
+        assert_eq!(next_action(false, false, 4, 3), Next::Rebuild);
+    }
+
+    /// 什么都没发生就别动它：重建会让声音断一下。
+    #[test]
+    fn a_healthy_stream_is_left_alone() {
+        assert_eq!(next_action(false, false, 3, 3), Next::Keep);
+    }
+
+    /// **第一次重试要快**：拔掉的耳机常常马上插回来。
+    /// 而一台根本没有声卡的机器不该每 200 毫秒被扫一次，所以有上界。
+    #[test]
+    fn the_retry_delay_starts_short_and_is_bounded() {
+        assert_eq!(retry_delay(0), std::time::Duration::from_millis(200));
+        let far = retry_delay(99);
+        assert!(far <= MAX_RETRY_DELAY, "{far:?} 超过了上界");
+        for a in 0..10 {
+            assert!(retry_delay(a) <= retry_delay(a + 1), "第 {a} 次退避不该变短");
+        }
+    }
+
     #[test]
     fn resampling_from_48k_to_48k_is_a_no_op() {
         let input: Vec<i16> = (0..960).map(|i| i as i16).collect();
@@ -255,7 +295,7 @@ mod tests {
 // 都在 tokio 那一侧，回调里一行都没有。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 环形缓冲最多存多少毫秒。
@@ -278,56 +318,178 @@ pub enum Error {
     SampleFormat(cpal::SampleFormat),
 }
 
+/// 重建失败之后最多等多久再试。
+const MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 音频线程这一轮之后该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Next {
+    /// 上层叫停了。
+    Stop,
+    /// 重建两条流。
+    Rebuild,
+    /// 什么都不做。
+    Keep,
+}
+
+/// 决定下一步。
+///
+/// **叫停压过一切**：一条正在失败的流不该拦住关闭，否则 `AudioIo::drop`
+/// 会在 join 上一直等到重建成功为止。
+fn next_action(stop: bool, failed: bool, wanted: u64, built: u64) -> Next {
+    if stop {
+        Next::Stop
+    } else if failed || wanted != built {
+        Next::Rebuild
+    } else {
+        Next::Keep
+    }
+}
+
+/// 第 `attempt` 次重建失败之后等多久。
+///
+/// 从 200 毫秒翻倍退到 [`MAX_RETRY_DELAY`]：拔掉的耳机常常马上插回来，所以
+/// 第一次要快；而一台根本没有声卡的机器不该每 200 毫秒被扫一次。
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    let ms = 200u64.saturating_mul(1u64 << attempt.min(10));
+    std::time::Duration::from_millis(ms).min(MAX_RETRY_DELAY)
+}
+
 /// 一条打开着的音频通路。
 ///
 /// 两个环形缓冲都存**设备采样率的单声道**样本：把重采样放在 tokio 那一侧，
 /// 是因为那里才知道自己要的是一整帧还是一段任意长度。
+///
+/// # 流会被重建，所以采样率是原子量
+///
+/// 设备掉了要重开，而重开出来的设备采样率可能和原来那个不一样。把它存成
+/// 一个普通的 `u32` 的话，重建之后 `play()` 会按旧采样率重采样，结果是
+/// 一路变调的声音——比听不见更难查。
 pub struct AudioIo {
     playback: Arc<Mutex<VecDeque<i16>>>,
     capture: Arc<Mutex<VecDeque<i16>>>,
-    output_rate: u32,
-    input_rate: u32,
+    output_rate: Arc<AtomicU32>,
+    input_rate: Arc<AtomicU32>,
+    /// 此刻有没有活着的流。
+    running: Arc<AtomicBool>,
+    /// 想用哪两个设备。
+    wanted: Arc<Mutex<(Option<String>, Option<String>)>>,
+    /// 换设备的代数。变了就重建。
+    generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl AudioIo {
     /// 打开输入与输出。`None` 表示用系统默认设备。
+    ///
+    /// **第一次建不起来仍然是错误**：那一刻上层要据此说"声卡打不开"。
+    /// 建起来之后这条线程就不再放手——设备掉了会退避重连，换设备会重建。
     pub fn start(input: Option<&str>, output: Option<&str>) -> Result<Self, Error> {
         let playback: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let capture: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let stop = Arc::new(AtomicBool::new(false));
+        let running = Arc::new(AtomicBool::new(false));
+        let failed = Arc::new(AtomicBool::new(false));
+        let output_rate = Arc::new(AtomicU32::new(48_000));
+        let input_rate = Arc::new(AtomicU32::new(48_000));
+        let wanted = Arc::new(Mutex::new((
+            input.map(str::to_string),
+            output.map(str::to_string),
+        )));
+        let generation = Arc::new(AtomicU64::new(0));
 
-        let (tx, rx) = std::sync::mpsc::channel::<Result<(u32, u32), Error>>();
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(), Error>>();
         let (pb, cap, st) = (playback.clone(), capture.clone(), stop.clone());
-        let (input, output) = (input.map(str::to_string), output.map(str::to_string));
+        let (run, fail) = (running.clone(), failed.clone());
+        let (orate, irate) = (output_rate.clone(), input_rate.clone());
+        let (want, gen) = (wanted.clone(), generation.clone());
 
         let thread = std::thread::Builder::new()
             .name("can-voice-audio".into())
-            .spawn(
-                move || match build_streams(input.as_deref(), output.as_deref(), pb, cap) {
-                    Ok((out_stream, in_stream, rates)) => {
-                        let _ = tx.send(Ok(rates));
-                        // 流必须活在这条线程上（`!Send`），所以就停在这儿。
-                        while !st.load(Ordering::Relaxed) {
-                            std::thread::park_timeout(std::time::Duration::from_millis(100));
+            .spawn(move || {
+                let mut first = Some(tx);
+                let mut attempt = 0u32;
+                loop {
+                    if st.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let (want_in, want_out) = match want.lock() {
+                        Ok(w) => w.clone(),
+                        Err(p) => p.into_inner().clone(),
+                    };
+                    // 每一轮各读一次：这一轮建的就是这一代，之后代数再变
+                    // 才算"换了设备"。
+                    let built_gen = gen.load(Ordering::Relaxed);
+                    let built = build_streams(
+                        want_in.as_deref(),
+                        want_out.as_deref(),
+                        pb.clone(),
+                        cap.clone(),
+                        fail.clone(),
+                    );
+                    let (out_stream, in_stream, (o, i)) = match built {
+                        Ok(v) => v,
+                        Err(e) => {
+                            run.store(false, Ordering::Relaxed);
+                            // **第一次失败就报给调用方**，语义和从前一样：
+                            // 上层要在那一刻说"声卡打不开，听不见也发不出"。
+                            if let Some(tx) = first.take() {
+                                let _ = tx.send(Err(e));
+                                return;
+                            }
+                            tracing::warn!(error = %e, "could not reopen the audio devices; will retry");
+                            std::thread::park_timeout(retry_delay(attempt));
+                            attempt = attempt.saturating_add(1);
+                            continue;
                         }
-                        drop(in_stream);
-                        drop(out_stream);
+                    };
+                    attempt = 0;
+                    orate.store(o, Ordering::Relaxed);
+                    irate.store(i, Ordering::Relaxed);
+                    fail.store(false, Ordering::Relaxed);
+                    run.store(true, Ordering::Relaxed);
+                    if let Some(tx) = first.take() {
+                        let _ = tx.send(Ok(()));
                     }
-                    Err(e) => {
-                        let _ = tx.send(Err(e));
+
+                    // 流必须活在这条线程上（`!Send`），所以就停在这儿。
+                    let mut stopping = false;
+                    loop {
+                        std::thread::park_timeout(std::time::Duration::from_millis(100));
+                        match next_action(
+                            st.load(Ordering::Relaxed),
+                            fail.load(Ordering::Relaxed),
+                            gen.load(Ordering::Relaxed),
+                            built_gen,
+                        ) {
+                            Next::Keep => continue,
+                            Next::Stop => {
+                                stopping = true;
+                                break;
+                            }
+                            Next::Rebuild => break,
+                        }
                     }
-                },
-            )
+                    run.store(false, Ordering::Relaxed);
+                    drop(in_stream);
+                    drop(out_stream);
+                    if stopping {
+                        return;
+                    }
+                }
+            })
             .map_err(|e| Error::Build(e.to_string()))?;
 
         match rx.recv() {
-            Ok(Ok((output_rate, input_rate))) => Ok(Self {
+            Ok(Ok(())) => Ok(Self {
                 playback,
                 capture,
                 output_rate,
                 input_rate,
+                running,
+                wanted,
+                generation,
                 stop,
                 thread: Some(thread),
             }),
@@ -337,17 +499,49 @@ impl AudioIo {
     }
 
     pub fn output_rate(&self) -> u32 {
-        self.output_rate
+        self.output_rate.load(Ordering::Relaxed)
     }
 
     pub fn input_rate(&self) -> u32 {
-        self.input_rate
+        self.input_rate.load(Ordering::Relaxed)
+    }
+
+    /// 此刻有没有活着的音频流。
+    ///
+    /// 上层每一拍读它：从 true 变 false 要对用户说一句。"能连上、状态绿、
+    /// 说话没人听见"是这个项目反复要躲开的那类故障。
+    pub fn running(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
+    }
+
+    /// 换设备。**立刻生效**，不必等到下一次连接。
+    ///
+    /// 只是记下想要哪两个并叫醒音频线程；真正的重建在那条线程上做，
+    /// 因为 `cpal::Stream` 是 `!Send`。
+    pub fn set_devices(&self, input: Option<&str>, output: Option<&str>) {
+        {
+            let mut w = match self.wanted.lock() {
+                Ok(w) => w,
+                Err(p) => p.into_inner(),
+            };
+            let next = (input.map(str::to_string), output.map(str::to_string));
+            if *w == next {
+                // 没变就别重建：重建会让声音断一下。
+                return;
+            }
+            *w = next;
+        }
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        if let Some(t) = self.thread.as_ref() {
+            t.thread().unpark();
+        }
     }
 
     /// 送一帧 48 kHz 单声道 PCM 去播放。
     pub fn play(&self, pcm48: &[i16]) {
-        let at_device_rate = resample_from_48k(pcm48, self.output_rate);
-        let cap = self.output_rate as usize * RING_MS / 1000;
+        let rate = self.output_rate();
+        let at_device_rate = resample_from_48k(pcm48, rate);
+        let cap = rate as usize * RING_MS / 1000;
         let mut ring = match self.playback.lock() {
             Ok(r) => r,
             Err(p) => p.into_inner(),
@@ -368,7 +562,7 @@ impl AudioIo {
             };
             ring.drain(..).collect()
         };
-        resample_to_48k(&raw, self.input_rate)
+        resample_to_48k(&raw, self.input_rate())
     }
 }
 
@@ -389,6 +583,7 @@ fn build_streams(
     output: Option<&str>,
     playback: Arc<Mutex<VecDeque<i16>>>,
     capture: Arc<Mutex<VecDeque<i16>>>,
+    failed: Arc<AtomicBool>,
 ) -> Result<Streams, Error> {
     use cpal::traits::{DeviceTrait, StreamTrait};
 
@@ -403,13 +598,23 @@ fn build_streams(
     let out_ch = out_cfg.channels();
     let in_ch = in_cfg.channels();
 
-    let err_fn = |e| tracing::warn!(error = %e, "audio stream error");
+    // **回调报错要被记下来**，光 warn 一行的后果是"突然听不见了而界面全绿"：
+    // 拔一次耳机就是这样。音频线程看这个标志决定要不要重开。
+    //
+    // 是一个工厂而不是一个闭包：四种采样格式各建一条流，而闭包不是 Copy。
+    let make_err_fn = || {
+        let failed = failed.clone();
+        move |e| {
+            tracing::warn!(error = %e, "audio stream error");
+            failed.store(true, Ordering::Relaxed);
+        }
+    };
 
     let out_stream = match out_cfg.sample_format() {
         cpal::SampleFormat::I16 => out_dev.build_output_stream(
             &out_cfg.config(),
             move |buf: &mut [i16], _| fill_output(buf, out_ch, &playback),
-            err_fn,
+            make_err_fn(),
             None,
         ),
         cpal::SampleFormat::F32 => out_dev.build_output_stream(
@@ -421,7 +626,7 @@ fn build_streams(
                     *d = s as f32 / 32768.0;
                 }
             },
-            err_fn,
+            make_err_fn(),
             None,
         ),
         other => return Err(Error::SampleFormat(other)),
@@ -432,7 +637,7 @@ fn build_streams(
         cpal::SampleFormat::I16 => in_dev.build_input_stream(
             &in_cfg.config(),
             move |buf: &[i16], _| take_input(buf, in_ch, &capture, in_rate),
-            err_fn,
+            make_err_fn(),
             None,
         ),
         cpal::SampleFormat::F32 => in_dev.build_input_stream(
@@ -444,7 +649,7 @@ fn build_streams(
                     .collect();
                 take_input(&tmp, in_ch, &capture, in_rate);
             },
-            err_fn,
+            make_err_fn(),
             None,
         ),
         other => return Err(Error::SampleFormat(other)),

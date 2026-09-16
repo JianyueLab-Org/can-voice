@@ -17,10 +17,13 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 can-voice-atis = { path = "../../../crates/can-voice-atis" }
+can-voice-datafeed = { path = "../../../crates/can-voice-datafeed" }
 can-voice-fsd = { path = "../../../crates/can-voice-fsd" }
+can-voice-settings = { path = "../../../crates/can-voice-settings" }
+can-voice-log = { path = "../../../crates/can-voice-log" }
+can-voice-update = { path = "../../../crates/can-voice-update" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -311,6 +311,7 @@ dependencies = [
  "can-voice-client",
  "can-voice-proto",
  "can-voice-ptt",
+ "can-voice-settings",
  "can-voice-token",
  "serde",
  "serde_json",
@@ -351,6 +352,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-log"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "can-voice-proto"
 version = "0.1.0"
 dependencies = [
@@ -365,6 +377,15 @@ version = "0.1.0"
 dependencies = [
  "gilrs",
  "rdev",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-settings"
+version = "0.1.0"
+dependencies = [
  "serde",
  "serde_json",
  "tracing",
@@ -394,6 +415,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
+name = "can-voice-update"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
@@ -2379,9 +2410,12 @@ dependencies = [
  "can-voice-app",
  "can-voice-client",
  "can-voice-fsd",
+ "can-voice-log",
  "can-voice-ptt",
+ "can-voice-settings",
  "can-voice-sim",
  "can-voice-token",
+ "can-voice-update",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2389,7 +2423,6 @@ dependencies = [
  "tauri-build",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
