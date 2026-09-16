@@ -491,4 +491,65 @@ mod tests {
     fn the_proto_version_is_the_literal_value_the_protocol_names() {
         assert_eq!(PROTO_VERSION, 1);
     }
+
+    /// 控制面消息的跨实现黄金文件。Go 侧读同一份（`server/internal/control/golden_test.go`）。
+    ///
+    /// 包头早就有 `wire-golden.json` 两边一起测；控制面此前没有对应物，于是这里和
+    /// `server/internal/control/message.go` 是两份完全独立的实现，只靠 e2e 走通的那几条
+    /// 消息间接覆盖。`rejected_xc`、NOTICE 这类少走的路径上，字段改名会**静默**漂：
+    /// 一边改了名，另一边靠 `#[serde(default)]` 解出默认值，两边都不报错，
+    /// 而线上表现是"这个字段永远是空的"。
+    ///
+    /// 规则见黄金文件自己的 `how` / `asymmetries`：**wire 里每一个非 null 的键，
+    /// 都必须原样出现在重新编码的结果里**。不按字节比（serde_json 是字典序、Go 是
+    /// 声明序），也不整体比相等——那会把 Go 的 nil-slice-编成-null 和这边多出的
+    /// 零值键误判成故障。
+    #[test]
+    fn the_control_plane_matches_the_cross_implementation_golden() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../server/testdata/control-golden.json"
+        );
+        let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let golden: serde_json::Value = serde_json::from_slice(&raw).expect("parse golden");
+        let cases = golden["cases"].as_array().expect("cases 不是数组");
+        // 下界：一份被清空的黄金文件不该静默通过。
+        assert!(
+            cases.len() >= 12,
+            "黄金文件只剩 {} 条用例，少于下界 12 —— 是不是被删过？",
+            cases.len()
+        );
+
+        let mut seen = std::collections::BTreeSet::new();
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("<无名>");
+            let wire = case["wire"].as_object().expect("wire 不是对象");
+            let bytes = serde_json::to_vec(&case["wire"]).expect("wire 编不回字节");
+            let msg = Message::decode(&bytes)
+                .unwrap_or_else(|e| panic!("{name}：解不开这条线上样例：{e}"));
+            let out = msg
+                .encode()
+                .unwrap_or_else(|e| panic!("{name}：解开了却编不回去：{e}"));
+            let have: serde_json::Value = serde_json::from_slice(&out).expect("编出来的不是 JSON");
+
+            seen.insert(wire["type"].as_str().expect("type 不是字符串").to_string());
+            for (k, w) in wire {
+                // null 不比：Go 的 nil slice 编成 null，这边编成 []。
+                if w.is_null() {
+                    continue;
+                }
+                let h = have
+                    .get(k)
+                    .unwrap_or_else(|| panic!("{name}：键 {k:?} 在重新编码之后消失了 —— 改名了？"));
+                assert_eq!(h, w, "{name}：键 {k:?} 变了");
+            }
+        }
+
+        // 八个类型一个都不能漏。漏掉的那个就是将来会悄悄漂的那个。
+        for ty in [
+            "HELLO", "READY", "SUB", "SUBACK", "NOTICE", "PING", "PONG", "BYE",
+        ] {
+            assert!(seen.contains(ty), "黄金文件里没有 {ty} 的用例");
+        }
+    }
 }
