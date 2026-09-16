@@ -14,7 +14,18 @@ QUIC 语音扇出服务。无状态：没有数据库、没有持久化、没有
 | `CAN_VOICE_API_PUBKEY` | 是 | can-api 的 Ed25519 公钥，裸 32 字节的 base64 |
 | `CAN_VOICE_FSD_FEED` | 否 | can-fsd 的 SSE，默认 `https://data.ceruleanavi.net/v1/events` |
 | `CAN_VOICE_MAX_RX` | 否 | 单会话订阅频率上限，默认 32，**上限 1024** |
+| `CAN_VOICE_SUFFIX_RANGES` | 否 | 席位后缀兜底半径（海里），逐条覆盖，如 `CTR=300,FSS=700,*=120` |
 | `CAN_VOICE_DEBUG` | 否 | 非空则日志降到 DEBUG |
+
+`CAN_VOICE_SUFFIX_RANGES` 只在 can-fsd datafeed 的 `visual_range` 为 0 时用得上——那是
+权威值，由管制员自己在 `#AA` 里声明，ATIS 席位的则常常是 0。内置那张表（DEL/GND 15、
+TWR 30、APP/DEP 80、CTR 250、FSS 600、ATIS 60，认不出后缀 80）是**估的**，要按中国 FIR
+的实际尺寸校准，而校准一次不该需要改代码重新发版。
+
+**覆盖是逐条的**：没写到的后缀照用内置值，`*` 那一档是认不出后缀时的默认值。写坏了
+（少个 `=`、数字解不开、配成 0 或负数）**服务端起不来**——悄悄回退的话，一个打错了一个
+字符的运维会以为自己校准过了。半径 0 尤其不能配：那会让那个席位谁都听不见，而在语音
+系统里"听不见"比"听得太远"糟糕得多。
 
 `CAN_VOICE_MAX_RX` 有上限，是因为 `internal/router` 里 `maxRejected` 那段算术依赖它：
 一份 SUBACK 要塞进 64 KiB 的控制帧，配到几千之后它就发不出去了，而那时一条**已经生效**

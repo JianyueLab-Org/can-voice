@@ -196,3 +196,72 @@ func TestDistanceEdgeCases(t *testing.T) {
 		t.Fatalf("distance to self = %v, want 0", got)
 	}
 }
+
+// 兜底半径表是**配置**，不是编译期常量：按中国 FIR 的实际尺寸校准一次半径，
+// 不该需要改代码、重新发版、重启服务。
+//
+// 覆盖是**逐条**的：只想把 CTR 调大的人不必把整张表重打一遍，而重打一遍的那
+// 份拷贝一旦漏了一行，漏掉的那个席位会悄悄掉到"认不出后缀"的默认值上。
+func TestSuffixRangeOverrideTouchesOnlyWhatItNames(t *testing.T) {
+	table, err := ParseTable("CTR=300")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := table.RangeNM("ZBPE_CTR"); got != 300 {
+		t.Errorf("CTR = %v, want 300", got)
+	}
+	if got := table.RangeNM("ZSPD_TWR"); got != 30 {
+		t.Errorf("TWR = %v, want the built-in 30", got)
+	}
+}
+
+// 半径 0 不能配。
+//
+// 0 会让那个席位**谁都听不见**，而在语音系统里"听不见"比"听得太远"糟糕得多。
+// 想让一个席位安静下来的办法不是把它的射程配成 0。
+func TestSuffixRangeRefusesZeroAndNegative(t *testing.T) {
+	for _, s := range []string{"TWR=0", "TWR=-5"} {
+		if _, err := ParseTable(s); err == nil {
+			t.Errorf("ParseTable(%q) accepted a range that silences the position", s)
+		}
+	}
+}
+
+// `*` 配的是认不出后缀时那个保守默认值。
+//
+// 它和表里的条目是同一件事的两半，分成两个环境变量只会让人调了一个忘了另一个。
+func TestSuffixRangeStarSetsTheUnknownFallback(t *testing.T) {
+	table, err := ParseTable("*=120")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := table.RangeNM("SOMETHING_ODD"); got != 120 {
+		t.Errorf("unknown suffix = %v, want 120", got)
+	}
+	if got := table.RangeNM("ZSPD_TWR"); got != 30 {
+		t.Errorf("TWR = %v, want the built-in 30", got)
+	}
+}
+
+// 写坏了就**起不来**，不是悄悄用默认值。
+//
+// 悄悄回退的话，一个打错了一个字符的运维以为自己校准过了，而服务端跑的还是估
+// 出来的那张表——没有任何地方会告诉他。
+func TestSuffixRangeRefusesMalformedEntries(t *testing.T) {
+	for _, s := range []string{"TWR", "TWR=", "=30", "TWR=abc", "TWR=30,,", "TWR=30,APP"} {
+		if _, err := ParseTable(s); err == nil {
+			t.Errorf("ParseTable(%q) accepted a malformed table", s)
+		}
+	}
+}
+
+// 空字符串就是"照用内置那张表"。没配过这一项的服务端不该起不来。
+func TestSuffixRangeEmptyKeepsTheBuiltinTable(t *testing.T) {
+	table, err := ParseTable("")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := table.RangeNM("ZULS_FSS"); got != 600 {
+		t.Errorf("FSS = %v, want the built-in 600", got)
+	}
+}

@@ -186,3 +186,48 @@ func TestLoadConfigRejectsAnOutOfRangeMaxRX(t *testing.T) {
 		t.Fatalf("MaxRX = %d, want %d", cfg.MaxRX, maxMaxRX)
 	}
 }
+
+// 兜底半径表可以配，而且配错了**起不来**。
+//
+// 悄悄回退到内置那张估出来的表的话，一个打错了一个字符的运维以为自己校准过了
+// ——而没有任何地方会告诉他服务端跑的还是旧数值。
+func TestLoadConfigHonoursTheSuffixRangeOverride(t *testing.T) {
+	base := map[string]string{
+		"CAN_VOICE_ADDR":       ":64738",
+		"CAN_VOICE_TLS_CERT":   "/tmp/c.pem",
+		"CAN_VOICE_TLS_KEY":    "/tmp/k.pem",
+		"CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+	}
+	with := func(spec string) map[string]string {
+		m := make(map[string]string, len(base)+1)
+		for k, v := range base {
+			m[k] = v
+		}
+		m["CAN_VOICE_SUFFIX_RANGES"] = spec
+		return m
+	}
+
+	cfg, err := LoadConfig(env(with("CTR=300")))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Ranges.RangeNM("ZBPE_CTR"); got != 300 {
+		t.Errorf("CTR = %v, want the 300 override", got)
+	}
+	if got := cfg.Ranges.RangeNM("ZSPD_TWR"); got != 30 {
+		t.Errorf("TWR = %v, want the built-in 30", got)
+	}
+
+	if _, err := LoadConfig(env(with("CTR=nope"))); err == nil {
+		t.Error("LoadConfig accepted an unparsable suffix range table")
+	}
+
+	// 没配过的服务端照样起得来，用的是内置那一份。
+	cfg, err = LoadConfig(env(base))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := cfg.Ranges.RangeNM("ZSPD_TWR"); got != 30 {
+		t.Errorf("TWR = %v, want the built-in 30", got)
+	}
+}

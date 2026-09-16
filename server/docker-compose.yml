@@ -37,6 +37,8 @@ services:
       CAN_VOICE_API_PUBKEY: "${CAN_VOICE_API_PUBKEY}"
       CAN_VOICE_FSD_FEED: "${CAN_VOICE_FSD_FEED:-https://data.ceruleanavi.net/v1/events}"
       CAN_VOICE_MAX_RX: "${CAN_VOICE_MAX_RX:-32}"
+      # 席位后缀兜底半径（海里），逐条覆盖内置那张估出来的表。空着就照用内置值。
+      CAN_VOICE_SUFFIX_RANGES: "${CAN_VOICE_SUFFIX_RANGES:-}"
       CAN_VOICE_DEBUG: "${CAN_VOICE_DEBUG:-}"
     logging:
       driver: json-file

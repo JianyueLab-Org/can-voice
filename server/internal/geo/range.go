@@ -6,8 +6,11 @@
 package geo
 
 import (
+	"fmt"
 	"math"
+	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // 信号质量曲线的两个拐点（spec 7.4）。
@@ -50,15 +53,16 @@ func LineOfSightNM(alt1Ft, alt2Ft float64) float64 {
 	return LOSTermNM(alt1Ft) + LOSTermNM(alt2Ft)
 }
 
-// suffixRange 是席位后缀的兜底半径，单位海里。
+// builtinSuffixRange 是席位后缀的兜底半径，单位海里。
 //
 // 只在 can-fsd datafeed 的 visual_range 为 0 时使用——那是权威值，
 // 由管制员在 #AA 里声明。ATIS 席位的 visual_range 就常常是 0。
 // 这张表不是权威来源，只是权威字段缺失时的兜底。
 //
 // 这张表的数值是估的，需要按中国 FIR 的实际尺寸校准（spec 12）。
-// 它是服务端配置而非编译期常量的理由也在这里：调它不该需要发版。
-var suffixRange = map[string]float64{
+// 它因此是**内置默认值而不是最终答案**：`CAN_VOICE_SUFFIX_RANGES` 可以逐条
+// 覆盖它，校准一次半径不该需要改代码、重新发版。
+var builtinSuffixRange = map[string]float64{
 	"DEL":  15,
 	"GND":  15,
 	"TWR":  30,
@@ -74,20 +78,105 @@ var suffixRange = map[string]float64{
 // "听不见"比"听得太远"糟糕得多。
 const unknownSuffixRange = 80
 
+// unknownKey 是覆盖串里代表"认不出后缀"那一档的键。
+//
+// 和表里的条目共用一个环境变量，是因为它们是同一件事的两半：
+// 分成两个变量只会让人调了一个忘了另一个。
+const unknownKey = "*"
+
+// Table 是一份兜底半径表。
+type Table struct {
+	bySuffix map[string]float64
+	unknown  float64
+}
+
+// DefaultTable 返回内置的那一份。
+func DefaultTable() *Table {
+	m := make(map[string]float64, len(builtinSuffixRange))
+	for k, v := range builtinSuffixRange {
+		m[k] = v
+	}
+	return &Table{bySuffix: m, unknown: unknownSuffixRange}
+}
+
+// ParseTable 读一份覆盖串：`CTR=300,FSS=700,*=120`，单位海里。
+//
+// **覆盖是逐条的**，没有提到的后缀照用内置值：只想把 CTR 调大的人不必把整张表
+// 重打一遍，而重打一遍的那份拷贝一旦漏了一行，漏掉的那个席位会悄悄掉到"认不出
+// 后缀"的默认值上。
+//
+// 写坏了返回错误而不是悄悄回退——悄悄回退的话，一个打错了一个字符的运维以为
+// 自己校准过了，而服务端跑的还是估出来的那张表，没有任何地方会告诉他。
+func ParseTable(spec string) (*Table, error) {
+	t := DefaultTable()
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return t, nil
+	}
+	for _, entry := range strings.Split(spec, ",") {
+		entry = strings.TrimSpace(entry)
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			return nil, fmt.Errorf("suffix range %q is not in the form SUFFIX=NM", entry)
+		}
+		key = strings.ToUpper(strings.TrimSpace(key))
+		if key == "" {
+			return nil, fmt.Errorf("suffix range %q has an empty suffix", entry)
+		}
+		nm, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return nil, fmt.Errorf("suffix range %q is not a number: %w", entry, err)
+		}
+		// 0 会让那个席位谁都听不见。想让一个席位安静下来的办法不是把射程配成 0。
+		if nm <= 0 {
+			return nil, fmt.Errorf("suffix range %q must be greater than zero", entry)
+		}
+		if key == unknownKey {
+			t.unknown = nm
+			continue
+		}
+		t.bySuffix[key] = nm
+	}
+	return t, nil
+}
+
+// RangeNM 按呼号后缀给出兜底半径。
+func (t *Table) RangeNM(callsign string) float64 {
+	callsign = strings.TrimSpace(callsign)
+	i := strings.LastIndex(callsign, "_")
+	if i < 0 {
+		return t.unknown
+	}
+	if r, ok := t.bySuffix[strings.ToUpper(callsign[i+1:])]; ok {
+		return r
+	}
+	return t.unknown
+}
+
+// current 是此刻生效的那张表。
+//
+// 用 atomic.Pointer 而不是普通的包级变量：它在启动时被配置覆盖一次，之后被
+// 每一包的扇出路径读。普通变量的那次写和后面那些读之间没有 happens-before，
+// `-race` 会在第一个并发用例上就把它抓出来。
+var current atomic.Pointer[Table]
+
+// UseTable 换掉此刻生效的表。**只在启动时调用。**
+func UseTable(t *Table) {
+	current.Store(t)
+}
+
 // FallbackRangeNM 按呼号后缀给出兜底半径。
 //
 // 这只是兜底：真正的权威来源是 can-fsd datafeed 里管制员自己声明的
 // visual_range 字段。只有当那个字段是 0（未声明）时才落到这张后缀表上。
 func FallbackRangeNM(callsign string) float64 {
-	callsign = strings.TrimSpace(callsign)
-	i := strings.LastIndex(callsign, "_")
-	if i < 0 {
-		return unknownSuffixRange
+	t := current.Load()
+	if t == nil {
+		// 没配过就是内置那份。**不是恐慌也不是 0**：一个还没走到 LoadConfig
+		// 的调用方（测试、工具）拿到的应该是一个能用的答案。
+		t = DefaultTable()
 	}
-	if r, ok := suffixRange[strings.ToUpper(callsign[i+1:])]; ok {
-		return r
-	}
-	return unknownSuffixRange
+	return t.RangeNM(callsign)
 }
 
 // Quality 把距离与射程之比折算成 0–255 的信号质量。
