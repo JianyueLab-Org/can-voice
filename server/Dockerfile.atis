@@ -9,6 +9,19 @@
 # 语音的进程加上一个 Python 运行时和一整套 Debian 依赖。
 
 FROM rust:1-bookworm AS build
+# **ALSA 的头文件，给一个永远不会碰声卡的容器。**
+#
+# `can-voice-client` 无条件依赖 cpal（音频设备 I/O），所以 `alsa-sys` 的
+# build script 要找得到 alsa 的 pkg-config。机队**运行时**一个设备都不开
+# ——它给的 Config 里 `audio_devices: false`，音频是 TTS 合成出来的 PCM 直接
+# push 进去的。
+#
+# 所以这一行纯粹是为了让链接过得去。想去掉的话得把 cpal 放进
+# `can-voice-client` 的一个 feature 后面，那是四个桌面端一起动的改动，
+# 不值得为一个 Dockerfile 里的两行做。
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libasound2-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ ./crates/
@@ -17,8 +30,10 @@ RUN cargo build --release --locked -p can-voice-atis --bin can-voice-atis
 
 # 运行时要 ffmpeg 和 edge-tts，所以不能是 distroless。
 FROM debian:bookworm-slim
+# libasound2 是**运行时**也要的：cpal 动态链接 libasound.so.2，哪怕一个设备
+# 都不开，缺了它进程起不来（报 "cannot open shared object file"）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates ffmpeg python3 python3-pip \
+        ca-certificates ffmpeg python3 python3-pip libasound2 \
     && pip3 install --no-cache-dir --break-system-packages edge-tts \
     && apt-get purge -y python3-pip \
     && apt-get autoremove -y \

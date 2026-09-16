@@ -1,51 +1,21 @@
-通播机队装进 compose：拍板机队出声，桌面那支只做稿子
+机队镜像补上 ALSA：一个永远不碰声卡的容器，为什么要链接 alsa
 
-机队本身早就写好了（`crates/can-voice-atis` 的可执行文件那一半：datafeed 轮询、
-edge-tts、ffmpeg 转码、推到 FREQ_ 频道）。缺的从来不是代码，是**它没有被部署**
-——不在 compose 里，不在镜像里，`.env.example` 里一个字都没有。所以"通播不出声"
-在部署那边看起来会像一个功能缺失，而不是一行没填的配置。
+PR 的镜像 job 报 `alsa-sys` 找不到 alsa —— 正是开这个 PR 要验的那件事，本机没有
+docker 验不了。
 
-## 拍板：机队出声
+`can-voice-client` **无条件**依赖 cpal（音频设备 I/O），所以 `alsa-sys` 的
+build script 要有 alsa 的 pkg-config。而机队**运行时一个设备都不开** ——
+`station.rs` 给的 Config 里写着 `audio_devices: false`，音频是 TTS 合成出来的
+PCM 直接 push 进去的。
 
-`lib.rs` 的模块头原本有一整节写着"这一条留给人拍板"，三条路各有代价。定了：
-**机队出声，`apps/atis` 只做稿子。**
+所以这两行纯粹是为了让链接过得去，不是这个容器真的需要声卡。注释里写明白了，
+否则下一个人看到一个没有声卡的容器装 ALSA 只会以为是抄错了。
 
-理由是机队**不会睡觉**——通播要在没人盯着的时候一直播，而桌面那条路系在一台会
-合盖、会断网、会被关掉的笔记本上。
+runtime 那层也要 `libasound2`：cpal 动态链接 libasound.so.2，哪怕一个设备都不开，
+缺了它进程起不来。
 
-**代价照实写进文档**：机队手上只有 `text_atis`，念的是电码原文
-（`09004MPS` → "zero niner zero zero four MPS"），不是模板渲染出来的语音形态。
-模板那套 `:VOX`、voicefix、中文稿机队一样用不上。要去掉这个代价得让语音形态也
-上线，而那需要 can-fsd 上一个新字段——不是这个仓库能单方面决定的，所以留着。
-
-这条线一旦模糊，同一个频率上就有两个声音。can-audio 那边正是这样（桌面那支开
-自己的 Mumble 连接，服务端机队又把 datafeed 里的全播一遍），而它的文档从没提过
-——那不是设计，是没人看见过的重叠。
-
-## 部署：第二个镜像，不是同一个
-
-服务端是纯 Go、静态、distroless；机队要 Python（edge-tts）和 ffmpeg。塞进同一个
-镜像的话，一个**转发着所有人语音的进程**会平白多出一个 Python 运行时和一整套
-Debian 依赖。
-
-而且这不只是洁癖：`server/internal/router/fanout.go` 有测试钉着"服务端永远不碰
-音频"，服务端一个 Opus 依赖都没有。合成语音必然要编码音频，所以机队只能是**语音
-服务端的一个普通客户端**——它拿真实成员账号换票，走和所有人一样的路，服务端不
-认识它。
-
-## 两处本来会在 CI 里才炸的
-
-- **`.dockerignore` 排掉了 `crates/`。** 它原本是 `*` 加三条 `!`（go.mod、
-  go.sum、server/），所以 `Dockerfile.atis` 的 `COPY crates/` 会报 not found
-  ——读起来像文件不存在，而文件就在仓库里。
-- **`paths` 本来写成了 YAML 锚点。** GitHub Actions 不支持锚点，写了会在解析
-  workflow 时就失败。改成两份一模一样的清单。
-
-顺带：镜像的 gha 缓存按镜像名分 scope。共用一个 scope 的话两个镜像会互相顶掉
-对方的缓存，表现是每次全量构建，而没有任何东西报错。
-
-机队只出 amd64：它是 Rust，交叉编译不像 Go 那样白送，buildx 得靠 QEMU 模拟一整次
-arm64 的 cargo build。
+想去掉的话得把 cpal 放进 `can-voice-client` 的一个 feature 后面 —— 那是四个桌面端
+一起动的改动，不值得为一个 Dockerfile 里的两行做。
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01MuSTw2foJERFBC1gtzWFWY
