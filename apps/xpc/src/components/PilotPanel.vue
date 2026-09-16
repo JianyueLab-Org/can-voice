@@ -4,9 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 import LogPanel from "./LogPanel.vue";
 import InstallWizard from "./InstallWizard.vue";
 
-/// 已经存下来的 CAN 号，寄日志时预填，省得再打一遍。
-const props = defineProps<{ cid?: string }>();
-import type { FlightPlan, Settings } from "../types";
+/// `cid` 是已经存下来的 CAN 号，寄日志时预填，省得再打一遍；
+/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来。
+const props = defineProps<{ cid?: string; csl?: CslView }>();
+import type { CslView, FlightPlan, Settings } from "../types";
 import { emptyFlightPlan } from "../types";
 
 interface BindingView {
@@ -23,6 +24,8 @@ const outputs = ref<string[]>([]);
 const input = ref("");
 const output = ref("");
 const inject = ref(true);
+const range = ref(200);
+const cslDir = ref("");
 const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
 const keyboardOk = ref(true);
@@ -40,6 +43,8 @@ onMounted(async () => {
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
   inject.value = s.inject;
+  range.value = s.traffic_range_nm;
+  cslDir.value = s.csl_dir;
   plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 });
@@ -55,6 +60,14 @@ const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
 
 const applyInject = () => invoke("set_injection", { on: inject.value });
+
+/** 夹过的那个数要回填到框里：填 9999 之后该看到 500，而不是自己填的那个。 */
+async function applyRange() {
+  range.value = await invoke<number>("set_traffic_range", { nm: Math.round(range.value) });
+}
+
+/** 改完立刻重扫。不重扫的话，填对了路径的人做的这件事看起来毫无反应。 */
+const applyCslDir = () => invoke("set_csl_dir", { dir: cslDir.value });
 
 async function push() {
   await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
@@ -168,6 +181,45 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">换设备立刻生效。</p>
+
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">显示距离</span>
+        <input
+          v-model.number="range"
+          type="number"
+          min="5"
+          max="500"
+          class="w-20 rounded border px-2 py-1"
+          @change="applyRange"
+        />
+        <span class="opacity-60">
+          海里。TCAS 只有 64 个位置，调小一点能把它们留给近处那几架。
+        </span>
+      </label>
+
+      <!-- CSL 扫到几个要显示出来：扫不到的表现是"天上是空的"，和没装插件、
+           和 UDP 不通长得一模一样，而三者要做的事完全不同。 -->
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">CSL 目录</span>
+        <input
+          v-model="cslDir"
+          placeholder="留空就跟着 X-Plane 目录走"
+          class="flex-1 rounded border px-2 py-1 font-mono"
+          @change="applyCslDir"
+          @keyup.enter="applyCslDir"
+        />
+        <button class="rounded border px-2 py-1" @click="applyCslDir">重扫</button>
+      </label>
+      <p v-if="props.csl" class="opacity-60">
+        <template v-if="props.csl.loading">正在扫 {{ props.csl.root }}…</template>
+        <template v-else-if="props.csl.models">
+          扫到 {{ props.csl.models }} 个模型（{{ props.csl.root }}）
+        </template>
+        <span v-else class="text-amber-700">
+          {{ props.csl.root }} 里一个模型都没有——天上不会画出任何他机。
+          几个 GB 的 CSL 包常常在另一块盘上，那就把路径填在这里。
+        </span>
+      </p>
 
       <div class="flex flex-col gap-2">
         <span class="font-semibold">按键发话（PTT）</span>

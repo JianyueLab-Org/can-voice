@@ -37,8 +37,13 @@ const PUMP_INTERVAL: Duration = Duration::from_millis(200);
 const PLUGIN_INTERVAL: Duration = Duration::from_millis(50);
 /// TCAS 只有 64 个位置。
 const MAX_TRAFFIC: usize = 64;
-/// 超出这个距离的不往插件送——画不出来的飞机白占 TCAS 的位置。
-const MAX_RANGE_NM: f64 = 200.0;
+/// 他机显示距离的默认值。超出这个距离的不往插件送——画不出来的飞机白占
+/// TCAS 的位置。**可配**：旧版就有 `traffic_range_nm`，帧数紧张的人要能调小。
+const DEFAULT_RANGE_NM: u32 = 200;
+/// 夹住。填 0 的人看到一片空天会以为程序坏了；填得极大的人会把仅有的 64 个
+/// TCAS 位置浪费在屏幕外面的飞机上，近处真正要看的那几架反而被挤掉。
+const MIN_RANGE_NM: u32 = 5;
+const MAX_RANGE_NM: u32 = 500;
 /// 多久去问一轮机型和配置。
 const ASK_INTERVAL: Duration = Duration::from_secs(2);
 /// 同一架飞机的配置多久重问一次。灯和襟翼一直在变。
@@ -75,6 +80,24 @@ pub struct Settings {
     /// （绿色版、搬过目录、装在另一块盘上），那种人每次开窗口都要重填一遍。
     #[serde(default)]
     pub xplane_root: String,
+    /// 他机显示距离（海里）。
+    ///
+    /// **默认值走 `default_range` 而不是 `0`**：老的设置文件里没有这一项，
+    /// 反序列化拿到 0 会被夹成最小值，等于一次升级把所有人的可见范围砍到 5 海里。
+    #[serde(default = "default_range")]
+    pub traffic_range_nm: u32,
+    /// CSL 包放在哪。空的表示跟着 X-Plane 目录走。
+    #[serde(default)]
+    pub csl_dir: String,
+}
+
+fn default_range() -> u32 {
+    DEFAULT_RANGE_NM
+}
+
+/// 把界面上填的数夹进讲得通的范围。
+fn clamp_range(nm: u32) -> u32 {
+    nm.clamp(MIN_RANGE_NM, MAX_RANGE_NM)
 }
 
 fn yes() -> bool {
@@ -93,6 +116,9 @@ pub struct App {
     settings: Mutex<Settings>,
     /// 注入开关。注入的那几条循环每一拍读它。
     inject: Arc<std::sync::atomic::AtomicBool>,
+    /// 他机显示距离（海里）。和 `inject` 一样是给那条 50 ms 的循环读的，
+    /// 所以是原子量不是锁——那条循环不该为了一个数去抢设置的锁。
+    traffic_range: Arc<std::sync::atomic::AtomicU32>,
     traffic: Arc<Mutex<TrafficTable>>,
     /// 收发过的文字消息。**攒在这里而不是靠事件推**：窗口重开之前
     /// 管制员说过的话，靠事件流是收不到的。
@@ -100,6 +126,8 @@ pub struct App {
     /// 在线管制席位。
     controllers: Arc<Mutex<ControllerTable>>,
     csl: Arc<Mutex<ModelSet>>,
+    /// 还在扫 CSL。几个 GB 的包要几十秒，这段时间里"扫到 0 个"不是结论。
+    csl_loading: Arc<std::sync::atomic::AtomicBool>,
     http: reqwest::Client,
     ptt: Mutex<Option<can_voice_ptt::PttWatcher>>,
 }
@@ -120,6 +148,9 @@ impl App {
             },
             store,
             inject: Arc::new(std::sync::atomic::AtomicBool::new(settings.inject)),
+            traffic_range: Arc::new(std::sync::atomic::AtomicU32::new(clamp_range(
+                settings.traffic_range_nm,
+            ))),
             settings: Mutex::new(settings),
             traffic: Arc::new(Mutex::new(TrafficTable::new())),
             chat: Arc::new(Mutex::new(ChatLog::default())),
@@ -127,12 +158,22 @@ impl App {
             // CSL 在**后台**加载：几个 GB 的包扫一遍要几十秒，放在这里会让
             // 窗口几十秒打不开，而用户看到的是程序卡死。
             csl: Arc::new(Mutex::new(ModelSet::default())),
+            // 从第一帧起就是"正在扫"：`run()` 紧接着就会 spawn，而扫之前的 0
+            // 不是"一个都没有"。
+            csl_loading: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             http: reqwest::Client::builder()
                 .user_agent(concat!("xpc-for-can/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_default(),
             ptt: Mutex::new(None),
         }
+    }
+
+    /// 他机显示距离（海里）。给界面和那条 50 ms 的循环共用。
+    fn range_nm(&self) -> f64 {
+        self.traffic_range
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .into()
     }
 
     fn settings_snapshot(&self) -> Settings {
@@ -155,14 +196,30 @@ impl App {
     }
 }
 
-/// CSL 包放在哪儿。
-///
-/// 默认是 X-Plane 那套插件的老地方；装在别处（几个 GB 的包常常在另一块盘上）
-/// 就用 `CAN_XPC_CSL_DIR` 指过去。
-fn csl_root() -> std::path::PathBuf {
+/// CSL 包放在哪儿。环境变量最大——它是给开发和排障用的，不该被设置文件盖掉。
+fn csl_root(s: &Settings) -> std::path::PathBuf {
     std::env::var_os("CAN_XPC_CSL_DIR")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("Resources/plugins/CSL"))
+        .unwrap_or_else(|| csl_dir(&s.csl_dir, &s.xplane_root))
+}
+
+/// 设置里填的优先，其次跟着 X-Plane 目录走，都没有才是那条相对路径。
+///
+/// **跟着 X-Plane 目录走这一步很要紧。** 只剩那条相对路径的话，打包出来的程序
+/// 的当前目录是用户双击时所在的目录，几乎注定扫不到；而扫不到的表现是"天上是
+/// 空的"，和没装插件、和 UDP 不通在界面上长得一模一样。装插件那一步已经问出了
+/// X-Plane 装在哪，不该再让人填第二遍。
+fn csl_dir(typed: &str, xplane_root: &str) -> std::path::PathBuf {
+    if !typed.trim().is_empty() {
+        return std::path::PathBuf::from(typed.trim());
+    }
+    if !xplane_root.trim().is_empty() {
+        return std::path::Path::new(xplane_root.trim())
+            .join("Resources")
+            .join("plugins")
+            .join("CSL");
+    }
+    std::path::PathBuf::from("Resources/plugins/CSL")
 }
 
 impl Default for App {
@@ -206,6 +263,22 @@ pub struct View {
     pub controllers: Vec<ControllerEntry>,
     /// X-Plane 插件。`None` = 没听到过它——没装、没启用，或者 X-Plane 没开。
     pub plugin: Option<PluginView>,
+    /// CSL 扫到了什么。
+    pub csl: CslView,
+}
+
+/// CSL 那一侧的状况。
+///
+/// **要报出来**：扫不到模型的表现是"天上是空的"，和没装插件、和 UDP 不通在界面
+/// 上长得一模一样，而三者要做的事完全不同。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct CslView {
+    /// 扫的是哪个目录。填错路径的人得看得见自己填的是什么。
+    pub root: String,
+    /// 扫到几个模型。
+    pub models: usize,
+    /// 还在扫。几个 GB 的包要几十秒，这段时间里的 0 不是"一个都没有"。
+    pub loading: bool,
 }
 
 /// 把模拟器那一帧变成一次位置上报。
@@ -319,6 +392,7 @@ async fn connect(
         app.traffic.clone(),
         app.csl.clone(),
         app.inject.clone(),
+        app.traffic_range.clone(),
     );
     *app.fsd.lock().expect("fsd") = Some(fsd);
     // 上线成功才记住这一组：连不上的那一组多半有一项是打错的。
@@ -361,6 +435,31 @@ fn set_injection(app: tauri::State<'_, App>, on: bool) {
 /// 换录音 / 播放设备。`None` 是跟系统默认。
 ///
 /// **立刻生效**，不必重新上线：核心库在音频线程上重建两条流。
+/// 改他机显示距离。**立刻生效**：那条循环每一拍读这个原子量。
+#[tauri::command]
+fn set_traffic_range(app: tauri::State<'_, App>, nm: u32) -> u32 {
+    let nm = clamp_range(nm);
+    app.traffic_range
+        .store(nm, std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.traffic_range_nm = nm);
+    // 把夹过的那个数还回去：界面上填 9999 之后该看到 500，而不是自己填的那个。
+    nm
+}
+
+/// 改 CSL 目录，并**立刻重扫**。
+///
+/// 不重扫的话，填对了路径的人要关掉程序再开一次才看得到飞机，而他刚刚做的
+/// 那件事看起来毫无反应。
+#[tauri::command]
+fn set_csl_dir(app: tauri::State<'_, App>, dir: String) {
+    app.update_settings(|s| s.csl_dir = dir);
+    spawn_csl_load(
+        app.csl.clone(),
+        app.csl_loading.clone(),
+        csl_root(&app.settings_snapshot()),
+    );
+}
+
 #[tauri::command]
 fn set_audio_devices(app: tauri::State<'_, App>, input: Option<String>, output: Option<String>) {
     app.voice.set_audio_devices(input.clone(), output.clone());
@@ -428,7 +527,7 @@ fn build_view(app: &App) -> View {
             now,
             origin,
             Some(MAX_TRAFFIC),
-            Some(MAX_RANGE_NM),
+            Some(app.range_nm()),
         ),
         sim,
         link: last_link.as_ref().map(|e| e.state),
@@ -450,6 +549,11 @@ fn build_view(app: &App) -> View {
                 drawn: s.drawn,
                 version_ok: bridge::version_matches(&s),
             }),
+        csl: CslView {
+            root: csl_root(&app.settings_snapshot()).display().to_string(),
+            models: app.csl.lock().expect("csl").len(),
+            loading: app.csl_loading.load(std::sync::atomic::Ordering::Relaxed),
+        },
     }
 }
 
@@ -774,6 +878,7 @@ fn spawn_plugin_feed(
     table: Arc<Mutex<TrafficTable>>,
     csl: Arc<Mutex<ModelSet>>,
     inject: Arc<std::sync::atomic::AtomicBool>,
+    range: Arc<std::sync::atomic::AtomicU32>,
 ) {
     tokio::spawn(async move {
         let Ok(socket) = tokio::net::UdpSocket::bind("127.0.0.1:0").await else {
@@ -787,10 +892,12 @@ fn spawn_plugin_feed(
             tick.tick().await;
             let now = monotonic();
             let origin = sim.snapshot().map(|s| (s.latitude, s.longitude));
+            // 每一拍读一次：改了距离要立刻生效，而不是等下次开程序。
+            let max_range = f64::from(range.load(std::sync::atomic::Ordering::Relaxed));
             let entries = {
                 let mut table = table.lock().expect("traffic");
                 table.prune(now);
-                let entries = table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM));
+                let entries = table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(max_range));
                 // 匹配还没匹配过的。**放在这里而不是收到机型那一刻**：
                 // 只给要画的那几架匹配，一屏之外的不花这个钱。
                 let models = csl.lock().expect("csl");
@@ -807,7 +914,7 @@ fn spawn_plugin_feed(
                 }
                 // 匹配之后再取一次，这一份才带得上刚填好的模型路径。
                 drop(models);
-                table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM))
+                table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(max_range))
             };
             // 关掉注入送的是**一份空表**，不是停掉这条循环：停掉的话已经画出来的
             // 飞机会留在天上不动，而空表让它们按正常的消失路径被撤掉。
@@ -826,9 +933,16 @@ fn spawn_plugin_feed(
 }
 
 /// 在后台把 CSL 扫进来。几个 GB 的包要几十秒，不能挡着窗口。
-fn spawn_csl_load(csl: Arc<Mutex<ModelSet>>) {
+///
+/// 扫完（哪怕一个也没扫到）都要把 `loading` 放下来：界面靠它区分"还在扫"
+/// 和"扫完了，没有"。
+fn spawn_csl_load(
+    csl: Arc<Mutex<ModelSet>>,
+    loading: Arc<std::sync::atomic::AtomicBool>,
+    root: std::path::PathBuf,
+) {
+    loading.store(true, std::sync::atomic::Ordering::Relaxed);
     std::thread::spawn(move || {
-        let root = csl_root();
         let loaded = can_voice_sim::csl::load(&root);
         if loaded.is_empty() {
             tracing::warn!(
@@ -837,6 +951,7 @@ fn spawn_csl_load(csl: Arc<Mutex<ModelSet>>) {
             );
         }
         *csl.lock().expect("csl") = loaded;
+        loading.store(false, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
@@ -956,7 +1071,11 @@ pub fn run() {
     can_voice_log::init("xpc-for-can", std::env::args().any(|a| a == "--debug"));
 
     let app = App::new();
-    spawn_csl_load(app.csl.clone());
+    spawn_csl_load(
+        app.csl.clone(),
+        app.csl_loading.clone(),
+        csl_root(&app.settings_snapshot()),
+    );
     tauri::Builder::default()
         .manage(app)
         .invoke_handler(tauri::generate_handler![
@@ -976,6 +1095,8 @@ pub fn run() {
             file_flight_plan,
             settings,
             set_injection,
+            set_traffic_range,
+            set_csl_dir,
             set_audio_devices,
             keyboard_ptt_supported,
             ptt_bindings,
@@ -1102,6 +1223,61 @@ mod tests {
         assert_eq!(chosen_root(None, "/old"), Some("/old".to_string()));
         // 两个都没有：交给自动探测，而不是拿一个空路径去看。
         assert_eq!(chosen_root(None, ""), None);
+    }
+
+    /// CSL 包在哪：设置里填的优先，其次跟着 X-Plane 目录走，都没有才是那条相对路径。
+    ///
+    /// **跟着 X-Plane 目录走这一步是新的。** 默认值原来只有那条相对路径，而打包
+    /// 出来的程序的当前目录是用户双击时所在的目录，几乎注定扫不到；扫不到的表现
+    /// 是"天上是空的"——和没装插件、和 UDP 不通在界面上长得一模一样。既然装插件
+    /// 那一步已经问出了 X-Plane 装在哪，就不该再让人填第二遍。
+    #[test]
+    fn the_csl_directory_follows_the_x_plane_root_when_nobody_typed_one() {
+        assert_eq!(
+            csl_dir("/disk2/CSL", "/games/XP12"),
+            std::path::PathBuf::from("/disk2/CSL")
+        );
+        assert_eq!(
+            csl_dir("", "/games/XP12"),
+            std::path::Path::new("/games/XP12")
+                .join("Resources")
+                .join("plugins")
+                .join("CSL")
+        );
+        assert_eq!(
+            csl_dir("", ""),
+            std::path::PathBuf::from("Resources/plugins/CSL")
+        );
+    }
+
+    /// 他机显示距离夹在讲得通的范围里。
+    ///
+    /// 填 0 的人看到一片空天会以为程序坏了；填 9999 的人会把 TCAS 仅有的 64 个
+    /// 位置浪费在屏幕外面的飞机上，近处真正要看的那几架反而被挤掉。
+    #[test]
+    fn a_traffic_range_outside_what_makes_sense_is_clamped() {
+        assert_eq!(clamp_range(0), MIN_RANGE_NM);
+        assert_eq!(clamp_range(9999), MAX_RANGE_NM);
+        assert_eq!(clamp_range(80), 80);
+    }
+
+    /// 扫到了几个 CSL 模型要报出来。
+    ///
+    /// 扫不到的表现是"天上是空的"——和没装插件、和 UDP 不通在界面上长得一模一样，
+    /// 而三者要做的事完全不同。
+    #[test]
+    fn the_view_says_how_many_csl_models_were_found() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let app = App::new();
+        *app.csl.lock().expect("csl") =
+            can_voice_sim::csl::ModelSet::new(vec![can_voice_sim::csl::Model {
+                name: "B738".into(),
+                icao: "B738".into(),
+                ..Default::default()
+            }]);
+
+        assert_eq!(build_view(&app).csl.models, 1);
     }
 
     /// **COM1 电门关着就退订。** 关了电门还在频率上说话，对管制来说是个幽灵。

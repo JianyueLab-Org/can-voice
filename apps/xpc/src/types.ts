@@ -53,6 +53,23 @@ export interface View {
   controllers: ControllerEntry[];
   /** X-Plane 插件。`null` = 没听到过它：没装、没启用，或者 X-Plane 没开。 */
   plugin: PluginView | null;
+  /** CSL 扫到了什么。 */
+  csl: CslView;
+}
+
+/**
+ * CSL 那一侧的状况。
+ *
+ * **要显示出来**：扫不到模型的表现是"天上是空的"，和没装插件、和 UDP 不通
+ * 在界面上长得一模一样，而三者要做的事完全不同。
+ */
+export interface CslView {
+  /** 扫的是哪个目录。 */
+  root: string;
+  /** 扫到几个模型。 */
+  models: number;
+  /** 还在扫。几个 GB 的包要几十秒，这段时间里的 0 不是"一个都没有"。 */
+  loading: boolean;
 }
 
 export function mhz(khz: number | null | undefined): string {
@@ -122,6 +139,10 @@ export interface Settings {
   inject: boolean;
   /** 上次装插件用的 X-Plane 目录。 */
   xplane_root: string;
+  /** 他机显示距离（海里）。 */
+  traffic_range_nm: number;
+  /** CSL 包放在哪。空的表示跟着 X-Plane 目录走。 */
+  csl_dir: string;
 }
 
 /** 他机插件装好了没有。取值和 Rust 那边的 `install::State` 一一对应。 */
