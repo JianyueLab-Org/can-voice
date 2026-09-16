@@ -316,6 +316,51 @@ impl SimVarSource for Unavailable {
     fn close(&mut self) {}
 }
 
+/// 往模拟器里放他机的那一头。
+///
+/// 和 [`SimVarSource`] 分开，是因为**它们各自拿一条 SimConnect 连接**。
+/// SimConnect 的 handle 不是线程安全的，而读数据那条跑在自己的阻塞线程上
+/// （C 函数会把 tokio 执行器卡住）；共用一个 handle 就得加锁，等于把注入
+/// 和轮询串起来。SimConnect 本来就允许一个进程开多条连接，用两条更简单。
+pub trait TrafficSink: Send + 'static {
+    /// 连上。模拟器没开就是打不开——那是常态，不是错误。
+    fn open(&mut self) -> Result<(), String>;
+
+    /// 把这一批动作发下去。
+    ///
+    /// 返回**这一批之后收到的新建回音**：`Ok` 里是 `(呼号, object_id)`，
+    /// `Err` 里是建失败的呼号。新建是异步的——发下去不等于建成了，回音要靠
+    /// 后面的 [`Self::pump`] 收。
+    fn apply(&mut self, actions: &[crate::inject::Action]) -> Result<(), String>;
+
+    /// 收新建的回音。返回 `(呼号, 结果)`，`None` 表示这一架建失败了。
+    fn pump(&mut self) -> Vec<(String, Option<u32>)>;
+
+    fn close(&mut self);
+}
+
+/// 不在 Windows 上时的那一份：什么都不做。
+#[derive(Debug, Default)]
+pub struct NoTraffic;
+
+impl TrafficSink for NoTraffic {
+    fn open(&mut self) -> Result<(), String> {
+        Err("SimConnect is only available on Windows".into())
+    }
+    fn apply(&mut self, _actions: &[crate::inject::Action]) -> Result<(), String> {
+        Err("SimConnect is only available on Windows".into())
+    }
+    fn pump(&mut self) -> Vec<(String, Option<u32>)> {
+        Vec::new()
+    }
+    fn close(&mut self) {}
+}
+
+#[cfg(windows)]
+pub use ffi::SimConnectTraffic;
+#[cfg(not(windows))]
+pub type SimConnectTraffic = NoTraffic;
+
 #[cfg(windows)]
 pub use ffi::SimConnectSource;
 
@@ -346,7 +391,7 @@ mod ffi {
     //! [`super::all_simvars`] 一一对应。改那张表的顺序而不改这里，读出来的
     //! 每一个值都会串位——而每一个值单独看都是合法的数字。
 
-    use super::{all_simvars, SimVarSource};
+    use super::{all_simvars, SimVarSource, TrafficSink};
     use std::collections::HashMap;
     use std::ffi::c_void;
     use std::os::raw::{c_char, c_double, c_int, c_ulong};
@@ -362,12 +407,93 @@ mod ffi {
     const OBJECT_ID_USER: c_ulong = 0;
     /// `SIMCONNECT_RECV_ID_SIMOBJECT_DATA`
     const RECV_ID_SIMOBJECT_DATA: c_ulong = 8;
+    /// `SIMCONNECT_RECV_ID_ASSIGNED_OBJECT_ID`——新建 AI 机的回音。
+    const RECV_ID_ASSIGNED_OBJECT_ID: c_ulong = 12;
+    /// `SIMCONNECT_RECV_ID_EXCEPTION`——**新建失败走的是这条**，不是返回值。
+    ///
+    /// `AICreateNonATCAircraft` 是异步的：标题不存在时它照样返回成功，失败是
+    /// 过一会儿以一个 EXCEPTION 回来的，里面带着当初那个 request id。所以
+    /// request id 必须能反查回呼号，否则失败了也不知道是哪一架。
+    const RECV_ID_EXCEPTION: c_ulong = 1;
+    /// 他机位置的数据定义 id。和读自机的 [`DEF_ID`] 分属两条连接，不会撞。
+    const TRAFFIC_DEF_ID: c_ulong = 2;
+    /// `SIMCONNECT_DATA_SET_FLAG_DEFAULT`
+    const SET_FLAG_DEFAULT: c_ulong = 0;
 
     #[repr(C)]
     struct Recv {
         size: c_ulong,
         version: c_ulong,
         id: c_ulong,
+    }
+
+    /// `SIMCONNECT_RECV_ASSIGNED_OBJECT_ID`
+    #[repr(C)]
+    struct RecvAssignedObjectId {
+        base: Recv,
+        request_id: c_ulong,
+        object_id: c_ulong,
+    }
+
+    /// `SIMCONNECT_RECV_EXCEPTION`
+    #[repr(C)]
+    struct RecvException {
+        base: Recv,
+        exception: c_ulong,
+        /// 出问题的那个包的序号。**不是 request id**——要靠它反查得先记下
+        /// 每次调用的 send id，而 `SimConnect_GetLastSentPacketID` 才给得出。
+        send_id: c_ulong,
+        index: c_ulong,
+    }
+
+    /// `SIMCONNECT_DATA_INITPOSITION`
+    ///
+    /// 布局是六个 f64 加两个 DWORD，56 字节。**顺序和类型都不能动**——
+    /// 它是直接按字节传给 SimConnect 的，错一个字段就是飞机出现在地球另一边。
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    struct InitPosition {
+        latitude: c_double,
+        longitude: c_double,
+        /// 英尺。
+        altitude: c_double,
+        pitch: c_double,
+        bank: c_double,
+        heading: c_double,
+        on_ground: c_ulong,
+        /// 节。
+        airspeed: c_ulong,
+    }
+
+    /// 更新他机位置用的数据定义。**六个 f64 加两个 f64 的开关**——
+    /// `SetDataOnSimObject` 只认 FLOAT64，所以 `SIM ON GROUND` 也是 f64。
+    ///
+    /// 这张表的顺序就是 `AddToDataDefinition` 的调用顺序，也就是结构体里
+    /// 字段的顺序。**改一个而不改另一个，飞机的每一个值都会串位**，而串位
+    /// 之后每一个值单独看都是合法的数字。
+    const TRAFFIC_VARS: [(&str, &str); 8] = [
+        ("PLANE LATITUDE", "degrees"),
+        ("PLANE LONGITUDE", "degrees"),
+        ("PLANE ALTITUDE", "feet"),
+        ("PLANE PITCH DEGREES", "degrees"),
+        ("PLANE BANK DEGREES", "degrees"),
+        ("PLANE HEADING DEGREES TRUE", "degrees"),
+        ("SIM ON GROUND", "bool"),
+        ("AIRSPEED TRUE", "knots"),
+    ];
+
+    /// 和 [`TRAFFIC_VARS`] 一一对应。
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, Default, PartialEq)]
+    struct TrafficPosition {
+        latitude: c_double,
+        longitude: c_double,
+        altitude: c_double,
+        pitch: c_double,
+        bank: c_double,
+        heading: c_double,
+        on_ground: c_double,
+        airspeed: c_double,
     }
 
     #[repr(C)]
@@ -425,6 +551,24 @@ mod ffi {
     ) -> c_int;
     type FnGetNextDispatch =
         unsafe extern "system" fn(Handle, *mut *mut Recv, *mut c_ulong) -> c_int;
+    type FnAICreateNonATCAircraft = unsafe extern "system" fn(
+        Handle,
+        *const c_char,
+        *const c_char,
+        InitPosition,
+        c_ulong,
+    ) -> c_int;
+    type FnAIRemoveObject = unsafe extern "system" fn(Handle, c_ulong, c_ulong) -> c_int;
+    type FnGetLastSentPacketID = unsafe extern "system" fn(Handle, *mut c_ulong) -> c_int;
+    type FnSetDataOnSimObject = unsafe extern "system" fn(
+        Handle,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        c_ulong,
+        *mut c_void,
+    ) -> c_int;
 
     extern "system" {
         fn LoadLibraryA(name: *const c_char) -> *mut c_void;
@@ -438,6 +582,10 @@ mod ffi {
         add_to_data_definition: FnAddToDataDefinition,
         request_data_on_sim_object: FnRequestDataOnSimObject,
         get_next_dispatch: FnGetNextDispatch,
+        ai_create_non_atc_aircraft: FnAICreateNonATCAircraft,
+        ai_remove_object: FnAIRemoveObject,
+        set_data_on_sim_object: FnSetDataOnSimObject,
+        get_last_sent_packet_id: FnGetLastSentPacketID,
     }
 
     impl Api {
@@ -494,6 +642,27 @@ mod ffi {
                     get_next_dispatch: std::mem::transmute::<*mut c_void, FnGetNextDispatch>(
                         symbol(module, "SimConnect_GetNextDispatch")?,
                     ),
+                    ai_create_non_atc_aircraft: std::mem::transmute::<
+                        *mut c_void,
+                        FnAICreateNonATCAircraft,
+                    >(symbol(
+                        module,
+                        "SimConnect_AICreateNonATCAircraft",
+                    )?),
+                    ai_remove_object: std::mem::transmute::<*mut c_void, FnAIRemoveObject>(symbol(
+                        module,
+                        "SimConnect_AIRemoveObject",
+                    )?),
+                    set_data_on_sim_object: std::mem::transmute::<*mut c_void, FnSetDataOnSimObject>(
+                        symbol(module, "SimConnect_SetDataOnSimObject")?,
+                    ),
+                    get_last_sent_packet_id: std::mem::transmute::<
+                        *mut c_void,
+                        FnGetLastSentPacketID,
+                    >(symbol(
+                        module,
+                        "SimConnect_GetLastSentPacketID",
+                    )?),
                 })
             }
         }
@@ -539,7 +708,7 @@ mod ffi {
                         units.as_ptr(),
                         DATATYPE_FLOAT64,
                         0.0,
-                        u32::MAX,
+                        c_ulong::MAX,
                     )) {
                         (api.close)(handle);
                         return Err(format!("the simulator does not know the SimVar {simvar}"));
@@ -613,6 +782,290 @@ mod ffi {
     }
 
     impl Drop for SimConnectSource {
+        fn drop(&mut self) {
+            self.close();
+        }
+    }
+
+    // 他机注入那条 SimConnect 连接。
+    //
+    // 三个调用：
+    //
+    // ```text
+    // SimConnect_AICreateNonATCAircraft   建一架，异步，回音是 ASSIGNED_OBJECT_ID
+    // SimConnect_SetDataOnSimObject       挪位置，同步
+    // SimConnect_AIRemoveObject           撤掉
+    // ```
+    //
+    // # 新建是异步的，而且失败不走返回值
+    //
+    // `AICreateNonATCAircraft` 对一个不存在的机模标题**照样返回成功**，失败是
+    // 过一会儿以一个 `SIMCONNECT_RECV_EXCEPTION` 回来的。而 EXCEPTION 里带的是
+    // `send_id` 而不是 `request_id`，所以要在每次调用之后立刻问一次
+    // `GetLastSentPacketID` 把 send id 记下来，否则失败了也不知道是哪一架。
+    //
+    // 光靠 EXCEPTION 还不够：也可能什么都不回（模拟器正在加载、连接断了）。
+    // 所以再加一道超时——[`CREATE_TIMEOUT`] 之内没有回音就当失败。**两道都要**，
+    // 一架卡在"已经要过、还没回音"的飞机会永远不被重试。
+
+    use crate::inject::Action;
+    use std::time::{Duration, Instant};
+
+    /// 多久没有回音就当这一架建失败了。
+    ///
+    /// 给得比较宽，因为模拟器在加载场景时能停好几秒；给得太紧会把"正在忙"
+    /// 当成"机模不存在"，然后一路退化到 C172。
+    const CREATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// 新建请求的 id 从这里开始编号。
+    const FIRST_REQUEST_ID: c_ulong = 100;
+
+    struct Outstanding {
+        callsign: String,
+        asked: Instant,
+    }
+
+    /// 真正往模拟器里放他机的那一份。
+    #[derive(Default)]
+    pub struct SimConnectTraffic {
+        handle: Handle,
+        next_request: c_ulong,
+        /// request id → 呼号。回音回来时靠它找回是谁。
+        by_request: HashMap<c_ulong, Outstanding>,
+        /// send id → request id。EXCEPTION 带的是 send id。
+        by_send: HashMap<c_ulong, c_ulong>,
+    }
+
+    // Handle 是一个只在这一个线程里用的不透明指针。
+    unsafe impl Send for SimConnectTraffic {}
+
+    impl SimConnectTraffic {
+        /// 记下刚发出去那一个包的 send id，好让 EXCEPTION 能反查回呼号。
+        ///
+        /// 问不到就算了——那只是少一条快速失败的路，超时那一道还在。
+        fn remember_send(&mut self, api: &Api, request_id: c_ulong) {
+            let mut send_id: c_ulong = 0;
+            let got = unsafe { (api.get_last_sent_packet_id)(self.handle, &mut send_id) };
+            if ok(got) {
+                self.by_send.insert(send_id, request_id);
+            }
+        }
+
+        fn create(
+            &mut self,
+            api: &Api,
+            callsign: &str,
+            title: &str,
+            entry: &crate::traffic::Entry,
+        ) -> Result<(), String> {
+            // **建在它现在所在的位置**，不是 0°N 0°E。给零的话飞机会在几内亚湾
+            // 外面出现半秒再跳过来，而且模拟器可能顺手去加载那一块地景。
+            let position = InitPosition {
+                latitude: entry.position.latitude,
+                longitude: entry.position.longitude,
+                altitude: entry.position.altitude,
+                pitch: entry.position.pitch,
+                bank: entry.position.bank,
+                heading: entry.position.heading,
+                on_ground: u32::from(entry.position.on_ground) as c_ulong,
+                airspeed: entry.position.groundspeed.max(0.0) as c_ulong,
+            };
+            let title = std::ffi::CString::new(title).map_err(|e| e.to_string())?;
+            // 尾号就用呼号。MSFS 会把它画在机身上，也是在模拟器里认出这架的办法。
+            let tail = std::ffi::CString::new(callsign).map_err(|e| e.to_string())?;
+            let request_id = self.next_request;
+            self.next_request += 1;
+            let sent = unsafe {
+                (api.ai_create_non_atc_aircraft)(
+                    self.handle,
+                    title.as_ptr(),
+                    tail.as_ptr(),
+                    position,
+                    request_id,
+                )
+            };
+            if !ok(sent) {
+                return Err(format!("could not ask for {callsign}"));
+            }
+            self.remember_send(api, request_id);
+            self.by_request.insert(
+                request_id,
+                Outstanding {
+                    callsign: callsign.to_string(),
+                    asked: Instant::now(),
+                },
+            );
+            Ok(())
+        }
+
+        fn update(&mut self, api: &Api, object_id: u32, entry: &crate::traffic::Entry) {
+            let mut data = TrafficPosition {
+                latitude: entry.position.latitude,
+                longitude: entry.position.longitude,
+                altitude: entry.position.altitude,
+                pitch: entry.position.pitch,
+                bank: entry.position.bank,
+                heading: entry.position.heading,
+                on_ground: if entry.position.on_ground { 1.0 } else { 0.0 },
+                airspeed: entry.position.groundspeed,
+            };
+            unsafe {
+                (api.set_data_on_sim_object)(
+                    self.handle,
+                    TRAFFIC_DEF_ID,
+                    object_id as c_ulong,
+                    SET_FLAG_DEFAULT,
+                    0,
+                    std::mem::size_of::<TrafficPosition>() as c_ulong,
+                    &mut data as *mut TrafficPosition as *mut c_void,
+                );
+            }
+        }
+
+        fn remove(&mut self, api: &Api, object_id: u32) {
+            let request_id = self.next_request;
+            self.next_request += 1;
+            unsafe {
+                (api.ai_remove_object)(self.handle, object_id as c_ulong, request_id);
+            }
+        }
+
+        /// 超时的那些当失败。
+        fn expired(&mut self) -> Vec<String> {
+            let now = Instant::now();
+            let late: Vec<c_ulong> = self
+                .by_request
+                .iter()
+                .filter(|(_, o)| now.duration_since(o.asked) > CREATE_TIMEOUT)
+                .map(|(id, _)| *id)
+                .collect();
+            late.into_iter()
+                .filter_map(|id| self.by_request.remove(&id).map(|o| o.callsign))
+                .collect()
+        }
+    }
+
+    impl TrafficSink for SimConnectTraffic {
+        fn open(&mut self) -> Result<(), String> {
+            let api = Api::load()?;
+            let name = std::ffi::CString::new("msfs-for-can traffic").map_err(|e| e.to_string())?;
+            let mut handle: Handle = std::ptr::null_mut();
+            unsafe {
+                if !ok((api.open)(
+                    &mut handle,
+                    name.as_ptr(),
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                )) {
+                    return Err("could not open SimConnect; is the simulator running?".into());
+                }
+                // **顺序就是 TrafficPosition 里字段的顺序。** 见 TRAFFIC_VARS。
+                for (simvar, units) in TRAFFIC_VARS {
+                    let name = std::ffi::CString::new(simvar).map_err(|e| e.to_string())?;
+                    let units = std::ffi::CString::new(units).map_err(|e| e.to_string())?;
+                    if !ok((api.add_to_data_definition)(
+                        handle,
+                        TRAFFIC_DEF_ID,
+                        name.as_ptr(),
+                        units.as_ptr(),
+                        DATATYPE_FLOAT64,
+                        0.0,
+                        c_ulong::MAX,
+                    )) {
+                        (api.close)(handle);
+                        return Err(format!("the simulator does not know the SimVar {simvar}"));
+                    }
+                }
+            }
+            self.handle = handle;
+            self.next_request = FIRST_REQUEST_ID;
+            self.by_request.clear();
+            self.by_send.clear();
+            Ok(())
+        }
+
+        fn apply(&mut self, actions: &[Action]) -> Result<(), String> {
+            if self.handle.is_null() {
+                return Err("not connected".into());
+            }
+            let api = Api::load()?;
+            for action in actions {
+                match action {
+                    Action::Create {
+                        callsign,
+                        equipment,
+                        entry,
+                    } => {
+                        // `equipment` 这里已经是**机模标题**，不是机型码——
+                        // 换算在调用方，因为候选表是可测的纯逻辑。
+                        self.create(api, callsign, equipment, entry)?;
+                    }
+                    Action::Update {
+                        object_id, entry, ..
+                    } => self.update(api, *object_id, entry.as_ref()),
+                    Action::Remove { object_id, .. } => self.remove(api, *object_id),
+                }
+            }
+            Ok(())
+        }
+
+        fn pump(&mut self) -> Vec<(String, Option<u32>)> {
+            let mut out = Vec::new();
+            if self.handle.is_null() {
+                return out;
+            }
+            let Ok(api) = Api::load() else {
+                return out;
+            };
+            loop {
+                let mut data: *mut Recv = std::ptr::null_mut();
+                let mut size: c_ulong = 0;
+                let result = unsafe { (api.get_next_dispatch)(self.handle, &mut data, &mut size) };
+                if !ok(result) || data.is_null() {
+                    break; // 队列空了
+                }
+                unsafe {
+                    match (*data).id {
+                        RECV_ID_ASSIGNED_OBJECT_ID => {
+                            let payload = data as *const RecvAssignedObjectId;
+                            if let Some(o) = self.by_request.remove(&(*payload).request_id) {
+                                out.push((o.callsign, Some((*payload).object_id as u32)));
+                            }
+                        }
+                        RECV_ID_EXCEPTION => {
+                            let payload = data as *const RecvException;
+                            // EXCEPTION 带的是 send id，要经 by_send 转一道。
+                            if let Some(request_id) = self.by_send.remove(&(*payload).send_id) {
+                                if let Some(o) = self.by_request.remove(&request_id) {
+                                    out.push((o.callsign, None));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // 什么都没回的那些也当失败，否则它们永远卡在"要过了、等回音"。
+            out.extend(self.expired().into_iter().map(|c| (c, None)));
+            out
+        }
+
+        fn close(&mut self) {
+            if self.handle.is_null() {
+                return;
+            }
+            if let Ok(api) = Api::load() {
+                unsafe { (api.close)(self.handle) };
+            }
+            self.handle = std::ptr::null_mut();
+            self.by_request.clear();
+            self.by_send.clear();
+        }
+    }
+
+    impl Drop for SimConnectTraffic {
         fn drop(&mut self) {
             self.close();
         }

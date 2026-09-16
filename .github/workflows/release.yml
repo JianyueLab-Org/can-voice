@@ -119,6 +119,7 @@ jobs:
     if: github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -128,6 +129,15 @@ jobs:
           find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' \
             -o -name '*.AppImage' -o -name '*.rpm' \) -exec cp {} out/ \;
           ls -lh out
+      # **X-Plane 的插件也要发出去。** 说明里原本只写"见仓库里
+      # apps/xpc/plugin/"——而仓库是私有的，测试者点不进去。装了 xpc-for-can
+      # 的人会连上、能说话，然后看不见任何他机，也没有任何东西告诉他缺了什么。
+      - name: 打包 X-Plane 插件
+        run: |
+          mkdir -p plugin/PythonPlugins
+          cp apps/xpc/plugin/PI_XpcTraffic.py plugin/PythonPlugins/
+          cd plugin && zip -r ../out/xpc-for-can-xplane-plugin.zip PythonPlugins
+          cd .. && ls -lh out/xpc-for-can-xplane-plugin.zip
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.version || github.ref_name }}
@@ -174,6 +184,15 @@ jobs:
 
             ## 已知还不行的
 
-            - **MSFS 的他机画不出来**：AI 机注入还没接上。位置、语音、文字都正常。
-            - **X-Plane 要单独装插件**才看得见他机，见仓库里 `apps/xpc/plugin/`。
+            - **MSFS 的他机用的是默认机模。** AI 机注入已经接上了，但机型对到
+              MSFS 机模标题这一步只认得第一方（Asobo）那十几种——别的机型会顺着
+              同族、同类机身退化，最后退到 C172。装了 FSLTL / AIG 这类 AI 机模包
+              的人可以自己写一张表放在
+              `%LOCALAPPDATA%\msfs-for-can\titles.json`，格式是
+              `{"A20N": "你的机模标题"}` 或者 `{"A20N": ["首选", "备选"]}`。
+            - **X-Plane 要单独装插件**才看得见他机：下面的
+              `xpc-for-can-xplane-plugin.zip`，解压后把 `PythonPlugins/` 整个
+              放进 X-Plane 目录的 `Resources/plugins/` 下面（需要先装
+              [XPPython3](https://xppython3.readthedocs.io/)）。不装也能连上、
+              能说话，只是天上是空的。
             - **通播不出声**：声音由服务端的机队播，客户端这边只做稿子。
