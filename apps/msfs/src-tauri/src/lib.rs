@@ -667,6 +667,22 @@ fn build_view(app: &App) -> View {
     let now = monotonic();
     let origin = sim.as_ref().map(|s| (s.latitude, s.longitude));
     let last_link = app.link.lock().expect("link").clone();
+    // **机库锁只拿一次，拿完就放。** 在下面那个结构体字面量里连写三次
+    // `app.hangar.lock()` 的话，前一次的守卫是一个临时值，要活到整条语句结束——
+    // 于是第二次 `lock()` 等的正是自己手里那把锁。std 的 Mutex 不可重入，
+    // 表现是界面第一次轮询 `view` 就永远不回，整个客户端卡死。
+    let hangar = {
+        let h = app.hangar.lock().expect("hangar");
+        HangarView {
+            loading: app
+                .hangar_loading
+                .load(std::sync::atomic::Ordering::Relaxed),
+            files: h.files,
+            liveries: h.liveries,
+            types: h.by_icao.len(),
+            dir: app.settings_snapshot().packages_dir,
+        }
+    };
     View {
         sim_connected: app.sim.connected(),
         sim_problem: app.sim.problem(),
@@ -681,15 +697,7 @@ fn build_view(app: &App) -> View {
         reason: last_link.map(|e| e.reason),
         voice: Some(app.voice.snapshot()),
         messages: app.chat.lock().expect("chat").snapshot(),
-        hangar: HangarView {
-            loading: app
-                .hangar_loading
-                .load(std::sync::atomic::Ordering::Relaxed),
-            files: app.hangar.lock().expect("hangar").files,
-            liveries: app.hangar.lock().expect("hangar").liveries,
-            types: app.hangar.lock().expect("hangar").by_icao.len(),
-            dir: app.settings_snapshot().packages_dir,
-        },
+        hangar,
         controllers: app
             .controllers
             .lock()
