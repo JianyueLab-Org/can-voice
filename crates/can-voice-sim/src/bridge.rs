@@ -47,6 +47,43 @@ struct Frame {
     data: String,
 }
 
+/// 插件回报的状态。
+///
+/// **这条通道以前只有一个常量。** `CLIENT_PORT` 定义在那儿、一个字节没走过，
+/// 于是没装插件的人"能连能说、天上是空的"，而界面上 X-Plane 那盏灯还是绿的
+/// ——它代表的是 UDP 数据源，不是插件。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Status {
+    /// 插件那一侧的协议版本。
+    pub v: u32,
+    /// 它此刻画着几架。
+    pub drawn: usize,
+}
+
+/// 解析一条状态包。不是状态包就返回 `None`——这个口上什么都可能进来。
+pub fn decode_status(packet: &[u8]) -> Option<Status> {
+    let v: serde_json::Value = serde_json::from_slice(packet).ok()?;
+    if v.get("type").and_then(|t| t.as_str()) != Some("status") {
+        return None;
+    }
+    serde_json::from_value(v).ok()
+}
+
+/// 插件的协议版本和我们对不对得上。
+///
+/// **对不上时插件静默丢弃每一帧**（它自己那句 `header.get("v") != PROTOCOL_VERSION`），
+/// 症状是"完全没有交通"而两边日志都干净。这是最难查的一种，所以要说出来。
+pub fn version_matches(s: &Status) -> bool {
+    s.v == PROTOCOL_VERSION
+}
+
+/// 一条给客户端的状态包。插件那边也要发同样形状的。
+pub fn encode_status(drawn: usize) -> Vec<u8> {
+    serde_json::json!({ "type": "status", "v": PROTOCOL_VERSION, "drawn": drawn })
+        .to_string()
+        .into_bytes()
+}
+
 /// 把一条消息切成若干个待发的 UDP 包。
 pub fn encode(message: &serde_json::Value, sequence: u16) -> Vec<Vec<u8>> {
     encode_with(message, sequence, MAX_PAYLOAD)
@@ -135,6 +172,43 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ——— 插件回报 ———
+
+    /// **插件要能被看见。** 在这之前这条通道只有一个常量（`CLIENT_PORT`），
+    /// 一个字节都没走过：没装插件的人"能连能说、天上是空的"，而界面上
+    /// X-Plane 那盏灯还是绿的——它只代表 UDP 数据源，不代表插件。
+    #[test]
+    fn a_status_packet_from_the_plugin_is_understood() {
+        let raw = br#"{"type":"status","v":2,"drawn":7}"#;
+        let s = decode_status(raw).expect("status");
+        assert_eq!(s.v, 2);
+        assert_eq!(s.drawn, 7);
+    }
+
+    /// 别的包不是状态包。位置流是客户端发给插件的，方向相反，
+    /// 但这个口上什么都可能进来。
+    #[test]
+    fn anything_that_is_not_a_status_packet_is_ignored() {
+        assert!(decode_status(br#"{"type":"traffic"}"#).is_none());
+        assert!(decode_status(b"not json").is_none());
+        assert!(decode_status(b"").is_none());
+    }
+
+    /// **版本对不上要说出来。** 对不上时插件静默丢弃每一帧，症状是
+    /// "完全没有交通"而两边日志都干净——这正是最难查的那一种。
+    #[test]
+    fn a_version_mismatch_is_visible_rather_than_silent() {
+        assert!(version_matches(&Status {
+            v: PROTOCOL_VERSION,
+            drawn: 0
+        }));
+        assert!(!version_matches(&Status {
+            v: PROTOCOL_VERSION + 1,
+            drawn: 0
+        }));
+    }
+
     use serde_json::json;
 
     fn round_trip(message: &serde_json::Value, max_payload: usize) -> Option<serde_json::Value> {

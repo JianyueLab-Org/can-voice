@@ -20,7 +20,7 @@ pub const UPDATE_RATE: i32 = 5;
 pub const RREF_PACKET_LEN: usize = 413;
 
 /// 要订阅的 dataref。**顺序就是 index**，改顺序等于改协议编号。
-pub const DATAREFS: [(&str, &str); 18] = [
+pub const DATAREFS: [(&str, &str); 27] = [
     ("latitude", "sim/flightmodel/position/latitude"),
     ("longitude", "sim/flightmodel/position/longitude"),
     // 真高（米），FSD 要英尺。
@@ -56,6 +56,33 @@ pub const DATAREFS: [(&str, &str); 18] = [
     ("com2_legacy", "sim/cockpit/radios/com2_freq_hz"),
     ("com1_power", "sim/cockpit2/radios/actuators/com1_power"),
     ("on_ground", "sim/flightmodel/failures/onground_any"),
+    // ——— 自机外形。别人问 `$CQ ACC` 时答这些 ———
+    //
+    // **不存在的 dataref X-Plane 只是不推送**，所以名字打错的表现是这一组
+    // 全都收不到——而 `snapshot` 见到一个都没有时不报外形，不会把它当成
+    // "起落架收着、灯全灭"。那正是这一条要躲开的地方。
+    ("gear_down", "sim/cockpit2/controls/gear_handle_down"),
+    ("flaps", "sim/cockpit2/controls/flap_ratio"),
+    ("spoilers", "sim/cockpit2/controls/speedbrake_ratio"),
+    ("engines_on", "sim/flightmodel/engine/ENGN_running[0]"),
+    ("beacon_on", "sim/cockpit2/switches/beacon_on"),
+    ("landing_on", "sim/cockpit2/switches/landing_lights_on"),
+    ("taxi_on", "sim/cockpit2/switches/taxi_light_on"),
+    ("strobe_on", "sim/cockpit2/switches/strobe_lights_on"),
+    ("nav_on", "sim/cockpit2/switches/navigation_lights_on"),
+];
+
+/// 自机外形那一组的键名。一个都没回来就不报外形。
+const ANIMATION_KEYS: [&str; 9] = [
+    "gear_down",
+    "flaps",
+    "spoilers",
+    "engines_on",
+    "beacon_on",
+    "landing_on",
+    "taxi_on",
+    "strobe_on",
+    "nav_on",
 ];
 
 /// 这些网段几乎都是虚拟网卡：VPN、WSL、Hyper-V、Docker。
@@ -193,7 +220,30 @@ pub fn snapshot(raw: &HashMap<&str, f32>) -> Option<Snapshot> {
         com2: frequency(get("com2"), get("com2_legacy")),
         com1_power: get("com1_power").unwrap_or(1.0) != 0.0,
         on_ground,
-        animation: None,
+        animation: animation(raw),
+    })
+}
+
+/// 自机外形。**一个 dataref 都没回来就返回 `None`。**
+///
+/// 返回一份全 false 的话，一架名字打错了的飞机和一架真的收着起落架、灯全灭的
+/// 飞机在管制屏上一模一样——而只有前者是我们的 bug。宁可不说。
+fn animation(raw: &HashMap<&str, f32>) -> Option<crate::Animation> {
+    if !ANIMATION_KEYS.iter().any(|k| raw.contains_key(k)) {
+        return None;
+    }
+    let on = |k: &str| raw.get(k).is_some_and(|v| *v != 0.0);
+    Some(crate::Animation {
+        gear_down: on("gear_down"),
+        flaps: raw.get("flaps").map(|v| f64::from(*v)).unwrap_or(0.0),
+        // 阻力板是 0–1 的连续量，任何非零都算放出来了。
+        spoilers: on("spoilers"),
+        engines_on: on("engines_on"),
+        beacon_on: on("beacon_on"),
+        landing_on: on("landing_on"),
+        taxi_on: on("taxi_on"),
+        strobe_on: on("strobe_on"),
+        nav_on: on("nav_on"),
     })
 }
 
@@ -201,6 +251,48 @@ pub fn snapshot(raw: &HashMap<&str, f32>) -> Option<Snapshot> {
 mod tests {
     use super::*;
     use can_voice_fsd::pilot::XpdrMode;
+
+    // ——— 自机外形 ———
+
+    /// **一个 dataref 都没回来时不报外形。**
+    ///
+    /// X-Plane 对不存在的 dataref 只是**不推送**，不会报错。填成默认值的话，
+    /// 一架真的收起了起落架的飞机和一架名字打错了的飞机在管制屏上长得一模一样
+    /// ——而后者是我们的 bug。宁可不说。
+    #[test]
+    fn no_animation_datarefs_means_no_animation_at_all() {
+        let raw = HashMap::from([("latitude", 31.0f32), ("longitude", 121.0)]);
+        assert!(snapshot(&raw).expect("snapshot").animation.is_none());
+    }
+
+    /// 回来了就照着报。
+    #[test]
+    fn the_animation_datarefs_come_through() {
+        let raw = HashMap::from([
+            ("latitude", 31.0f32),
+            ("gear_down", 1.0),
+            ("flaps", 0.25),
+            ("spoilers", 0.0),
+            ("beacon_on", 1.0),
+            ("strobe_on", 0.0),
+        ]);
+        let a = snapshot(&raw)
+            .expect("snapshot")
+            .animation
+            .expect("animation");
+        assert!(a.gear_down);
+        assert!((a.flaps - 0.25).abs() < 1e-6);
+        assert!(!a.spoilers);
+        assert!(a.beacon_on);
+        assert!(!a.strobe_on);
+    }
+
+    /// 只回来一个也算数：**部分比没有强**，而"没有"是不报。
+    #[test]
+    fn a_single_animation_dataref_is_enough_to_report() {
+        let raw = HashMap::from([("latitude", 31.0f32), ("gear_down", 1.0)]);
+        assert!(snapshot(&raw).expect("snapshot").animation.is_some());
+    }
 
     /// X-Plane 只认 413 字节的 RREF 请求，短了直接丢——而"丢了"的表现是
     /// 一个 dataref 都不推送，看起来和"X-Plane 没开"一样。
@@ -352,6 +444,15 @@ mod tests {
             "com2_legacy",
             "com1_power",
             "on_ground",
+            "gear_down",
+            "flaps",
+            "spoilers",
+            "engines_on",
+            "beacon_on",
+            "landing_on",
+            "taxi_on",
+            "strobe_on",
+            "nav_on",
         ] {
             assert!(
                 subscribed.contains(&name),
@@ -359,7 +460,7 @@ mod tests {
             );
         }
         // 反过来也钉一下：订了却没人读的，要么是忘了用，要么该删。
-        assert_eq!(subscribed.len(), 18);
+        assert_eq!(subscribed.len(), 27);
     }
 
     /// 停在机坪上就该报在地面。漏订 `on_ground` 的话这条会红。
