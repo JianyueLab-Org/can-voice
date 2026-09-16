@@ -23,6 +23,8 @@ const props = defineProps<{
   transmitting: boolean;
   /** 这个频率上最近一次通话。`null` = 从挂上到现在没人在这里说过话。 */
   lastTalk: { speaker: number; at: number } | null;
+  /** 精简模式：只留频率、呼号、收发开关和静音。音量、最近通话、移除都收起来。 */
+  compact?: boolean;
 }>();
 
 defineEmits<{
@@ -49,8 +51,9 @@ const lastTalkText = (t: { at: number } | null) =>
   <!-- 正在发射的那一行要一眼看得出来：一个人同时在三个频率上开着 TX 的时候，
        他按下 PTT 说的那句话到底进了哪几条，是要能看见的。 -->
   <div
-    class="flex items-center gap-3 rounded border px-3 py-2"
+    class="flex items-center rounded border"
     :class="[
+      compact ? 'gap-2 px-2 py-1' : 'gap-3 px-3 py-2',
       radio.selected ? 'border-sky-500' : '',
       transmitting ? 'bg-red-50 ring-1 ring-red-400' : '',
     ]"
@@ -68,7 +71,7 @@ const lastTalkText = (t: { at: number } | null) =>
     <span class="w-24 truncate font-mono text-xs opacity-70" :title="radio.callsign">
       {{ radio.callsign }}
     </span>
-    <span v-if="locked" class="text-xs text-sky-600" title="这是你正在管的席位频率">本席</span>
+    <span v-if="locked && !compact" class="text-xs text-sky-600" title="这是你正在管的席位频率">本席</span>
 
     <!-- RX 灯：这个频率上**有人在讲**，不是"最后一个开口的人还在讲"。 -->
     <span
@@ -109,6 +112,7 @@ const lastTalkText = (t: { at: number } | null) =>
     </button>
 
     <input
+      v-if="!compact"
       type="range"
       min="0"
       max="2"
@@ -121,7 +125,7 @@ const lastTalkText = (t: { at: number } | null) =>
 
     <!-- 最后一次通话。绿点只说"此刻有没有人在讲"，而"多久没人说话了"才是
          管制员判断这条频率还活着没有的依据。 -->
-    <span v-if="lastTalk" class="font-mono text-xs opacity-50" title="最后一次通话">
+    <span v-if="lastTalk && !compact" class="font-mono text-xs opacity-50" title="最后一次通话">
       {{ lastTalkText(lastTalk) }}
     </span>
 
@@ -133,6 +137,7 @@ const lastTalkText = (t: { at: number } | null) =>
     <!-- 本席频率删不掉：删掉它的人还坐在席位上，而飞行员在那个频率上叫他
          听不见，两边都以为对方在。 -->
     <button
+      v-if="!compact"
       class="ml-auto text-xs opacity-60 hover:opacity-100 disabled:opacity-25 disabled:hover:opacity-25"
       :disabled="locked"
       :title="locked ? '这是你正在管的席位频率，先下席位再删' : ''"

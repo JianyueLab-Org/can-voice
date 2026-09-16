@@ -23,6 +23,7 @@ can-voice-datafeed = { path = "../../../crates/can-voice-datafeed" }
 can-voice-ptt = { path = "../../../crates/can-voice-ptt" }
 can-voice-token = { path = "../../../crates/can-voice-token" }
 can-voice-log = { path = "../../../crates/can-voice-log" }
+can-voice-settings = { path = "../../../crates/can-voice-settings" }
 can-voice-update = { path = "../../../crates/can-voice-update" }
 tauri = { version = "2", features = [] }
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time"] }

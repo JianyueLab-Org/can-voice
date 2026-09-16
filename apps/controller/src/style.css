@@ -1,1 +1,74 @@
 @import "tailwindcss";
+
+/*
+ * 深色主题（#45）。四个客户端逐字节相同的一份。
+ *
+ * **`dark:` 跟着 <html> 上的 class 走，不跟系统。** Tailwind 默认的 dark 变体是
+ * `prefers-color-scheme`，那样"跟随系统 / 浅色 / 深色"三选一里后两个做不出来。
+ * 由 appearance.ts 决定要不要挂 `.dark`。
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  /*
+   * 底色取旧版 can-audio/controller/theme.py 那套：偏蓝紫的深底，不是中性灰。
+   * 四个客户端多半同时开着，和旧版一个色调，换过来的人不会觉得换了一个产品。
+   */
+  html.dark {
+    color-scheme: dark;
+    background-color: #2c2f45;
+    color: #e6e8f0;
+  }
+
+  /*
+   * Tailwind 4 的边框默认是 currentColor。浅色下那是黑线，深色下就成了一圈亮白，
+   * 比里面的字还显眼。压暗到一个能看出分隔、又不抢眼的程度；显式写了颜色的
+   * 边框（`border-sky-500` 这类）在 utilities 层，照样赢。
+   */
+  html.dark *,
+  html.dark ::before,
+  html.dark ::after {
+    border-color: rgb(230 232 240 / 0.18);
+  }
+}
+
+/*
+ * 界面上写死的那几个**浅色背景下才看得清**的颜色，在深色下换成对应的亮色。
+ *
+ * 只换字色和几块浅底，不去改 Tailwind 的颜色变量：`--color-red-600` 同时是
+ * "按住发话"按钮的底色，而那里配的是白字——整体换亮会让那颗最要紧的按钮上的
+ * 字看不清。列表就这么几项，界面上新写一个颜色的人要在这里补一行。
+ */
+@layer utilities {
+  .dark .text-red-600 {
+    color: #f87171;
+  }
+  .dark .text-amber-600,
+  .dark .text-amber-700 {
+    color: #fcd34d;
+  }
+  .dark .text-green-700 {
+    color: #4ade80;
+  }
+  .dark .text-sky-600,
+  .dark .text-sky-700 {
+    color: #7dd3fc;
+  }
+  .dark .bg-white {
+    background-color: #252839;
+  }
+  .dark .bg-red-50 {
+    background-color: rgb(220 53 69 / 0.15);
+  }
+  .dark .bg-neutral-300 {
+    background-color: #5a5f78;
+  }
+  .dark .border-neutral-300,
+  .dark .border-neutral-400 {
+    border-color: #5a5f78;
+  }
+}

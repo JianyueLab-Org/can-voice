@@ -24,6 +24,7 @@ use can_voice_fsd::packet::{self, Identity, Position, FACILITY_ATIS, RATING_OBSE
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Manager;
 
 /// 多久问一次报文，默认值。
 ///
@@ -39,9 +40,13 @@ const METAR_TIMEOUT: Duration = Duration::from_secs(20);
 /// HTTP 那几条路（气象兜底、网络配置、数据源）的超时。
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 气象源地址。
-fn metar_url() -> String {
-    env_or("CAN_METAR_URL", weather::DEFAULT_URL)
+/// 气象源地址。环境变量 > 设置 > 默认。
+fn metar_url(endpoints: &can_voice_settings::Endpoints) -> String {
+    can_voice_settings::endpoints::endpoint(
+        "CAN_METAR_URL",
+        &endpoints.metar_url,
+        weather::DEFAULT_URL,
+    )
 }
 
 fn clamp_refresh(secs: u32) -> u32 {
@@ -145,6 +150,16 @@ pub struct Settings {
     /// 那些差异还要让人再看一遍。
     #[serde(default)]
     pub config_version: String,
+    /// 主题、置顶、精简。
+    #[serde(default)]
+    pub appearance: can_voice_settings::Appearance,
+    /// 各服务的地址。空的是默认；**环境变量仍然最大**，见 `can_voice_settings::endpoints`。
+    #[serde(default)]
+    pub endpoints: can_voice_settings::Endpoints,
+    /// 调试级日志。**下次启动才生效**：日志订阅器在进程一开始就装好了，
+    /// 半路换级别要一整套 reload 句柄，为一个排障开关不值得。
+    #[serde(default)]
+    pub debug_log: bool,
 }
 
 pub struct App {
@@ -205,8 +220,12 @@ impl App {
 /// 去数据源上查这个 CAN 号此刻的等级。
 ///
 /// 查不到返回 `None`，调用方回落到观察员——一次 datafeed 抖动不该让人登不上去。
-async fn rating_lookup(cid: &str) -> Option<u32> {
-    let url = env_or("CAN_FSD_DATAFEED", can_voice_datafeed::DEFAULT_URL);
+async fn rating_lookup(cid: &str, endpoints: &can_voice_settings::Endpoints) -> Option<u32> {
+    let url = can_voice_settings::endpoints::endpoint(
+        "CAN_FSD_DATAFEED",
+        &endpoints.datafeed_url,
+        can_voice_datafeed::DEFAULT_URL,
+    );
     let feed = can_voice_datafeed::fetch_once(&url).await?;
     can_voice_datafeed::rating_for(cid, &feed)
 }
@@ -249,10 +268,6 @@ fn dirs_config() -> Option<std::path::PathBuf> {
             })
             .map(|c| c.join("atis-for-can"))
     }
-}
-
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
 // ——— 配置：读 ———
@@ -393,7 +408,8 @@ fn on_air(app: &App) -> Vec<String> {
 /// 连着 FSD，于是写模板的人只能对着一份编出来的电码调格式。
 #[tauri::command]
 async fn fetch_metar(app: tauri::State<'_, App>, icao: String) -> Result<String, String> {
-    weather::fetch(&app.http, &metar_url(), &icao, weather::RETRIES)
+    let url = metar_url(&app.settings_snapshot().endpoints);
+    weather::fetch(&app.http, &url, &icao, weather::RETRIES)
         .await
         .map_err(|e| e.to_string())
 }
@@ -431,7 +447,11 @@ fn import_vatis(app: tauri::State<'_, App>, body: String) -> Result<ImportReport
 /// 得走 [`check_network_config`]。只补缺，已有的呼号不动。
 #[tauri::command]
 async fn import_online(app: tauri::State<'_, App>) -> Result<Merged, String> {
-    let url = env_or("CAN_FSD_DATAFEED", can_voice_datafeed::DEFAULT_URL);
+    let url = can_voice_settings::endpoints::endpoint(
+        "CAN_FSD_DATAFEED",
+        &app.settings_snapshot().endpoints.datafeed_url,
+        can_voice_datafeed::DEFAULT_URL,
+    );
     let feed = can_voice_datafeed::fetch(&app.http, &url)
         .await
         .ok_or_else(|| format!("取不到数据源（{url}）"))?;
@@ -467,7 +487,11 @@ pub struct NetworkPreview {
 /// 值班时"按一下就变了"很难接受，所以动手是另一个命令，而且只动人勾了的那些。
 #[tauri::command]
 async fn check_network_config(app: tauri::State<'_, App>) -> Result<NetworkPreview, String> {
-    let url = env_or("CAN_ATIS_CONFIG_URL", netconfig::DEFAULT_URL);
+    let url = can_voice_settings::endpoints::endpoint(
+        "CAN_ATIS_CONFIG_URL",
+        &app.settings_snapshot().endpoints.atis_config_url,
+        netconfig::DEFAULT_URL,
+    );
     let document = netconfig::fetch(&app.http, &url)
         .await
         .map_err(|e| e.to_string())?;
@@ -614,21 +638,23 @@ async fn start(
     //
     // **在拿锁之前查。** 这一步要 await，而 `running` 是一把 std 的锁：攥着它
     // 跨 await 会把整张在播表挡住那几秒。
-    let rating = match app.settings_snapshot().rating {
-        0 => rating_lookup(&cid).await.unwrap_or(RATING_OBSERVER),
+    let saved = app.settings_snapshot();
+    let rating = match saved.rating {
+        0 => rating_lookup(&cid, &saved.endpoints)
+            .await
+            .unwrap_or(RATING_OBSERVER),
         chosen => chosen,
     };
 
+    let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let mut running = app.running.lock().expect("running");
     if running.contains_key(&callsign) {
         return Err(format!("{callsign} is already on the air"));
     }
 
     let config = Config {
-        host: env_or("CAN_FSD_HOST", "fsd.ceruleanavi.net"),
-        port: env_or("CAN_FSD_PORT", "6809")
-            .parse()
-            .unwrap_or(packet::DEFAULT_PORT),
+        host: fsd_host,
+        port: fsd_port,
         identity: Identity::new(
             &station.callsign(),
             &cid,
@@ -673,6 +699,7 @@ async fn start(
         wake.clone(),
         app.refresh_secs.clone(),
         app.http.clone(),
+        metar_url(&saved.endpoints),
     ));
     running.insert(
         callsign,
@@ -801,6 +828,9 @@ async fn watch(
     wake: Arc<tokio::sync::Notify>,
     refresh: Arc<std::sync::atomic::AtomicU32>,
     http: reqwest::Client,
+    // 上线那一刻定下来的气象源。和别的地址一样**下次上线才换**：
+    // 播到一半换一个源，同一份报文可能因为格式差一点被当成变了。
+    metar: String,
 ) {
     let mut events = fsd.events();
     let mut period = refresh_period(&refresh);
@@ -830,7 +860,7 @@ async fn watch(
                     // 刚上线就立刻要一份报文，不等第一个五分钟——否则席位
                     // 挂在网上却一句通播都没有。
                     if online && !was_online {
-                        poll(&airing, &fsd, &live, &http, true).await;
+                        poll(&airing, &fsd, &live, &http, &metar, true).await;
                     }
                 }
                 // 事件流跟不上就丢了几条状态；下一条会补上，不必重来。
@@ -839,12 +869,12 @@ async fn watch(
             },
             _ = ticker.tick() => {
                 if online {
-                    poll(&airing, &fsd, &live, &http, false).await;
+                    poll(&airing, &fsd, &live, &http, &metar, false).await;
                 }
             }
             _ = wake.notified() => {
                 if online {
-                    poll(&airing, &fsd, &live, &http, false).await;
+                    poll(&airing, &fsd, &live, &http, &metar, false).await;
                 }
             }
         }
@@ -886,6 +916,7 @@ async fn poll(
     fsd: &FsdHandle,
     live: &Arc<Mutex<Live>>,
     http: &reqwest::Client,
+    metar: &str,
     first: bool,
 ) {
     // **锁不跨 await。** 问报文最长要二十秒，攥着锁的话这二十秒里换构型、
@@ -902,7 +933,7 @@ async fn poll(
         // 两条路来的报文可以直接比：can-fsd 问的是同一个气象源，也是 trim 之后
         // 取 ICAO 开头的那一行（`internal/fsd/metar.go` 的 `extractMetar`），所以
         // 换了来源不会让 `decide` 把同一份报文当成变了、白推一格字母。
-        None => match weather::fetch(http, &metar_url(), &icao, weather::RETRIES).await {
+        None => match weather::fetch(http, metar, &icao, weather::RETRIES).await {
             Ok(report) => {
                 tracing::info!(icao = %icao, "fsd gave no metar; took it over http");
                 Some(report)
@@ -948,7 +979,8 @@ fn next_letter(station: &Station, current: char) -> char {
 async fn check_update(
     app: tauri::State<'_, App>,
 ) -> Result<Option<can_voice_update::Latest>, String> {
-    let (skipped, busy) = { let s = match app.settings.lock() {
+    let (skipped, busy) = {
+        let s = match app.settings.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
         };
@@ -957,9 +989,12 @@ async fn check_update(
             Ok(r) => r.is_empty(),
             Err(p) => p.into_inner().is_empty(),
         };
-        (s.skipped_update, busy) };
-    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
-    let Some(latest) = can_voice_update::check_once(&origin, "atis-for-can", env!("CARGO_PKG_VERSION")).await else {
+        (s.skipped_update, busy)
+    };
+    let origin = app.settings_snapshot().endpoints.api_origin();
+    let Some(latest) =
+        can_voice_update::check_once(&origin, "atis-for-can", env!("CARGO_PKG_VERSION")).await
+    else {
         return Ok(None);
     };
     let skipped = (!skipped.is_empty()).then_some(skipped);
@@ -1004,12 +1039,8 @@ fn log_file() -> Option<String> {
 /// **要 CAN 号和密码**：can-api 的 `/api/v1/logs` 认的是这一对，不是会话。
 /// 密码用完就丢，不进设置文件。
 #[tauri::command]
-async fn send_log(
-    app: tauri::State<'_, App>,
-    cid: String,
-    password: String,
-) -> Result<(), String> {
-    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+async fn send_log(app: tauri::State<'_, App>, cid: String, password: String) -> Result<(), String> {
+    let origin = app.settings_snapshot().endpoints.api_origin();
     let _ = &app;
     can_voice_log::upload_once(
         &origin,
@@ -1021,16 +1052,124 @@ async fn send_log(
     .await
 }
 
+// ——— 设置对话框、置顶、精简（#45）———
+
+/// 精简模式下窗口最小能缩到多小。
+const COMPACT_MIN: (f64, f64) = (260.0, 220.0);
+/// 按下"精简"那一刻缩成多大。**不缩的话**，东西藏起来了窗口却还是那么大，
+/// 人还得自己去拖——而这个开关存在的全部理由就是一下子压到雷达屏的角落里。
+const COMPACT_SIZE: (f64, f64) = (320.0, 440.0);
+
+/// 把外观里和窗口有关的两样落到窗口上。
+///
+/// 正常模式的最小尺寸**从 `tauri.conf.json` 读**，不在这里再抄一份：两处写同一
+/// 对数字，改了一边，退出精简时窗口就还原到一个旧尺寸上。
+///
+/// `shrink` 为真时顺手把窗口缩到 [`COMPACT_SIZE`]：只在精简**刚打开**的那一刻、
+/// 和启动时照着存下来的状态还原时才这么做——不然每改一次主题窗口都跳一下。
+fn apply_window(
+    window: &tauri::WebviewWindow,
+    appearance: &can_voice_settings::Appearance,
+    shrink: bool,
+) {
+    if let Err(e) = window.set_always_on_top(appearance.always_on_top) {
+        tracing::warn!(error = %e, "could not change always-on-top");
+    }
+    let (w, h) = if appearance.compact {
+        COMPACT_MIN
+    } else {
+        let config = window.app_handle().config();
+        let conf = config.app.windows.first();
+        (
+            conf.and_then(|c| c.min_width).unwrap_or(COMPACT_MIN.0),
+            conf.and_then(|c| c.min_height).unwrap_or(COMPACT_MIN.1),
+        )
+    };
+    if let Err(e) = window.set_min_size(Some(tauri::LogicalSize::new(w, h))) {
+        tracing::warn!(error = %e, "could not change the minimum window size");
+    }
+    if shrink && appearance.compact {
+        let _ = window.set_size(tauri::LogicalSize::new(COMPACT_SIZE.0, COMPACT_SIZE.1));
+    }
+}
+
+/// 换外观。主题归前端管，这里只存；置顶和精简要动窗口。
+#[tauri::command]
+fn set_appearance(
+    window: tauri::WebviewWindow,
+    app: tauri::State<'_, App>,
+    appearance: can_voice_settings::Appearance,
+) {
+    let was_compact = app.settings_snapshot().appearance.compact;
+    apply_window(&window, &appearance, !was_compact);
+    app.update_settings(|s| s.appearance = appearance);
+}
+
+/// 存地址。**填得不对就不存**，并说出哪里不对：存进去一个连不上的地址，下次连接
+/// 时报的是网络错误，指不到这里。回的是去掉首尾空白之后真正存下的那一份。
+///
+/// 下次连接才生效——正连着的那条链路不会被半路换掉。
+#[tauri::command]
+fn set_endpoints(
+    app: tauri::State<'_, App>,
+    endpoints: can_voice_settings::Endpoints,
+) -> Result<can_voice_settings::Endpoints, String> {
+    let endpoints = endpoints.trimmed();
+    let problems = endpoints.problems();
+    if !problems.is_empty() {
+        return Err(problems.join("；"));
+    }
+    app.update_settings(|s| s.endpoints = endpoints.clone());
+    Ok(endpoints)
+}
+
+/// 这个客户端用得上的那几格地址：默认是什么、此刻是不是被环境变量盖着。
+///
+/// 被盖着的那几格界面要标出来——否则改了没反应，看起来就是设置坏了。
+#[tauri::command]
+fn endpoint_fields() -> Vec<can_voice_settings::endpoints::Field> {
+    can_voice_settings::endpoints::fields(&[
+        ("api_origin", can_voice_settings::endpoints::API_ORIGIN),
+        ("fsd_server", can_voice_settings::endpoints::FSD_SERVER),
+        ("datafeed_url", can_voice_datafeed::DEFAULT_URL),
+        ("metar_url", weather::DEFAULT_URL),
+        ("atis_config_url", netconfig::DEFAULT_URL),
+    ])
+}
+
+#[tauri::command]
+fn set_debug_log(app: tauri::State<'_, App>, on: bool) {
+    app.update_settings(|s| s.debug_log = on);
+}
+
 pub fn run() {
     // **日志要落盘。** 打包出来的是一个没有控制台的 GUI 进程，`stdout` 写到哪里
     // 谁也看不见；用户报"连不上"的时候手里得有一份能发出来的东西。
     // 这一步同时装上 panic 钩子——崩溃不留记录的话，窗口没了、日志干净。
-    can_voice_log::init("atis-for-can", std::env::args().any(|a| a == "--debug"));
+    // 设置里的调试开关要在装日志**之前**读。读设置本身失败时打的那条警告因此
+    // 没有地方去——但读失败的结果是默认值，而默认值就是不开调试，不影响判断。
+    let saved: Settings = can_voice_settings::Store::for_product("atis-for-can").load();
+    can_voice_log::init(
+        "atis-for-can",
+        std::env::args().any(|a| a == "--debug") || saved.debug_log,
+    );
 
     tauri::Builder::default()
         .manage(App::new())
+        // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
+        .setup(|handle| {
+            let appearance = handle.state::<App>().settings_snapshot().appearance;
+            if let Some(window) = handle.get_webview_window("main") {
+                apply_window(&window, &appearance, appearance.compact);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             log_file,
+            set_appearance,
+            set_endpoints,
+            endpoint_fields,
+            set_debug_log,
             send_log,
             check_update,
             skip_update,

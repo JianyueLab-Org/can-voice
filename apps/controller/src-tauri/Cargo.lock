@@ -107,6 +107,7 @@ dependencies = [
  "can-voice-datafeed",
  "can-voice-log",
  "can-voice-ptt",
+ "can-voice-settings",
  "can-voice-token",
  "can-voice-update",
  "reqwest 0.12.28",

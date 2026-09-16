@@ -18,6 +18,7 @@
 
 mod install;
 
+use tauri::Manager;
 use can_voice_app::Bridge;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
@@ -103,6 +104,16 @@ pub struct Settings {
     /// CSL 包放在哪。空的表示跟着 X-Plane 目录走。
     #[serde(default)]
     pub csl_dir: String,
+    /// 主题、置顶、精简。
+    #[serde(default)]
+    pub appearance: can_voice_settings::Appearance,
+    /// 各服务的地址。空的是默认；**环境变量仍然最大**，见 `can_voice_settings::endpoints`。
+    #[serde(default)]
+    pub endpoints: can_voice_settings::Endpoints,
+    /// 调试级日志。**下次启动才生效**：日志订阅器在进程一开始就装好了，
+    /// 半路换级别要一整套 reload 句柄，为一个排障开关不值得。
+    #[serde(default)]
+    pub debug_log: bool,
 }
 
 fn default_range() -> u32 {
@@ -342,9 +353,6 @@ impl Default for App {
     }
 }
 
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
-}
 
 /// 插件那一侧的状况。
 #[derive(Debug, Clone, Copy, serde::Serialize)]
@@ -442,14 +450,15 @@ async fn connect(
     // 语音先连。凭据只在这里出现一次，换成一张短期票之后就不再需要——
     // 重连带的是票不是密码，所以一个卡在重连里的客户端不会把账号锁出语音。
     let tokens = TokenSource::new(
-        &env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net"),
+        &saved.endpoints.api_origin(),
         cid.clone(),
         password.clone(),
         app.http.clone(),
     );
+    let (voice_server, voice_name) = saved.endpoints.voice();
     let voice_cfg = can_voice_client::Config {
-        server: env_or("CAN_VOICE_SERVER", "audio.ceruleanavi.net:64738"),
-        server_name: env_or("CAN_VOICE_SERVER_NAME", "audio.ceruleanavi.net"),
+        server: voice_server,
+        server_name: voice_name,
         token: String::new(),
         client_id: concat!("xpc-for-can/", env!("CARGO_PKG_VERSION")).into(),
         follow: String::new(),
@@ -465,11 +474,10 @@ async fn connect(
         .await
         .map_err(|e| e.to_string())?;
 
+    let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let fsd = pilot_client::connect(PilotConfig {
-        host: env_or("CAN_FSD_HOST", "fsd.ceruleanavi.net"),
-        port: env_or("CAN_FSD_PORT", "6809")
-            .parse()
-            .unwrap_or(can_voice_fsd::packet::DEFAULT_PORT),
+        host: fsd_host,
+        port: fsd_port,
         identity: PilotIdentity::new(
             &callsign,
             &cid,
@@ -1140,7 +1148,7 @@ async fn check_update(
         // 上着网就是"正在工作"。
         let busy = app.link.lock().expect("link").is_some();
         (s.skipped_update, busy) };
-    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    let origin = app.settings_snapshot().endpoints.api_origin();
     let Some(latest) = can_voice_update::check(&app.http, &origin, "xpc-for-can", env!("CARGO_PKG_VERSION")).await else {
         return Ok(None);
     };
@@ -1220,7 +1228,7 @@ async fn send_log(
     cid: String,
     password: String,
 ) -> Result<(), String> {
-    let origin = env_or("CAN_API_ORIGIN", "https://api.ceruleanavi.net");
+    let origin = app.settings_snapshot().endpoints.api_origin();
     can_voice_log::upload(
         &app.http,
         &origin,
@@ -1232,11 +1240,101 @@ async fn send_log(
     .await
 }
 
+// ——— 设置对话框、置顶、精简（#45）———
+
+/// 精简模式下窗口最小能缩到多小。
+const COMPACT_MIN: (f64, f64) = (320.0, 220.0);
+/// 按下"精简"那一刻缩成多大。**不缩的话**，东西藏起来了窗口却还是那么大，
+/// 人还得自己去拖——而这个开关存在的全部理由就是一下子压到雷达屏的角落里。
+const COMPACT_SIZE: (f64, f64) = (460.0, 340.0);
+
+/// 把外观里和窗口有关的两样落到窗口上。
+///
+/// 正常模式的最小尺寸**从 `tauri.conf.json` 读**，不在这里再抄一份：两处写同一
+/// 对数字，改了一边，退出精简时窗口就还原到一个旧尺寸上。
+///
+/// `shrink` 为真时顺手把窗口缩到 [`COMPACT_SIZE`]：只在精简**刚打开**的那一刻、
+/// 和启动时照着存下来的状态还原时才这么做——不然每改一次主题窗口都跳一下。
+fn apply_window(window: &tauri::WebviewWindow, appearance: &can_voice_settings::Appearance, shrink: bool) {
+    if let Err(e) = window.set_always_on_top(appearance.always_on_top) {
+        tracing::warn!(error = %e, "could not change always-on-top");
+    }
+    let (w, h) = if appearance.compact {
+        COMPACT_MIN
+    } else {
+        let config = window.app_handle().config();
+        let conf = config.app.windows.first();
+        (
+            conf.and_then(|c| c.min_width).unwrap_or(COMPACT_MIN.0),
+            conf.and_then(|c| c.min_height).unwrap_or(COMPACT_MIN.1),
+        )
+    };
+    if let Err(e) = window.set_min_size(Some(tauri::LogicalSize::new(w, h))) {
+        tracing::warn!(error = %e, "could not change the minimum window size");
+    }
+    if shrink && appearance.compact {
+        let _ = window.set_size(tauri::LogicalSize::new(COMPACT_SIZE.0, COMPACT_SIZE.1));
+    }
+}
+
+/// 换外观。主题归前端管，这里只存；置顶和精简要动窗口。
+#[tauri::command]
+fn set_appearance(
+    window: tauri::WebviewWindow,
+    app: tauri::State<'_, App>,
+    appearance: can_voice_settings::Appearance,
+) {
+    let was_compact = app.settings_snapshot().appearance.compact;
+    apply_window(&window, &appearance, !was_compact);
+    app.update_settings(|s| s.appearance = appearance);
+}
+
+/// 存地址。**填得不对就不存**，并说出哪里不对：存进去一个连不上的地址，下次连接
+/// 时报的是网络错误，指不到这里。回的是去掉首尾空白之后真正存下的那一份。
+///
+/// 下次连接才生效——正连着的那条链路不会被半路换掉。
+#[tauri::command]
+fn set_endpoints(
+    app: tauri::State<'_, App>,
+    endpoints: can_voice_settings::Endpoints,
+) -> Result<can_voice_settings::Endpoints, String> {
+    let endpoints = endpoints.trimmed();
+    let problems = endpoints.problems();
+    if !problems.is_empty() {
+        return Err(problems.join("；"));
+    }
+    app.update_settings(|s| s.endpoints = endpoints.clone());
+    Ok(endpoints)
+}
+
+/// 这个客户端用得上的那几格地址：默认是什么、此刻是不是被环境变量盖着。
+///
+/// 被盖着的那几格界面要标出来——否则改了没反应，看起来就是设置坏了。
+#[tauri::command]
+fn endpoint_fields() -> Vec<can_voice_settings::endpoints::Field> {
+    can_voice_settings::endpoints::fields(&[
+        ("api_origin", can_voice_settings::endpoints::API_ORIGIN),
+        ("voice_server", can_voice_settings::endpoints::VOICE_SERVER),
+        ("fsd_server", can_voice_settings::endpoints::FSD_SERVER),
+    ])
+}
+
+#[tauri::command]
+fn set_debug_log(app: tauri::State<'_, App>, on: bool) {
+    app.update_settings(|s| s.debug_log = on);
+}
+
 pub fn run() {
     // **日志要落盘。** 打包出来的是一个没有控制台的 GUI 进程，`stdout` 写到哪里
     // 谁也看不见；用户报"连不上"的时候手里得有一份能发出来的东西。
     // 这一步同时装上 panic 钩子——崩溃不留记录的话，窗口没了、日志干净。
-    can_voice_log::init("xpc-for-can", std::env::args().any(|a| a == "--debug"));
+    // 设置里的调试开关要在装日志**之前**读。读设置本身失败时打的那条警告因此
+    // 没有地方去——但读失败的结果是默认值，而默认值就是不开调试，不影响判断。
+    let saved: Settings = can_voice_settings::Store::for_product("xpc-for-can").load();
+    can_voice_log::init(
+        "xpc-for-can",
+        std::env::args().any(|a| a == "--debug") || saved.debug_log,
+    );
 
     let app = App::new();
     spawn_csl_load(
@@ -1246,8 +1344,20 @@ pub fn run() {
     );
     tauri::Builder::default()
         .manage(app)
+        // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
+        .setup(|handle| {
+            let appearance = handle.state::<App>().settings_snapshot().appearance;
+            if let Some(window) = handle.get_webview_window("main") {
+                apply_window(&window, &appearance, appearance.compact);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             log_file,
+            set_appearance,
+            set_endpoints,
+            endpoint_fields,
+            set_debug_log,
             send_log,
             check_update,
             skip_update,

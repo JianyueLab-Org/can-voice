@@ -135,7 +135,7 @@ async function remove(i: number) {
         飞行计划
       </button>
       <button class="rounded border px-2 py-1" :class="tab === 'settings' ? 'border-sky-500' : ''" @click="tab = 'settings'">
-        设置
+        本机
       </button>
     </div>
 
