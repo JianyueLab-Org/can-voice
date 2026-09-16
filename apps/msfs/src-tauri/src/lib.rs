@@ -11,17 +11,21 @@
 //! 住在 `can-voice-fsd` 和 `can-voice-sim` 里。`can-audio` 那边这两支客户端是
 //! 两份近似副本，改一处要改两遍。
 //!
-//! # SimConnect 那一半在这个仓库里编译不了
+//! # SimConnect 那一半只在 Windows 上编译，但确实编
 //!
-//! CI 跑在 Linux 上、开发机是 macOS，而 `SimConnect.dll` 只有 Windows 有。
-//! 纯逻辑那一半（SimVar 表、单位换算、快照）到处都能测；连模拟器那一半
-//! **必须在 Windows 上编一次、连一次真实模拟器才算数**。非 Windows 上
+//! 开发机是 macOS，而 `SimConnect.dll` 只有 Windows 有。DLL 是**运行时**加载的
+//! （见 `can_voice_sim::msfs`），所以编译不需要那份不能随仓库分发的 SDK ——
+//! **CI 的 Windows job 会真的编这一段**。
+//!
+//! 但"编得过"不等于"对"：函数签名、结构体布局、常量取值这些只有连上一次真实
+//! 模拟器才验得了。纯逻辑那一半（SimVar 表、单位换算、快照、注入账本、机模
+//! 候选表）到处都能测，测试也都在。非 Windows 上
 //! [`can_voice_sim::msfs::available`] 返回 false，界面会直说。
 
 use can_voice_app::Bridge;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
-use can_voice_sim::msfs::{SimConnectSource, SimVarSource};
+use can_voice_sim::msfs::{SimConnectSource, SimConnectTraffic, SimVarSource, TrafficSink};
 use can_voice_sim::traffic::{Entry, Sample, TrafficTable};
 use can_voice_sim::Snapshot;
 use can_voice_token::TokenSource;
@@ -551,29 +555,112 @@ fn spawn_pump(fsd: PilotHandle, sim: SimLink, voice: Arc<Bridge>) {
     });
 }
 
-/// 每 50 ms 把他机表对到模拟器的 AI 机上。
+/// 用户自己那张机模表的位置。没有就用内置的。
+fn titles_path() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from))
+        .unwrap_or_default();
+    base.join("msfs-for-can").join("titles.json")
+}
+
+/// 把他机表对到模拟器的 AI 机上。
 ///
-/// **账在 [`can_voice_sim::inject`] 里，有测试**；这里只是把算出来的动作发下去。
-/// 真正调 SimConnect 的那几下是 Windows-only 的。
+/// **账在 [`can_voice_sim::inject`] 里、机模候选在
+/// [`can_voice_sim::msfs_models`] 里，两边都有测试**；这里只负责把算出来的
+/// 动作发下去，再把模拟器的回音喂回账本。
+///
+/// # 为什么是一条专门的线程，而且是第二条 SimConnect 连接
+///
+/// SimConnect 的调用是阻塞的 C 函数，放在 tokio 任务里会把执行器卡住——
+/// 读自机那条线程为此存在，这条同理。而 handle 不是线程安全的，两条线程
+/// 共用一个就得加锁，等于把注入和轮询串起来。SimConnect 本来就允许一个进程
+/// 开多条连接，开两条更简单。
 fn spawn_ai_injection(sim: SimLink, table: Arc<Mutex<TrafficTable>>) {
-    tokio::spawn(async move {
-        let mut injector = can_voice_sim::inject::Injector::new();
-        let mut tick = tokio::time::interval(INJECT_INTERVAL);
+    // 不在 Windows 上就没有 SimConnect，起个线程每 5 秒失败一次没有意义。
+    if !can_voice_sim::msfs::available() {
+        return;
+    }
+    std::thread::spawn(move || {
+        let overrides = can_voice_sim::msfs_models::load_overrides(&titles_path());
+        if !overrides.is_empty() {
+            tracing::info!(types = overrides.len(), "loaded model title overrides");
+        }
         loop {
-            tick.tick().await;
-            let now = monotonic();
-            let origin = sim.snapshot().map(|s| (s.latitude, s.longitude));
-            let entries = {
-                let mut table = table.lock().expect("traffic");
-                table.prune(now);
-                table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM))
-            };
-            for action in injector.reconcile(&entries) {
-                tracing::debug!(?action, "ai");
-                // TODO(Windows)：接上 SimConnect 的 AICreateNonATCAircraft /
-                // SetDataOnSimObject / AIRemoveObject。账已经算好了，缺的只是
-                // 那三个调用，而它们在这台机器上编译不了。
+            let mut sink = SimConnectTraffic::default();
+            if let Err(e) = sink.open() {
+                tracing::debug!(error = %e, "traffic link");
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
             }
+            tracing::info!("traffic link open");
+            let mut injector = can_voice_sim::inject::Injector::new();
+            loop {
+                // 先收回音：建成的登记 id，失败的记一笔好换下一个机模。
+                for (callsign, result) in sink.pump() {
+                    match result {
+                        Some(object_id) => injector.created(&callsign, object_id),
+                        None => {
+                            injector.failed(&callsign);
+                            tracing::debug!(%callsign, attempt = injector.attempt(&callsign),
+                                "could not create; trying the next model");
+                        }
+                    }
+                }
+
+                let now = monotonic();
+                // **自机位置是距离过滤的前提。** 不给的话 MAX_RANGE_NM 不起
+                // 作用，两百海里外的飞机会白占 AI 机的名额。
+                let origin = sim.snapshot().map(|s| (s.latitude, s.longitude));
+                let entries = {
+                    let mut table = table.lock().expect("traffic");
+                    table.prune(now);
+                    table.snapshot(now, origin, Some(MAX_TRAFFIC), Some(MAX_RANGE_NM))
+                };
+
+                // **机型码在这里换成机模标题**，因为 SimConnect 要的是后者。
+                // 第 n 次重试用第 n 个候选；候选用完就放弃这架，否则它会每
+                // INJECT_INTERVAL 重试一次，永远。
+                let mut resolved = Vec::new();
+                let mut give_up = Vec::new();
+                for action in injector.reconcile(&entries) {
+                    match action {
+                        can_voice_sim::inject::Action::Create {
+                            callsign,
+                            equipment,
+                            entry,
+                        } => {
+                            let list =
+                                can_voice_sim::msfs_models::candidates(&equipment, &overrides);
+                            match list.get(injector.attempt(&callsign) as usize) {
+                                Some(title) => {
+                                    resolved.push(can_voice_sim::inject::Action::Create {
+                                        callsign,
+                                        equipment: title.clone(),
+                                        entry,
+                                    })
+                                }
+                                None => {
+                                    tracing::warn!(%callsign, %equipment,
+                                        "no model could be created for this type; giving up");
+                                    give_up.push((callsign, equipment));
+                                }
+                            }
+                        }
+                        other => resolved.push(other),
+                    }
+                }
+                for (callsign, equipment) in give_up {
+                    injector.give_up(&callsign, &equipment);
+                }
+
+                if let Err(e) = sink.apply(&resolved) {
+                    tracing::warn!(error = %e, "traffic link lost");
+                    break;
+                }
+                std::thread::sleep(INJECT_INTERVAL);
+            }
+            sink.close();
         }
     });
 }
