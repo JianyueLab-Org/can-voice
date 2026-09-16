@@ -360,7 +360,9 @@ can-api 的 `VOICE_TOKEN_KEY`，而在两边都改完之前全网连不上。
   未定级成员（rating < 1）不能用语音，和 can-api 的 `/api/v1/public/auth` 同一条规则。
 - **管制员谁都听不见**：位置解析问题。can-fsd 的 datafeed 里管制员的经纬度是 JSON
   **字符串**而飞行员的是数字；解析错会让管制员全部落在 0,0。
-  `internal/fsdfeed` 的 `TestControllerCoordinatesParseFromStrings` 钉着这条。
+  `internal/fsdfeed` 的 `TestControllerCoordinatesParseFromStrings` 钉着这条。它读的
+  `testdata/datafeed_golden.json` 是 can-fsd 那份黄金文件的逐字节副本，
+  `.github/workflows/datafeed-golden.yml` 每天和上游对一次账。
 - **射程完全不起作用**：检查日志里有没有 `fsd feed dropped`。SSE 断开时服务端刻意
   降级为不做射程过滤——语音能不能通比射程真实感重要得多。
 - **启动时报 `CAN_VOICE_API_PUBKEY decodes to 44 bytes`**：贴进来的是 DER 包装的
