@@ -118,6 +118,10 @@ async fn cycle(station: &Station) -> Result<(), Box<dyn std::error::Error + Send
 
     tracing::info!(callsign = %station.callsign, freq = station.freq_khz, "station on the air");
 
+    // 合成结果按整篇稿子缓存。**播报循环每三秒要同一段 PCM**，不缓存的话一份
+    // 一整天不变的通播会一天几千次去开 `edge-tts` 和 `ffmpeg` 两个子进程。
+    let mut cache = crate::tts::PcmCache::default();
+
     while !offline.load(Ordering::Relaxed) {
         // **取文本是在一轮开始的时候。** 报文变了换的是下一轮，
         // 不会把正在播的那一轮从中间切断。
@@ -127,7 +131,14 @@ async fn cycle(station: &Station) -> Result<(), Box<dyn std::error::Error + Send
             continue;
         }
 
-        let pcm = synthesize(&station.tts, &text).await?;
+        let pcm = match cache.get(&text) {
+            Some(pcm) => pcm,
+            None => {
+                let pcm = Arc::new(synthesize(&station.tts, &text).await?);
+                cache.put(text, pcm.clone());
+                pcm
+            }
+        };
         broadcast(&client, &pcm, &busy, &offline).await;
         tokio::time::sleep(CYCLE_GAP).await;
     }

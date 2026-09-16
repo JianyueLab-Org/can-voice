@@ -149,6 +149,43 @@ pub fn online_positions(feed: &Value) -> Vec<Position> {
     out
 }
 
+/// 这个 CAN 号此刻的等级。查不到就是 `None`。
+///
+/// **给通播登录用的。** 写死观察员的话，一个 C1 管制员开的通播在雷达图上显示成
+/// 观察员，而管制席位上的同一个人是 C1。三组都找：开通播的那个人此刻多半正以
+/// 管制身份连着，而他的等级在 `controllers[]` 里。
+pub fn rating_for(cid: &str, feed: &Value) -> Option<u32> {
+    let cid = cid.trim();
+    for group in ["controllers", "pilots", "atis"] {
+        let Some(list) = feed.get(group).and_then(Value::as_array) else {
+            continue;
+        };
+        for entry in list {
+            if cid_of(entry).as_deref() == Some(cid) {
+                if let Some(r) = entry.get("rating").and_then(Value::as_u64) {
+                    return Some(r as u32);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 取一份 datafeed，自带一个一次性的 HTTP 客户端。
+///
+/// 给**手上没有共享客户端**的调用方用：通播制作端只在按下"上线"的那一刻查一次
+/// 等级，为这一次给整个应用挂一个 `reqwest::Client` 不值得。
+///
+/// 超时**五秒**而不是十几秒：它用在"按下上线"那条路径上，而在那里等下去不如先
+/// 上去——查不到等级只是显示成观察员，等不到才是真的上不了线。
+pub async fn fetch_once(url: &str) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    fetch(&client, url).await
+}
+
 /// CAN 号 → 呼号。三组人都在里面。
 ///
 /// 语音那一侧认的是 CAN 号——服务端下发的"谁在说话"就是一个号。这张表是用来把
@@ -260,6 +297,24 @@ mod tests {
             .map(|p| p.callsign)
             .collect();
         assert_eq!(names, ["ZSPD_1_TWR", "ZSPD_2_TWR", "ZBAA_APP"]);
+    }
+
+    /// 等级跟着本人，不是一个常量。
+    ///
+    /// 写死观察员的话，一个 C1 管制员开的通播在雷达图上显示成观察员，而管制席位
+    /// 上的同一个人是 C1。三组都找：开通播的那个人此刻多半正以管制身份连着。
+    #[test]
+    fn the_rating_follows_the_member() {
+        let f = json!({
+            "controllers": [{ "cid": "1000", "callsign": "ZSPD_TWR", "rating": 5 }],
+            "pilots": [{ "cid": "2000", "callsign": "CES2345", "rating": 2 }],
+            "atis": [],
+        });
+
+        assert_eq!(rating_for("1000", &f), Some(5));
+        assert_eq!(rating_for("2000", &f), Some(2));
+        // 没连着就查不到。调用方自己决定回落到什么。
+        assert_eq!(rating_for("3000", &f), None);
     }
 
     /// CAN 号 → 呼号，三组人都要进去。

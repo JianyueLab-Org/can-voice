@@ -19,6 +19,10 @@ const cid = ref("");
 const password = ref("");
 const sampleMetar = ref("ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NOSIG");
 const preview = ref<Rendered | null>(null);
+/** 模板里认不出来的变量。认不出的是**照字面念出去**的，所以要说出来。 */
+const problems = ref<string[]>([]);
+const refreshSecs = ref(300);
+const rating = ref(0);
 
 /** 当前打开的是哪个对话框。`null` 是没开。 */
 const asking = ref<"profile" | "rename" | "station" | null>(null);
@@ -61,8 +65,13 @@ async function renderPreview() {
   const s = station.value;
   if (!s) {
     preview.value = null;
+    problems.value = [];
     return;
   }
+  // 模板拼错要当场说。`[RWY]` 打成 `[RUNWAY]` 的话，飞行员听到的是一句
+  // "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。
+  const template = s.presets.find((p) => p.name === presetName.value)?.template ?? "";
+  problems.value = await invoke<string[]>("template_problems", { template });
   try {
     preview.value = await invoke("preview", {
       callsign: callsignOf(s),
@@ -121,6 +130,22 @@ const start = () =>
 const stop = () => guard(() => invoke("stop", { callsign: selected.value }));
 const refresh = () => guard(() => invoke("refresh", { callsign: selected.value }));
 
+/** 在播时换构型。**不必停掉重上**——重上的那几十秒里飞行员查不到通播。 */
+const switchPreset = (name: string) =>
+  guard(() => invoke("set_preset", { callsign: selected.value, preset: name }));
+
+/** 手动推进一格字母。播错了、或者报文没变但场面条件变了，都靠它。 */
+const bumpLetter = () => guard(() => invoke("advance_letter", { callsign: selected.value }));
+
+/** 夹过的那个数要回填：填 5 之后界面上该看到 60。 */
+async function applyRefresh() {
+  refreshSecs.value = await invoke<number>("set_metar_refresh", {
+    secs: Math.round(refreshSecs.value),
+  });
+}
+
+const applyRating = () => invoke("set_rating", { rating: rating.value });
+
 const addProfile = (name: string) =>
   guard(async () => {
     asking.value = null;
@@ -149,9 +174,18 @@ watch([selected, presetName, sampleMetar], () => {
   void renderPreview();
 });
 
+// 在播时换构型就真的换过去。挂着的席位改了下拉框却没生效，是那种"点了没反应"
+// 的故障——而它恰好发生在管制员正忙着换跑道的时候。
+watch(presetName, (name, was) => {
+  if (name && was && name !== was && onAir.value) void switchPreset(name);
+});
+
 // 上次用的 CAN 号预填。密码不存：它换的是一张短寿命的票。
 async function loadSettings() {
-  cid.value = (await invoke<{ cid: string }>("settings")).cid;
+  const s = await invoke<{ cid: string; metar_refresh_secs: number; rating: number }>("settings");
+  cid.value = s.cid;
+  refreshSecs.value = s.metar_refresh_secs;
+  rating.value = s.rating;
 }
 
 onMounted(async () => {
@@ -229,8 +263,48 @@ onUnmounted(() => window.clearInterval(timer));
           + 新席位
         </button>
 
-        <!-- 折叠着：平时不占地方，出了问题才展开。 -->
+        <!-- 折叠着：平时不占地方。 -->
         <details class="mt-auto rounded border px-2 py-1 text-xs">
+          <summary class="cursor-pointer opacity-70">设置</summary>
+          <div class="flex flex-col gap-2 pt-2">
+            <label class="flex items-center gap-2">
+              <span class="opacity-60">报文周期</span>
+              <input
+                v-model.number="refreshSecs"
+                type="number"
+                min="60"
+                max="3600"
+                class="w-20 rounded border px-1 py-0.5"
+                @change="applyRefresh"
+              />
+              <span class="opacity-60">秒</span>
+            </label>
+            <label class="flex items-center gap-2">
+              <span class="opacity-60">登录等级</span>
+              <select
+                v-model.number="rating"
+                class="flex-1 rounded border px-1 py-0.5"
+                @change="applyRating"
+              >
+                <!-- 自动是默认：写死观察员的话，一个 C1 开的通播在雷达图上
+                     显示成观察员，而管制席位上的同一个人是 C1。 -->
+                <option :value="0">自动（跟随本人）</option>
+                <option :value="1">OBS</option>
+                <option :value="2">S1</option>
+                <option :value="3">S2</option>
+                <option :value="4">S3</option>
+                <option :value="5">C1</option>
+                <option :value="7">C3</option>
+                <option :value="8">I1</option>
+                <option :value="10">I3</option>
+                <option :value="11">SUP</option>
+              </select>
+            </label>
+            <p class="opacity-50">等级下次上线才生效。</p>
+          </div>
+        </details>
+
+        <details class="rounded border px-2 py-1 text-xs">
           <summary class="cursor-pointer opacity-70">日志</summary>
           <div class="pt-2">
             <LogPanel :cid="cid" />
@@ -265,12 +339,36 @@ onUnmounted(() => window.clearInterval(timer));
             上线
           </button>
           <template v-else>
-            <button class="ml-auto rounded border px-2 py-1 text-xs" @click="refresh">
-              取报文
+            <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
+                 而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
+                 跑道变了就是另一份通播。 -->
+            <select
+              v-model="presetName"
+              class="ml-auto rounded border px-2 py-1 text-xs"
+              title="换一套跑道构型（会推进一格字母）"
+            >
+              <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
+            </select>
+            <button
+              class="rounded border px-2 py-1 text-xs"
+              title="播错了，或者报文没变但场面条件变了"
+              @click="bumpLetter"
+            >
+              推字母
             </button>
+            <button class="rounded border px-2 py-1 text-xs" @click="refresh">取报文</button>
             <button class="rounded border px-2 py-1 text-xs" @click="stop">停止</button>
           </template>
         </div>
+
+        <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
+             就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
+        <p
+          v-if="problems.length"
+          class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
+        >
+          模板里这几个变量认不出来，会被原样念出去：{{ problems.join("、") }}
+        </p>
 
         <label class="flex flex-col gap-1">
           <span class="text-xs opacity-60">

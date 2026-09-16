@@ -22,12 +22,25 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// 多久问一次报文。
+/// 多久问一次报文，默认值。
 ///
 /// METAR 半小时一份（特报不定时），五分钟一问既不会漏掉特报，也不会把服务端
-/// 的气象缓存问穿。
-const METAR_POLL: Duration = Duration::from_secs(300);
+/// 的气象缓存问穿。**可配**：旧版就能调，不同机场的特报节奏差别不小。
+const DEFAULT_REFRESH_SECS: u32 = 300;
+/// 夹住。填 5 秒的人会每五秒去问一次服务端的气象缓存；填 0 的那个更糟——
+/// `tokio::time::interval` 的周期是 0 会直接 panic，而那会把整个席位的循环打死，
+/// 界面上看到的是"上线之后再也没有报文"。
+const MIN_REFRESH_SECS: u32 = 60;
+const MAX_REFRESH_SECS: u32 = 3600;
 const METAR_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn clamp_refresh(secs: u32) -> u32 {
+    secs.clamp(MIN_REFRESH_SECS, MAX_REFRESH_SECS)
+}
+
+fn default_refresh() -> u32 {
+    DEFAULT_REFRESH_SECS
+}
 
 /// 一个在播席位此刻的样子。前端读它。
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -45,9 +58,51 @@ pub struct Live {
 struct Running {
     fsd: FsdHandle,
     live: Arc<Mutex<Live>>,
+    /// 这个席位此刻在播的东西。**界面上的动作改的就是它。**
+    airing: Arc<Mutex<Airing>>,
     task: tokio::task::JoinHandle<()>,
     /// 按"现在就更新"时敲它一下，盯报文那条循环立刻去问一次。
     wake: Arc<tokio::sync::Notify>,
+}
+
+/// 一个在播席位的可变部分。
+///
+/// **跑道构型和情报字母都在这里而不是那条循环的局部变量里**，因为它们要能被界面
+/// 改：此前换一套跑道构型必须把席位停掉重上，而重上的那几十秒里飞行员查不到通播
+/// ——恰恰是管制员正在换跑道、最不该让通播消失的时刻。
+struct Airing {
+    station: Station,
+    preset: Preset,
+    letter: char,
+    /// 最近一次拿到的报文原文。换构型、推字母时照着它重渲染，不必再问一次 FSD。
+    last_metar: String,
+}
+
+/// 按当前这一份在播状态渲染一遍。
+fn render_airing(a: &Airing) -> Rendered {
+    script::render(
+        &a.station,
+        &a.preset,
+        &Metar::parse(&a.last_metar),
+        a.letter,
+    )
+}
+
+/// 重渲染、送上线、更新界面读的那一份。
+///
+/// 报文还没拿到时**什么都不做**：拿一份空报文渲染出来的稿子会把"还没有天气"
+/// 播成一份看起来正常的通播。
+fn publish(airing: &Airing, fsd: &FsdHandle, live: &Arc<Mutex<Live>>) -> bool {
+    if airing.last_metar.is_empty() {
+        return false;
+    }
+    let rendered = render_airing(airing);
+    fsd.set_atis_lines(packet::wrap_atis_text(&rendered.wire));
+    let mut l = live.lock().expect("live");
+    l.letter = airing.letter;
+    l.preset = airing.preset.name.clone();
+    l.rendered = rendered;
+    true
 }
 
 /// 存下来的设置。
@@ -62,6 +117,18 @@ pub struct Settings {
     /// 不是从此闭嘴**——下一版照样提示。
     #[serde(default)]
     pub skipped_update: String,
+    /// 多久问一次报文（秒）。
+    ///
+    /// **默认值走 `default_refresh` 而不是 `0`**：老的设置文件里没有这一项，
+    /// 反序列化拿到 0 会被夹成 60 秒，等于一次升级把所有人的轮询加密五倍。
+    #[serde(default = "default_refresh")]
+    pub metar_refresh_secs: u32,
+    /// 登录用的等级。**0 表示自动**——跟着本人在数据源上的实际等级走。
+    ///
+    /// 写死观察员的话，一个 C1 管制员开的通播在雷达图上显示成观察员，而管制席位
+    /// 上的同一个人是 C1。
+    #[serde(default)]
+    pub rating: u32,
 }
 
 pub struct App {
@@ -69,19 +136,51 @@ pub struct App {
     running: Mutex<HashMap<String, Running>>,
     store: can_voice_settings::Store,
     settings: Mutex<Settings>,
+    /// 报文刷新周期（秒）。每个在播席位那条循环读它，所以是原子量不是锁。
+    refresh_secs: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl App {
     pub fn new() -> Self {
         let store = can_voice_settings::Store::for_product("atis-for-can");
-        let settings = store.load();
+        let settings: Settings = store.load();
         Self {
             profiles: Mutex::new(ProfileSet::load(profile_path())),
             running: Mutex::new(HashMap::new()),
             store,
+            refresh_secs: Arc::new(std::sync::atomic::AtomicU32::new(clamp_refresh(
+                settings.metar_refresh_secs,
+            ))),
             settings: Mutex::new(settings),
         }
     }
+
+    fn settings_snapshot(&self) -> Settings {
+        match self.settings.lock() {
+            Ok(s) => s.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    fn update_settings(&self, f: impl FnOnce(&mut Settings)) {
+        let mut s = match self.settings.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        f(&mut s);
+        if let Err(e) = self.store.save(&*s) {
+            tracing::warn!(error = %e, "could not save the settings");
+        }
+    }
+}
+
+/// 去数据源上查这个 CAN 号此刻的等级。
+///
+/// 查不到返回 `None`，调用方回落到观察员——一次 datafeed 抖动不该让人登不上去。
+async fn rating_lookup(cid: &str) -> Option<u32> {
+    let url = env_or("CAN_FSD_DATAFEED", can_voice_datafeed::DEFAULT_URL);
+    let feed = can_voice_datafeed::fetch_once(&url).await?;
+    can_voice_datafeed::rating_for(cid, &feed)
 }
 
 impl Default for App {
@@ -305,8 +404,12 @@ fn remember_cid(app: &App, cid: &str) {
 
 // ——— 上线 / 下线 ———
 
+/// 上线。
+///
+/// **是 async 的**：上线之前要去数据源查一次本人的等级，而那是一次 HTTP 往返。
+/// 同步命令里等它，等于窗口在那几秒里点不动。
 #[tauri::command]
-fn start(
+async fn start(
     app: tauri::State<'_, App>,
     callsign: String,
     preset: String,
@@ -330,6 +433,17 @@ fn start(
         .frequency_khz()
         .ok_or_else(|| format!("{} is not a frequency", station.frequency))?;
 
+    // **等级跟着本人**：写死观察员的话，一个 C1 管制员开的通播在雷达图上显示成
+    // 观察员，而管制席位上的同一个人是 C1。设置里指定了就用指定的；0 表示自动，
+    // 去数据源上查一次。查不到就回落到观察员——一次 datafeed 抖动不该让人登不上。
+    //
+    // **在拿锁之前查。** 这一步要 await，而 `running` 是一把 std 的锁：攥着它
+    // 跨 await 会把整张在播表挡住那几秒。
+    let rating = match app.settings_snapshot().rating {
+        0 => rating_lookup(&cid).await.unwrap_or(RATING_OBSERVER),
+        chosen => chosen,
+    };
+
     let mut running = app.running.lock().expect("running");
     if running.contains_key(&callsign) {
         return Err(format!("{callsign} is already on the air"));
@@ -350,13 +464,13 @@ fn start(
             } else {
                 &station.name
             },
-            RATING_OBSERVER,
+            rating,
         ),
         position: Position {
             frequency: station.frequency.clone(),
             facility: FACILITY_ATIS,
             vis_range: 50,
-            rating: RATING_OBSERVER,
+            rating,
             latitude: station.latitude,
             longitude: station.longitude,
         },
@@ -369,20 +483,27 @@ fn start(
         preset: chosen.name.clone(),
         ..Default::default()
     }));
+    let airing = Arc::new(Mutex::new(Airing {
+        letter: station.letter,
+        station,
+        preset: chosen,
+        last_metar: String::new(),
+    }));
     let wake = Arc::new(tokio::sync::Notify::new());
     let fsd = client::connect(config);
     let task = tokio::spawn(watch(
-        station,
-        chosen,
+        airing.clone(),
         fsd.clone(),
         live.clone(),
         wake.clone(),
+        app.refresh_secs.clone(),
     ));
     running.insert(
         callsign,
         Running {
             fsd,
             live,
+            airing,
             task,
             wake,
         },
@@ -424,22 +545,98 @@ fn refresh(app: tauri::State<'_, App>, callsign: String) -> bool {
     }
 }
 
+/// 换一套跑道构型，**不必把席位停掉重上**。
+///
+/// 重上一次，飞行员在那几十秒里查不到通播，而管制员正在忙着换跑道——恰恰是最不
+/// 该让通播消失的时刻。
+///
+/// **同时推进情报字母。** 跑道构型变了就是另一份通播；不推进的话，"information
+/// Bravo" 这个名字底下的内容被悄悄换掉了，而手里拿着 Bravo 的机组无从知道。
+/// 只想换个字母不动构型的，用 [`advance_letter`]。
+#[tauri::command]
+fn set_preset(app: tauri::State<'_, App>, callsign: String, preset: String) -> Result<(), String> {
+    let running = app.running.lock().expect("running");
+    let r = running
+        .get(&callsign)
+        .ok_or_else(|| format!("{callsign} is not on the air"))?;
+    let mut a = r.airing.lock().expect("airing");
+    let chosen = a
+        .station
+        .preset(&preset)
+        .cloned()
+        .ok_or_else(|| format!("no preset {preset}"))?;
+    a.preset = chosen;
+    a.letter = next_letter(&a.station, a.letter);
+    publish(&a, &r.fsd, &r.live);
+    Ok(())
+}
+
+/// 手动推进一格情报字母并重发。
+///
+/// 播错了、或者报文没变但场面条件变了（跑道积水、某条滑行道关闭），都要靠它。
+/// 自动推进只认报文变化，而那两件事报文里没有。
+#[tauri::command]
+fn advance_letter(app: tauri::State<'_, App>, callsign: String) -> Result<char, String> {
+    let running = app.running.lock().expect("running");
+    let r = running
+        .get(&callsign)
+        .ok_or_else(|| format!("{callsign} is not on the air"))?;
+    let mut a = r.airing.lock().expect("airing");
+    a.letter = next_letter(&a.station, a.letter);
+    publish(&a, &r.fsd, &r.live);
+    Ok(a.letter)
+}
+
+/// 改报文刷新周期。**立刻生效**：每个席位那条循环下一拍就换 ticker。
+#[tauri::command]
+fn set_metar_refresh(app: tauri::State<'_, App>, secs: u32) -> u32 {
+    let secs = clamp_refresh(secs);
+    app.refresh_secs
+        .store(secs, std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.metar_refresh_secs = secs);
+    // 把夹过的那个数还回去：填 5 之后界面上该看到 60。
+    secs
+}
+
+/// 改登录等级。0 表示自动（跟着数据源上本人的实际等级）。
+///
+/// **下次上线才生效**：FSD 的等级是登录时声明的，改一个已经挂着的席位要重连。
+#[tauri::command]
+fn set_rating(app: tauri::State<'_, App>, rating: u32) {
+    app.update_settings(|s| s.rating = rating);
+}
+
+/// 这份模板里有哪些认不出来的变量。
+///
+/// **认不出的变量是照字面念出去的**（`[RWY]` 打成 `[RUNWAY]`，飞行员听到的就是
+/// 一句"runway"后面跟着中括号里那个词）。旧版每次重渲染都提示一次，新版这条检查
+/// 写了却从没有人调用。
+#[tauri::command]
+fn template_problems(template: String) -> Vec<String> {
+    can_voice_atis::template::unknown_variables(&template)
+}
+
 /// 一个席位的后台循环：盯 FSD 的状态，按时问报文，报文变了就推进字母、重渲染、
 /// 把新文字送上线。
 async fn watch(
-    station: Station,
-    preset: Preset,
+    airing: Arc<Mutex<Airing>>,
     fsd: FsdHandle,
     live: Arc<Mutex<Live>>,
     wake: Arc<tokio::sync::Notify>,
+    refresh: Arc<std::sync::atomic::AtomicU32>,
 ) {
     let mut events = fsd.events();
-    let mut ticker = tokio::time::interval(METAR_POLL);
+    let mut period = refresh_period(&refresh);
+    let mut ticker = tokio::time::interval(period);
     let mut online = false;
-    let mut letter = station.letter;
-    let mut last_metar = String::new();
 
     loop {
+        // 周期改了就换一个 ticker：改完要立刻生效，而不是等这个席位下一次上线。
+        let wanted = refresh_period(&refresh);
+        if wanted != period {
+            period = wanted;
+            ticker = tokio::time::interval(wanted);
+        }
         tokio::select! {
             event = events.recv() => match event {
                 Ok(FsdEvent { state, reason }) => {
@@ -456,7 +653,7 @@ async fn watch(
                     // 刚上线就立刻要一份报文，不等第一个五分钟——否则席位
                     // 挂在网上却一句通播都没有。
                     if online && !was_online {
-                        poll(&station, &preset, &fsd, &live, &mut letter, &mut last_metar, true).await;
+                        poll(&airing, &fsd, &live, true).await;
                     }
                 }
                 // 事件流跟不上就丢了几条状态；下一条会补上，不必重来。
@@ -465,12 +662,12 @@ async fn watch(
             },
             _ = ticker.tick() => {
                 if online {
-                    poll(&station, &preset, &fsd, &live, &mut letter, &mut last_metar, false).await;
+                    poll(&airing, &fsd, &live, false).await;
                 }
             }
             _ = wake.notified() => {
                 if online {
-                    poll(&station, &preset, &fsd, &live, &mut letter, &mut last_metar, false).await;
+                    poll(&airing, &fsd, &live, false).await;
                 }
             }
         }
@@ -502,38 +699,42 @@ fn decide(previous: &str, report: &str, first: bool) -> Next {
     }
 }
 
+fn refresh_period(refresh: &std::sync::atomic::AtomicU32) -> Duration {
+    Duration::from_secs(clamp_refresh(refresh.load(std::sync::atomic::Ordering::Relaxed)).into())
+}
+
 /// 问一次报文，变了就推进字母并重发。
-async fn poll(
-    station: &Station,
-    preset: &Preset,
-    fsd: &FsdHandle,
-    live: &Arc<Mutex<Live>>,
-    letter: &mut char,
-    last_metar: &mut String,
-    first: bool,
-) {
-    let Some(report) = fsd.request_metar(&station.identifier, METAR_TIMEOUT).await else {
+async fn poll(airing: &Arc<Mutex<Airing>>, fsd: &FsdHandle, live: &Arc<Mutex<Live>>, first: bool) {
+    // **锁不跨 await。** 问报文最长要二十秒，攥着锁的话这二十秒里换构型、
+    // 推字母、读界面全都卡住。
+    let (icao, previous) = {
+        let a = airing.lock().expect("airing");
+        (a.station.identifier.clone(), a.last_metar.clone())
+    };
+    let Some(report) = fsd.request_metar(&icao, METAR_TIMEOUT).await else {
         // 问不到就**保持现状**，不清空也不换字母：一次网络抖动不该让一个席位
         // 的通播变成空的。
-        tracing::info!(icao = %station.identifier, "no metar this round");
+        tracing::info!(icao = %icao, "no metar this round");
         return;
     };
-    let Next::Publish { advance } = decide(last_metar, &report, first) else {
+    let Next::Publish { advance } = decide(&previous, &report, first) else {
         return;
     };
-    if advance {
-        let mut s = station.clone();
-        s.letter = *letter;
-        *letter = s.advance_letter();
-    }
-    *last_metar = report.clone();
 
-    let rendered = script::render(station, preset, &Metar::parse(&report), *letter);
-    fsd.set_atis_lines(packet::wrap_atis_text(&rendered.wire));
-    let mut l = live.lock().expect("live");
-    l.letter = *letter;
-    l.metar = report;
-    l.rendered = rendered;
+    let mut a = airing.lock().expect("airing");
+    if advance {
+        a.letter = next_letter(&a.station, a.letter);
+    }
+    a.last_metar = report.clone();
+    publish(&a, fsd, live);
+    live.lock().expect("live").metar = report;
+}
+
+/// 下一个情报字母。
+fn next_letter(station: &Station, current: char) -> char {
+    let mut s = station.clone();
+    s.letter = current;
+    s.advance_letter()
 }
 
 // ——— 更新检查 ———
@@ -645,6 +846,11 @@ pub fn run() {
             preview,
             start,
             stop,
+            set_preset,
+            advance_letter,
+            set_metar_refresh,
+            set_rating,
+            template_problems,
             live,
             refresh,
             settings,
@@ -656,6 +862,55 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn airing(preset: Preset) -> Airing {
+        let mut station = Station::new("ZSPD");
+        station.name = "Shanghai Pudong".into();
+        Airing {
+            station,
+            preset,
+            letter: 'A',
+            last_metar: "ZSPD 251300Z 09004MPS 9999 FEW030 25/18 Q1013 NOSIG".into(),
+        }
+    }
+
+    fn preset_using(runway_line: &str) -> Preset {
+        Preset {
+            name: "west".into(),
+            airport_conditions: runway_line.into(),
+            ..Default::default()
+        }
+    }
+
+    /// **切跑道构型不必把席位停掉重上。**
+    ///
+    /// 重上一次，飞行员在那几十秒里查不到通播，而管制员正在忙着换跑道——
+    /// 恰恰是最不该让通播消失的时刻。换完之后送上线的那一份必须是新构型的稿子。
+    #[test]
+    fn switching_the_configuration_re_renders_from_the_new_preset() {
+        let mut a = airing(preset_using("DEPARTURE RUNWAY 16L"));
+        let before = render_airing(&a);
+        assert!(before.text.contains("16L"));
+
+        a.preset = preset_using("DEPARTURE RUNWAY 34R");
+        let after = render_airing(&a);
+
+        assert!(after.text.contains("34R"), "got: {}", after.text);
+        assert!(!after.text.contains("16L"));
+    }
+
+    /// **报文刷新周期夹在讲得通的范围里。**
+    ///
+    /// 旧版可调 60–3600 秒。填 5 秒的人会每五秒去问一次服务端的气象缓存；填 0 的
+    /// 那个更糟——`tokio::time::interval` 的周期是 0 会直接 panic，而那会把整个
+    /// 席位的循环打死，界面上看到的是"上线之后再也没有报文"。
+    #[test]
+    fn a_metar_refresh_period_outside_what_makes_sense_is_clamped() {
+        assert_eq!(clamp_refresh(0), MIN_REFRESH_SECS);
+        assert_eq!(clamp_refresh(5), MIN_REFRESH_SECS);
+        assert_eq!(clamp_refresh(99_999), MAX_REFRESH_SECS);
+        assert_eq!(clamp_refresh(600), 600);
+    }
 
     /// 第一份报文要发，但**不推进字母**——那一份就是当前这个字母的内容。
     #[test]

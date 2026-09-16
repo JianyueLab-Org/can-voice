@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 can-voice-atis = { path = "../../../crates/can-voice-atis" }
+can-voice-datafeed = { path = "../../../crates/can-voice-datafeed" }
 can-voice-fsd = { path = "../../../crates/can-voice-fsd" }
 can-voice-settings = { path = "../../../crates/can-voice-settings" }
 can-voice-log = { path = "../../../crates/can-voice-log" }
