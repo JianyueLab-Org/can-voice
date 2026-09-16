@@ -1,0 +1,125 @@
+{
+  "common": {
+    "close": "Close",
+    "separator": {
+      "list": ", ",
+      "sentence": "; "
+    }
+  },
+  "language": {
+    "zh": "中文",
+    "en": "English"
+  },
+  "settings": {
+    "title": "Settings",
+    "appearance": "Appearance",
+    "theme": "Theme",
+    "theme_system": "Follow system",
+    "theme_light": "Light",
+    "theme_dark": "Dark",
+    "language": "Language",
+    "language_system": "Follow system",
+    "always_on_top": "Always on top",
+    "compact": "Compact mode",
+    "endpoints": "Server addresses · leave blank for the default · takes effect on the next connection",
+    "overridden": "Overridden by an environment variable right now; changing it here has no effect",
+    "save_endpoints": "Save addresses",
+    "saved": "Saved",
+    "troubleshooting": "Troubleshooting",
+    "debug_log": "Debug-level logging",
+    "debug_log_note": "(Takes effect on the next launch. Same as starting with --debug)",
+    "endpoint": {
+      "api_origin": "can-api",
+      "voice_server": "Voice server",
+      "fsd_server": "FSD server",
+      "datafeed_url": "Data feed",
+      "metar_url": "Weather source",
+      "atis_config_url": "ATIS configuration"
+    }
+  },
+  "window": {
+    "on_top": "Pin",
+    "on_top_tip": "Always on top: stay above the radar screen or simulator instead of being covered by other windows",
+    "compact": "Compact",
+    "compact_tip": "Compact mode: keep only what you watch while on duty, so the window can shrink right down",
+    "settings": "Settings",
+    "settings_tip": "Theme, language, server addresses, debug log"
+  },
+  "update": {
+    "available": "Version {version} is available. This program never updates itself; whether to install is up to you.",
+    "available_sized": "Version {version} ({size}) is available. This program never updates itself; whether to install is up to you.",
+    "notes": "Release notes",
+    "download": "Download",
+    "skip": "Skip this version"
+  },
+  "log": {
+    "title": "Log",
+    "no_file": "No log file could be created on this machine (the directory is not writable). The program works normally, but if something goes wrong there will be no record to send.",
+    "explain": "If something goes wrong you can send the log to the maintainers. This needs your CAN ID and password, because that is what the server accepts; the password is used for this one upload and never stored.",
+    "cid": "CAN ID",
+    "password": "Password",
+    "send": "Send log",
+    "sending": "Sending…",
+    "sent": "The log has been sent."
+  },
+  "error": {
+    "token": {
+      "credentials": "Wrong CAN ID or password",
+      "rejected": "can-api refused to issue voice credentials: HTTP {status}",
+      "unreachable": "Could not reach can-api: {detail}"
+    },
+    "voice": {
+      "token_expired": "The voice server says the credentials have expired. This computer's clock is probably wrong; correct the time and try again",
+      "token_invalid": "The voice server does not accept these credentials. This is a client or server bug; please send the log to the maintainers",
+      "refused": "The voice server refused this sign-in: the account may not have a rating yet",
+      "proto_unsupported": "This client version is too old for the voice server. Please update to the latest version",
+      "refused_other": "The voice server refused this sign-in ({reason})",
+      "bad_callsign": "Callsign {callsign} is not valid: 2–10 characters, only capital letters, digits, - or _",
+      "bad_address": "Could not resolve the voice server address {address}",
+      "unreachable": "Could not reach the voice server: {detail}",
+      "not_connected": "Voice is not connected yet"
+    },
+    "callsign": {
+      "length": "Callsign {callsign} has {len} characters; it must have between 2 and {limit}",
+      "charset": "Callsign {callsign} contains characters the server does not accept: only letters, digits, - or _",
+      "not_atis": "Callsign {callsign} must end in _ATIS",
+      "reserved": "{callsign} is reserved by the protocol and cannot be used as a callsign"
+    },
+    "observer": {
+      "unreadable": "Cannot read frequency {value}; write it like 121.800",
+      "out_of_band": "Frequency {value} is outside 118.000–136.975",
+      "no_follow": "An observer needs a callsign to follow: the captain's aircraft, whose position voice range is measured from",
+      "bad_follow": "Follow callsign {callsign} is not valid: 2–10 characters, only letters, digits, - or _"
+    },
+    "endpoint": {
+      "url_scheme": {
+        "api_origin": "The can-api address must start with http:// or https://: {value}",
+        "datafeed_url": "The data feed address must start with http:// or https://: {value}",
+        "metar_url": "The weather source address must start with http:// or https://: {value}",
+        "atis_config_url": "The ATIS configuration address must start with http:// or https://: {value}"
+      },
+      "server_scheme": {
+        "voice_server": "The voice server takes only a host and port, without http://: {value}",
+        "fsd_server": "The FSD server takes only a host and port, without http://: {value}"
+      },
+      "server_form": {
+        "voice_server": "The voice server must be written as host:port: {value}",
+        "fsd_server": "The FSD server must be written as host:port: {value}"
+      }
+    },
+    "log": {
+      "no_file": "There is no log file on this machine: the log directory is not writable",
+      "unreadable": "Could not read the log file: {detail}",
+      "unreachable": "Could not reach can-api; the log was not sent",
+      "credentials": "Wrong CAN ID or password",
+      "rate_limited": "Sent too often; try again later",
+      "disabled": "Log upload is not enabled on the server",
+      "rejected": "The server refused the upload: HTTP {status}"
+    },
+    "update": {
+      "not_https": "The download address is not an https address, so it was not opened",
+      "no_opener": "Don't know how to open a browser on this system",
+      "open_failed": "Could not open the browser: {detail}"
+    }
+  }
+}

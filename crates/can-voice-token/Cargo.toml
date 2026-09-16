@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+can-voice-i18n = { path = "../can-voice-i18n" }
 can-voice-client = { path = "../can-voice-client" }
 serde.workspace = true
 serde_json.workspace = true

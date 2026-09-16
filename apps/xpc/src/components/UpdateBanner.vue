@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { errorText, t } from "../i18n";
 
 /** 和 Rust 侧 `can_voice_update::Latest` 一一对应。 */
 interface Latest {
@@ -33,7 +34,7 @@ async function open(url: string) {
   try {
     await invoke("open_download", { url });
   } catch (e) {
-    problem.value = String(e);
+    problem.value = errorText(e);
   }
 }
 
@@ -52,17 +53,21 @@ async function skip() {
     v-if="latest"
     class="flex flex-wrap items-center gap-2 rounded border border-sky-400 px-3 py-2 text-xs"
   >
+    <!-- 括号在译文里：中文是全角括号，英文不是。 -->
     <span class="flex-1">
-      有新版本 {{ latest.version }}<span v-if="size">（{{ size }}）</span>。
-      本程序不会自动更新，装不装由你决定。
+      {{
+        size
+          ? t("update.available_sized", { version: latest.version, size })
+          : t("update.available", { version: latest.version })
+      }}
     </span>
     <!-- 不用 `<a target="_blank">`：在 webview 里那会把应用自己导航走，
          整个界面被一个发行说明页顶掉，而且回不来。 -->
     <button v-if="latest.notes" class="underline underline-offset-2" @click="open(latest.notes)">
-      更新说明
+      {{ t("update.notes") }}
     </button>
-    <button class="rounded border px-2 py-0.5" @click="download">下载</button>
-    <button class="rounded border px-2 py-0.5" @click="skip">跳过这一版</button>
+    <button class="rounded border px-2 py-0.5" @click="download">{{ t("update.download") }}</button>
+    <button class="rounded border px-2 py-0.5" @click="skip">{{ t("update.skip") }}</button>
   </p>
   <p v-if="problem" class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700">
     {{ problem }}

@@ -1,0 +1,7 @@
+{
+  "problem": {
+    "observer_locked": "Observer mode cannot be switched while connected. Disconnect first, then change it.",
+    "nothing_to_send": "Nothing to send: the message is empty, or there is neither a recipient nor a COM1 frequency",
+    "offline": "Not connected yet"
+  }
+}

@@ -19,7 +19,7 @@
 pub mod appearance;
 pub mod endpoints;
 
-pub use appearance::{Appearance, Theme};
+pub use appearance::{Appearance, Language, Theme};
 pub use endpoints::Endpoints;
 
 use serde::de::DeserializeOwned;

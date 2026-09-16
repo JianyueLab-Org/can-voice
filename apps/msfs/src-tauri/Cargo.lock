@@ -309,6 +309,7 @@ name = "can-voice-app"
 version = "0.1.0"
 dependencies = [
  "can-voice-client",
+ "can-voice-i18n",
  "can-voice-proto",
  "can-voice-ptt",
  "can-voice-settings",
@@ -352,6 +353,7 @@ dependencies = [
 name = "can-voice-fsd"
 version = "0.1.0"
 dependencies = [
+ "can-voice-i18n",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -360,9 +362,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "can-voice-i18n"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "can-voice-log"
 version = "0.1.0"
 dependencies = [
+ "can-voice-i18n",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -394,6 +404,7 @@ dependencies = [
 name = "can-voice-settings"
 version = "0.1.0"
 dependencies = [
+ "can-voice-i18n",
  "serde",
  "serde_json",
  "tracing",
@@ -419,6 +430,7 @@ name = "can-voice-token"
 version = "0.1.0"
 dependencies = [
  "can-voice-client",
+ "can-voice-i18n",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -430,6 +442,7 @@ dependencies = [
 name = "can-voice-update"
 version = "0.1.0"
 dependencies = [
+ "can-voice-i18n",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -2419,6 +2432,7 @@ dependencies = [
  "can-voice-chime",
  "can-voice-client",
  "can-voice-fsd",
+ "can-voice-i18n",
  "can-voice-log",
  "can-voice-ptt",
  "can-voice-settings",

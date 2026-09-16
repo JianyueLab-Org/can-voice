@@ -1,0 +1,125 @@
+{
+  "common": {
+    "close": "关闭",
+    "separator": {
+      "list": "、",
+      "sentence": "；"
+    }
+  },
+  "language": {
+    "zh": "中文",
+    "en": "English"
+  },
+  "settings": {
+    "title": "设置",
+    "appearance": "外观",
+    "theme": "主题",
+    "theme_system": "跟随系统",
+    "theme_light": "浅色",
+    "theme_dark": "深色",
+    "language": "语言",
+    "language_system": "跟随系统",
+    "always_on_top": "窗口置顶",
+    "compact": "精简模式",
+    "endpoints": "服务器地址 · 留空用默认 · 下次连接生效",
+    "overridden": "此刻被环境变量盖着，改了不生效",
+    "save_endpoints": "保存地址",
+    "saved": "已保存",
+    "troubleshooting": "排障",
+    "debug_log": "调试级日志",
+    "debug_log_note": "（下次启动生效。和命令行加 --debug 一样）",
+    "endpoint": {
+      "api_origin": "can-api",
+      "voice_server": "语音服务器",
+      "fsd_server": "FSD 服务器",
+      "datafeed_url": "数据源",
+      "metar_url": "气象源",
+      "atis_config_url": "通播配置"
+    }
+  },
+  "window": {
+    "on_top": "置顶",
+    "on_top_tip": "窗口置顶：压在雷达屏或模拟器上面，不被别的窗口盖住",
+    "compact": "精简",
+    "compact_tip": "精简模式：只留值班时要盯的东西，窗口可以缩到很小",
+    "settings": "设置",
+    "settings_tip": "主题、语言、服务器地址、调试日志"
+  },
+  "update": {
+    "available": "有新版本 {version}。本程序不会自动更新，装不装由你决定。",
+    "available_sized": "有新版本 {version}（{size}）。本程序不会自动更新，装不装由你决定。",
+    "notes": "更新说明",
+    "download": "下载",
+    "skip": "跳过这一版"
+  },
+  "log": {
+    "title": "日志",
+    "no_file": "这台机器上没能建起日志文件（目录不可写）。程序照常运行，但出了问题没有记录可发。",
+    "explain": "出了问题可以把日志寄给维护者。要 CAN 号和密码，因为服务端认的是这一对；密码只用这一次，不会存下来。",
+    "cid": "CAN 号",
+    "password": "密码",
+    "send": "发送日志",
+    "sending": "寄送中…",
+    "sent": "日志已经寄出去了。"
+  },
+  "error": {
+    "token": {
+      "credentials": "CAN 号或密码不对",
+      "rejected": "can-api 拒绝发放语音凭据：HTTP {status}",
+      "unreachable": "连不上 can-api：{detail}"
+    },
+    "voice": {
+      "token_expired": "语音服务器说凭据已经过期。多半是这台电脑的时钟不准，校准时间后再试",
+      "token_invalid": "语音服务器不认这份凭据。这是客户端或服务端的问题，请把日志寄给维护者",
+      "refused": "语音服务器拒绝了这次登录：账号可能还没有定级",
+      "proto_unsupported": "这个客户端版本太旧，语音服务器已经不支持了。请更新到最新版",
+      "refused_other": "语音服务器拒绝了这次登录（{reason}）",
+      "bad_callsign": "呼号 {callsign} 不合规矩：2–10 位，只能是大写字母、数字、- 或 _",
+      "bad_address": "语音服务器地址 {address} 解析不出来",
+      "unreachable": "连不上语音服务器：{detail}",
+      "not_connected": "语音还没连上"
+    },
+    "callsign": {
+      "length": "呼号 {callsign} 有 {len} 位，要在 2 到 {limit} 位之间",
+      "charset": "呼号 {callsign} 里有服务器不收的字符：只能是字母、数字、- 或 _",
+      "not_atis": "呼号 {callsign} 要以 _ATIS 结尾",
+      "reserved": "{callsign} 是协议保留的名字，不能当呼号"
+    },
+    "observer": {
+      "unreadable": "频率 {value} 读不出来，写成 121.800 这样",
+      "out_of_band": "频率 {value} 不在 118.000 – 136.975 之间",
+      "no_follow": "观察员要填跟随的呼号：机长那架飞机的呼号，语音按它的位置算距离",
+      "bad_follow": "跟随的呼号 {callsign} 不合规矩：2–10 位，只能是字母、数字、- 或 _"
+    },
+    "endpoint": {
+      "url_scheme": {
+        "api_origin": "can-api 地址要以 http:// 或 https:// 开头：{value}",
+        "datafeed_url": "数据源地址要以 http:// 或 https:// 开头：{value}",
+        "metar_url": "气象源地址要以 http:// 或 https:// 开头：{value}",
+        "atis_config_url": "通播配置地址要以 http:// 或 https:// 开头：{value}"
+      },
+      "server_scheme": {
+        "voice_server": "语音服务器只写主机和端口，不带 http://：{value}",
+        "fsd_server": "FSD 服务器只写主机和端口，不带 http://：{value}"
+      },
+      "server_form": {
+        "voice_server": "语音服务器要写成 主机:端口：{value}",
+        "fsd_server": "FSD 服务器要写成 主机:端口：{value}"
+      }
+    },
+    "log": {
+      "no_file": "这台机器上没有日志文件——日志目录写不进去",
+      "unreadable": "读不了日志文件：{detail}",
+      "unreachable": "连不上 can-api，日志没有寄出去",
+      "credentials": "CAN 号或者密码不对",
+      "rate_limited": "寄得太频繁了，稍后再试",
+      "disabled": "服务端没有开启日志回传",
+      "rejected": "服务端拒绝了这次回传：HTTP {status}"
+    },
+    "update": {
+      "not_https": "下载地址不是一个 https 地址，没有打开",
+      "no_opener": "不知道这个系统怎么开浏览器",
+      "open_failed": "打不开浏览器：{detail}"
+    }
+  }
+}

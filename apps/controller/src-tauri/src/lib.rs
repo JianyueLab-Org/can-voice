@@ -16,6 +16,7 @@
 
 use tauri::Manager;
 use can_voice_app::{Bridge, Snapshot};
+use can_voice_i18n::Message;
 use can_voice_client::stack::{Radio, RadioStack};
 use can_voice_client::Config;
 use can_voice_datafeed::Position;
@@ -331,7 +332,7 @@ async fn connect(
     state: tauri::State<'_, App>,
     cid: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let remembered = cid.clone();
     let tokens = TokenSource::new(
         &state.settings().endpoints.api_origin(),
@@ -362,7 +363,7 @@ async fn connect(
             &tokens,
         )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.message())?;
     // 连上了才记住这个号——连不上的那个多半是打错了。
     state.update_settings(|s| s.cid = remembered.clone());
     // 席位频率只有数据源知道。这条起来之前，界面上那句"你不在席位上"是"还没查"
@@ -653,7 +654,7 @@ fn skip_update(app: tauri::State<'_, App>, version: String) {
 
 /// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
 #[tauri::command]
-fn open_download(url: String) -> Result<(), String> {
+fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
 }
 
@@ -675,7 +676,7 @@ async fn send_log(
     app: tauri::State<'_, App>,
     cid: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let origin = app.settings().endpoints.api_origin();
     can_voice_log::upload(
         &app.http,
@@ -745,11 +746,12 @@ fn set_appearance(
 fn set_endpoints(
     app: tauri::State<'_, App>,
     endpoints: can_voice_settings::Endpoints,
-) -> Result<can_voice_settings::Endpoints, String> {
+) -> Result<can_voice_settings::Endpoints, Vec<Message>> {
     let endpoints = endpoints.trimmed();
     let problems = endpoints.problems();
     if !problems.is_empty() {
-        return Err(problems.join("；"));
+        // 整张清单交回去，前端按当前语言翻、按当前语言的句读连起来。
+        return Err(problems);
     }
     app.update_settings(|s| s.endpoints = endpoints.clone());
     Ok(endpoints)

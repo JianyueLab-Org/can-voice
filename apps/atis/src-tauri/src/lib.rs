@@ -14,6 +14,7 @@
 //! 这一层只有 Tauri 命令、一个状态容器，和每个在播席位那条盯报文的循环。
 
 use can_voice_atis::datafeed::Online;
+use can_voice_i18n::Message;
 use can_voice_atis::metar::Metar;
 use can_voice_atis::netconfig::{self, Comparison, Merged, NetworkConfig};
 use can_voice_atis::profile::{Preset, Profile, ProfileSet, Station, DEFAULT_PROFILE_PATH};
@@ -1022,7 +1023,7 @@ fn skip_update(app: tauri::State<'_, App>, version: String) {
 
 /// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
 #[tauri::command]
-fn open_download(url: String) -> Result<(), String> {
+fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
 }
 
@@ -1039,7 +1040,11 @@ fn log_file() -> Option<String> {
 /// **要 CAN 号和密码**：can-api 的 `/api/v1/logs` 认的是这一对，不是会话。
 /// 密码用完就丢，不进设置文件。
 #[tauri::command]
-async fn send_log(app: tauri::State<'_, App>, cid: String, password: String) -> Result<(), String> {
+async fn send_log(
+    app: tauri::State<'_, App>,
+    cid: String,
+    password: String,
+) -> Result<(), Message> {
     let origin = app.settings_snapshot().endpoints.api_origin();
     let _ = &app;
     can_voice_log::upload_once(
@@ -1113,11 +1118,12 @@ fn set_appearance(
 fn set_endpoints(
     app: tauri::State<'_, App>,
     endpoints: can_voice_settings::Endpoints,
-) -> Result<can_voice_settings::Endpoints, String> {
+) -> Result<can_voice_settings::Endpoints, Vec<Message>> {
     let endpoints = endpoints.trimmed();
     let problems = endpoints.problems();
     if !problems.is_empty() {
-        return Err(problems.join("；"));
+        // 整张清单交回去，前端按当前语言翻、按当前语言的句读连起来。
+        return Err(problems);
     }
     app.update_settings(|s| s.endpoints = endpoints.clone());
     Ok(endpoints)

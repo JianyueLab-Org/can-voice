@@ -30,6 +30,16 @@ pub enum Error {
     NotConnected,
 }
 
+impl Error {
+    /// 给人看的那一句（#29）。`Display` 是给日志的英文。
+    pub fn message(&self) -> can_voice_i18n::Message {
+        match self {
+            Error::Token(e) => e.message(),
+            Error::NotConnected => can_voice_i18n::Message::new("error.voice.not_connected"),
+        }
+    }
+}
+
 /// 一个应用的全部运行时状态。
 ///
 /// 状态装在一个 `Arc` 里，因为**监护任务要能自己换票重连**：它活在

@@ -1,0 +1,7 @@
+{
+  "problem": {
+    "observer_locked": "连接期间不能切换观察员模式。先下线，再改。",
+    "nothing_to_send": "没有可发的内容：正文是空的，或者既没填收件人也没有 COM1 频率",
+    "offline": "还没上线"
+  }
+}
