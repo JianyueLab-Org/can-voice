@@ -41,6 +41,12 @@ macOS 还没有——缺的是 Developer ID 证书和公证那一套。can-audio
 客户端**只有 Windows**，所以 Linux 这一份是新能力而不是回归：X-Plane 本来就有
 Linux 版，而管制端和通播端跟模拟器无关。
 
+**两个平台都不签名，这是 2026-09-17 定下的，不是漏了。** Windows 签名要么开
+Azure Artifact Signing 并通过身份验证，要么买一张放在云 HSM 里的 OV 证书，
+两条路都还没走；在那之前 Windows 会弹 SmartScreen 的"已保护你的电脑"，
+release 正文里写明了怎么点过去（`.github/release-notes/common.md`）。
+接上签名时，那一段要跟着删掉。
+
 **Linux 上的键盘 PTT 只在 X11 下有效。** 全局按键监听走 Xlib，而 Wayland 不允许
 一个普通程序监听全局按键。手柄 PTT 和界面上那个「按住发话」按钮不受影响。
 
