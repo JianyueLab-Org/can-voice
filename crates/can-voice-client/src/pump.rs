@@ -123,10 +123,14 @@ pub(crate) async fn run(
             }
         };
 
-        subs.on_connected(Limits {
+        let limits = Limits {
             max_tx: l.max_tx,
             max_rx: l.max_rx,
-        });
+        };
+        subs.on_connected(limits);
+        // 限额也要交上去，**在 Online 之前**：界面一看到"已连接"就该知道这一次的
+        // 上限，不然重放的台面超额时，先冒出来的会是"发射被拒"。
+        let _ = events.send(Event::Limits(limits));
         emit_state(&events, &mut state, LinkState::Online);
 
         let outcome = pump(l, &mut subs, &events, &mut cmds, audio.as_ref()).await;

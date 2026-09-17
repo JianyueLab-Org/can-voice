@@ -77,12 +77,21 @@ impl Bridge {
 
     /// 当前状态。**前端一挂上就读它**，不要试图从事件流拼——事件是广播，
     /// 挂上之前发生的事收不到。
+    ///
+    /// `tx_budget` 在这里、读的这一刻才算：它一半是台面的状态，见
+    /// [`Snapshot::tx_budget`]。两把锁先后拿、不嵌套。
     pub fn snapshot(&self) -> Snapshot {
-        self.inner
+        let mut snap = self
+            .inner
             .snapshot
             .lock()
             .map(|s| s.clone())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        snap.tx_budget = snap.max_tx.map(|max_tx| match self.inner.stack.lock() {
+            Ok(s) => s.tx_budget(max_tx),
+            Err(p) => p.into_inner().tx_budget(max_tx),
+        });
+        snap
     }
 
     /// 连上去。票由 `TokenSource` 换，过期了会换一张再试一次。
@@ -306,6 +315,7 @@ pub fn should_renew_after(ended: &Ended, session_lasted: Duration) -> bool {
 mod tests {
     use super::*;
     use can_voice_client::conn::RefusedReason;
+    use can_voice_client::session::Limits;
 
     /// **桥这一层不得引入 `join` / `leave` / `channel_id`。**
     ///
@@ -391,6 +401,52 @@ mod tests {
             &Ended::Refused(RefusedReason::TokenExpired),
             Duration::from_secs(2),
         ));
+    }
+
+    /// **界面读到的快照里带着台面对发射上限的处境**，而且是读的那一刻的台面。
+    ///
+    /// 存一份副本的话，开关一动它就过期，而界面照着一份过期的处境提示"会超额"
+    /// 或者该提示时不提示。
+    #[test]
+    fn the_snapshot_carries_the_tx_budget_of_the_stack_as_it_is_now() {
+        let bridge = Bridge::new();
+        bridge.with_stack(|s| {
+            s.add(118_000);
+            s.add(121_800);
+            s.set_tx(118_000, true);
+        });
+        // 没连上就没有上限，也就没有处境可说：界面什么都不显示。
+        assert_eq!(bridge.snapshot().tx_budget, None);
+
+        bridge
+            .inner
+            .snapshot
+            .lock()
+            .expect("snapshot")
+            .apply(&Event::Limits(Limits {
+                max_tx: 1,
+                max_rx: 32,
+            }));
+        let v = serde_json::to_value(bridge.snapshot()).expect("serialize");
+        // 这是界面照着读的形状。
+        assert_eq!(v["max_tx"], serde_json::json!(1));
+        assert_eq!(
+            v["tx_budget"],
+            serde_json::json!({
+                "max_tx": 1,
+                "declared": 1,
+                "tx_over": [121_800],
+                "xc_over": [121_800],
+            })
+        );
+
+        bridge.with_stack(|s| s.set_tx(118_000, false));
+        let b = bridge
+            .snapshot()
+            .tx_budget
+            .expect("the limit is still known");
+        assert_eq!(b.declared, 0);
+        assert!(b.tx_over.is_empty(), "{b:?}");
     }
 
     /// 台面直接折算成声明，桥不自己拼订阅——耦合规则只有一份实现。

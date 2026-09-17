@@ -11,6 +11,7 @@
 //! 声明式 API 里没有那个可以记错的字段。
 
 use crate::conn::{self, LinkState, RefusedReason};
+use crate::session::Limits;
 use can_voice_proto::control::Sub;
 
 /// 建立连接所需的一切。
@@ -77,6 +78,11 @@ pub enum Event {
     /// **只在真的变了的时候发。** 每轮都发一遍会把事件流灌满，
     /// 而上层没法从中分辨"状态变了"和"心跳到了"。
     State(LinkState),
+    /// 这一条链路的限额，来自 READY。**每次连上都发一次，在 `State(Online)` 之前。**
+    ///
+    /// 上层要靠它在**声明之前**提示超额，而不是等 `TxDenied` 事后冒出来。掉线之后
+    /// 它就不作数了：上限写在票里、按人签，下一次 READY 可能是另一个数。
+    Limits(Limits),
     /// 握手被拒，带服务端给的原因。
     ///
     /// 这几个串是服务端**专门为客户端造的**：只把它们送进日志，等于协议里
@@ -148,6 +154,8 @@ pub enum Error {
 #[derive(Debug)]
 pub struct VoiceClient {
     events_tx: tokio::sync::broadcast::Sender<Event>,
+    /// 和通道一起建的那个接收端，留给**第一次** [`VoiceClient::events`]。见那里。
+    first_events: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<Event>>>,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
 }
 
@@ -197,14 +205,27 @@ impl VoiceClient {
         )
         .await?;
 
-        let (events_tx, _) = tokio::sync::broadcast::channel(256);
+        let (client, events_tx, cmd_rx) = Self::wired();
+        tokio::spawn(crate::pump::run(cfg, link, events_tx, cmd_rx));
+        Ok(client)
+    }
+
+    /// 建好客户端和它的两条通道，后台任务那一端交给调用方。
+    ///
+    /// 事件通道的接收端**在后台任务起来之前就建好、留着**，见 [`Self::events`]。
+    fn wired() -> (
+        Self,
+        tokio::sync::broadcast::Sender<Event>,
+        tokio::sync::mpsc::UnboundedReceiver<Command>,
+    ) {
+        let (events_tx, first) = tokio::sync::broadcast::channel(256);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let client = VoiceClient {
             events_tx: events_tx.clone(),
+            first_events: std::sync::Mutex::new(Some(first)),
             commands: cmd_tx,
         };
-        tokio::spawn(crate::pump::run(cfg, link, events_tx, cmd_rx));
-        Ok(client)
+        (client, events_tx, cmd_rx)
     }
 
     /// 声明完整的收发意图。反复调用是廉价的 —— 每次都是全量，
@@ -241,8 +262,22 @@ impl VoiceClient {
     }
 
     /// 订阅事件流。
+    ///
+    /// **第一个订阅者看得见 `connect` 之后发生的一切，之后的订阅者从订阅那一刻看起。**
+    ///
+    /// 后台任务在 `connect` 返回之前就起了，而第一条链路已经拿到 READY：它一打开
+    /// 声卡（不开声卡的通播机器人是立刻）就发 `Limits` 和 `Online`，而上层要等
+    /// `connect` 返回才订阅得上。broadcast 在没有接收端时直接丢，所以抢输的那一次，
+    /// 这条会话在界面上既没有"已连接"，也没有发射上限，超额提示从此不响——
+    /// 而且没有任何报错。所以接收端和通道一起建、留到第一次调用。
+    ///
+    /// 没人订阅也不要紧：缓冲有 256 条的上界，落后的接收端只会丢旧的，从不挡住发送。
     pub fn events(&self) -> tokio::sync::broadcast::Receiver<Event> {
-        self.events_tx.subscribe()
+        let first = match self.first_events.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(p) => p.into_inner().take(),
+        };
+        first.unwrap_or_else(|| self.events_tx.subscribe())
     }
 
     /// 关闭。
@@ -337,6 +372,44 @@ mod tests {
             rx.try_recv(),
             Ok(Event::State(crate::conn::LinkState::Online))
         ));
+    }
+
+    /// **第一个订阅者看得见 `connect` 之后发生的一切。**
+    ///
+    /// 后台任务在 `connect` 返回之前就起了，而第一条链路已经握过手：`Limits` 和
+    /// `Online` 可以在任何人订阅之前就发出去。broadcast 在没有接收端时直接丢，
+    /// 于是上层订阅得晚一拍，这一整条会话就既没有"已连接"也没有发射上限。
+    #[test]
+    fn the_first_subscriber_sees_what_was_sent_before_it_subscribed() {
+        let (client, events_tx, _cmds) = VoiceClient::wired();
+        let limits = Limits {
+            max_tx: 8,
+            max_rx: 32,
+        };
+        events_tx
+            .send(Event::Limits(limits))
+            .expect("the receiver made with the channel is still alive");
+        events_tx
+            .send(Event::State(crate::conn::LinkState::Online))
+            .expect("send");
+
+        let mut first = client.events();
+        assert_eq!(first.try_recv().ok(), Some(Event::Limits(limits)));
+        assert_eq!(
+            first.try_recv().ok(),
+            Some(Event::State(crate::conn::LinkState::Online))
+        );
+
+        // 之后的订阅者照旧从订阅那一刻看起。
+        let mut later = client.events();
+        assert!(later.try_recv().is_err(), "a later subscriber starts fresh");
+        events_tx
+            .send(Event::State(crate::conn::LinkState::Offline))
+            .expect("send");
+        assert_eq!(
+            later.try_recv().ok(),
+            Some(Event::State(crate::conn::LinkState::Offline))
+        );
     }
 
     #[test]

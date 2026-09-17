@@ -75,6 +75,26 @@ pub struct Declaration {
     pub dropped_xc: Vec<[u32; 2]>,
 }
 
+/// 台面相对服务端发射上限（READY 的 `max_tx`）的处境。
+///
+/// 给界面在**声明之前**说话用：服务端对超额的声明只是把多出来的 TX 拒掉，界面上
+/// 看到的是事后冒出来的"发射被拒"——而 READY 把限额带下来，躲的正是这个次序。
+///
+/// **"开哪一格会超额"在这里算，不在前端算。** 开 XC 会顺带开 TX，前端自己数的话
+/// 就得把这条耦合规则再写一遍；而规则写成两份，迟早有一份跟不上。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TxBudget {
+    /// 服务端给的上限。
+    pub max_tx: u32,
+    /// 这份台面此刻会声明几个 TX。**可以已经超过 `max_tx`**：存下来的台面在重连时
+    /// 整份重放，而这一次的上限可能比存的时候低。
+    pub declared: usize,
+    /// 在这些频率上打开 TX，声明里的 TX 就会超过上限。
+    pub tx_over: Vec<u32>,
+    /// 在这些频率上打开 XC，声明里的 TX 就会超过上限。
+    pub xc_over: Vec<u32>,
+}
+
 /// 一组频率。
 #[derive(Debug, Clone)]
 pub struct RadioStack {
@@ -327,6 +347,41 @@ impl RadioStack {
             sub: Sub { rx, tx, xc },
             dropped_xc,
         }
+    }
+
+    /// 对着一个发射上限，看这份台面的处境。见 [`TxBudget`]。
+    ///
+    /// 每一格都是**真的在一份副本上按一下再数**，而不是照着"开 XC 会开 TX"推：
+    /// 那样推就是把耦合规则抄了第二份。数的是 [`Self::to_subscription`] 里的 TX，
+    /// 也就是真正会发出去的那一份。
+    ///
+    /// 只标**会让 TX 变多**的那几格：已经开着的开关再按一次什么也不多，不在席位上
+    /// 时开关本来就按不动——那是另一句话，不该再叠一句"会超额"。
+    pub fn tx_budget(&self, max_tx: u32) -> TxBudget {
+        let declared = self.declared_tx();
+        let limit = usize::try_from(max_tx).unwrap_or(usize::MAX);
+        let over = |press: fn(&mut RadioStack, u32)| -> Vec<u32> {
+            self.radios
+                .iter()
+                .map(|r| r.freq_khz)
+                .filter(|&f| {
+                    let mut after = self.clone();
+                    press(&mut after, f);
+                    let n = after.declared_tx();
+                    n > declared && n > limit
+                })
+                .collect()
+        };
+        TxBudget {
+            max_tx,
+            declared,
+            tx_over: over(|s, f| s.set_tx(f, true)),
+            xc_over: over(|s, f| s.set_xc(f, true)),
+        }
+    }
+
+    fn declared_tx(&self) -> usize {
+        self.to_subscription().sub.tx.len()
     }
 
     fn get_mut(&mut self, freq_khz: u32) -> Option<&mut Radio> {
@@ -661,6 +716,80 @@ mod tests {
             radio(&s, 121_800).selected,
             "the marker must not vanish with the radio"
         );
+    }
+
+    // ——— 服务端的发射上限（max_tx）：要在声明之前说 ———
+
+    #[test]
+    fn below_the_tx_limit_no_switch_is_flagged() {
+        let mut s = stack_with(&[118_000, 121_800, 124_550]);
+        s.set_tx(118_000, true);
+
+        let b = s.tx_budget(3);
+
+        assert_eq!((b.max_tx, b.declared), (3, 1));
+        assert!(b.tx_over.is_empty() && b.xc_over.is_empty(), "{b:?}");
+    }
+
+    /// 到了上限，再开哪一个会超额要在**按下去之前**标出来——服务端超额时只是把
+    /// 多出来的拒掉，界面上看到的是事后冒出来的"发射被拒"。
+    #[test]
+    fn at_the_tx_limit_every_switch_that_would_add_a_transmit_is_flagged() {
+        let mut s = stack_with(&[118_000, 121_800, 124_550]);
+        s.set_tx(118_000, true);
+        s.set_tx(121_800, true);
+
+        let b = s.tx_budget(2);
+
+        assert_eq!(b.declared, 2);
+        assert_eq!(b.tx_over, vec![124_550]);
+        assert_eq!(b.xc_over, vec![124_550]);
+    }
+
+    /// **开 XC 会顺带开 TX，所以它也占一个。** 这正是这件事不能在前端数的原因：
+    /// 只看 TX 开关的话，XC 那一格就是一条没人提示的超额路。
+    ///
+    /// 反过来，TX 已经开着的那一行再开 XC 不多占——标上它只会让人以为 XC 超额了。
+    #[test]
+    fn cross_coupling_counts_against_the_limit_because_it_forces_transmit() {
+        let mut s = stack_with(&[118_000, 121_800]);
+        s.set_tx(118_000, true);
+
+        let b = s.tx_budget(1);
+
+        assert_eq!(b.xc_over, vec![121_800]);
+        assert!(!b.xc_over.contains(&118_000), "{b:?}");
+    }
+
+    /// **存下来的台面在重连时整份重放，而这一次的上限可能比存的时候低。**
+    ///
+    /// 超额的是整份台面，不是哪一行：已经开着的开关再按一次什么也不多，所以只标
+    /// 会再往上加的那几格，总数和上限一起交出去让界面说"超了几个"。
+    #[test]
+    fn a_stack_already_over_the_limit_reports_the_count_and_flags_only_additions() {
+        let mut s = stack_with(&[118_000, 121_800, 124_550]);
+        s.set_tx(118_000, true);
+        s.set_xc(121_800, true);
+
+        let b = s.tx_budget(1);
+
+        assert_eq!((b.max_tx, b.declared), (1, 2));
+        assert_eq!(b.tx_over, vec![124_550]);
+        // 118.000 的 TX 已经开着，再开 XC 不多占。
+        assert_eq!(b.xc_over, vec![124_550]);
+    }
+
+    /// 不在席位上时 TX / XC 本来就开不了，那是另一句话（"你不在席位上"），
+    /// 不该再叠一句"会超额"。
+    #[test]
+    fn off_duty_nothing_is_flagged_as_over_the_limit() {
+        let mut s = stack_with(&[118_000, 121_800]);
+        s.set_transmit_allowed(false);
+
+        let b = s.tx_budget(0);
+
+        assert_eq!(b.declared, 0);
+        assert!(b.tx_over.is_empty() && b.xc_over.is_empty(), "{b:?}");
     }
 
     #[test]
