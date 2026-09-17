@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { t } from "../i18n";
 
 /** 一个在线席位，来自 can-fsd 的 datafeed。 */
 interface Position {
@@ -38,12 +39,16 @@ const rows = computed(() =>
       :key="`${p.callsign}-${p.freq_khz}`"
       class="rounded border px-2 py-0.5 font-mono text-xs disabled:opacity-40"
       :disabled="p.already"
-      :title="p.already ? `${mhz(p.freq_khz)} 已经在台面上` : `加上 ${mhz(p.freq_khz)}`"
+      :title="
+        p.already
+          ? t('online.tuned', { frequency: mhz(p.freq_khz) })
+          : t('online.add', { frequency: mhz(p.freq_khz) })
+      "
       @click="$emit('add', p.freq_khz, p.callsign)"
     >
       {{ p.callsign }}
       <span class="opacity-60">{{ mhz(p.freq_khz) }}</span>
     </button>
-    <p v-if="!rows.length" class="text-xs opacity-50">此刻没有人在线。</p>
+    <p v-if="!rows.length" class="text-xs opacity-50">{{ t("online.none") }}</p>
   </div>
 </template>

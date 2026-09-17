@@ -27,6 +27,7 @@
 //! 这是最难自查的一类故障，所以 [`inspect`] 把装好的那份的协议号也解出来单独回报，
 //! 而不是只说一句"版本旧"。
 
+use can_voice_i18n::Message;
 use std::path::{Path, PathBuf};
 
 /// 随包带的那份插件源码。
@@ -232,16 +233,25 @@ fn status(
 /// 把插件写进去，返回落地的路径。
 ///
 /// 错误原样往上抛（X-Plane 装在 `Program Files` 里就是这一类），让界面把话说给
-/// 用户听——自己吞掉的话，界面只能说一句"失败了"。
-pub fn install(root: &Path) -> Result<PathBuf, String> {
+/// 用户听——自己吞掉的话，界面只能说一句"失败了"。交出去的是字典 key 加上路径和
+/// 系统给的原话，措辞在前端的字典里。
+pub fn install(root: &Path) -> Result<PathBuf, Message> {
     if !is_xplane_root(root) {
-        return Err("这个目录不像 X-Plane 装的地方（里面没有 Resources/plugins）".into());
+        return Err(Message::new("problem.not_xplane"));
     }
     let target = plugin_path(root);
     let dir = target.parent().expect("plugin path has a parent");
     // 装了 XPPython3 也不一定已经有这个目录：它是第一次用时才建的。
-    std::fs::create_dir_all(dir).map_err(|e| format!("建不了 {}：{e}", dir.display()))?;
-    std::fs::write(&target, BUNDLED).map_err(|e| format!("写不进 {}：{e}", target.display()))?;
+    std::fs::create_dir_all(dir).map_err(|e| {
+        Message::new("problem.plugin_dir")
+            .with("path", dir.display())
+            .with("detail", e)
+    })?;
+    std::fs::write(&target, BUNDLED).map_err(|e| {
+        Message::new("problem.plugin_write")
+            .with("path", target.display())
+            .with("detail", e)
+    })?;
     tracing::info!(path = %target.display(), "installed the traffic plugin");
     Ok(target)
 }
@@ -337,6 +347,14 @@ mod tests {
         let s = inspect(Some(&root));
         assert_eq!(s.state, State::NotXplane);
         assert!(!s.can_install);
+    }
+
+    /// 往一个不是 X-Plane 的目录里装要拒绝，而且交给界面的是字典 key，不是拼好的一句话。
+    #[test]
+    fn installing_into_a_directory_that_is_not_xplane_is_refused() {
+        let root = scratch("install-not-xplane");
+        assert_eq!(install(&root), Err(Message::new("problem.not_xplane")));
+        assert!(!plugin_path(&root).exists());
     }
 
     /// 装完之后那份文件要落在 XPPython3 真正会去看的地方，而且状态变成"最新"。

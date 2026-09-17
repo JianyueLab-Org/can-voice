@@ -84,6 +84,32 @@ pub enum CallsignProblem {
     Reserved(String),
 }
 
+impl CallsignProblem {
+    /// 给人看的那一句（#29）。`Display` 是给日志的英文。
+    pub fn message(&self) -> can_voice_i18n::Message {
+        use can_voice_i18n::Message;
+        match self {
+            CallsignProblem::Length {
+                callsign,
+                len,
+                limit,
+            } => Message::new("error.callsign.length")
+                .with("callsign", callsign)
+                .with("len", len)
+                .with("limit", limit),
+            CallsignProblem::Charset(callsign) => {
+                Message::new("error.callsign.charset").with("callsign", callsign)
+            }
+            CallsignProblem::NotAtis(callsign) => {
+                Message::new("error.callsign.not_atis").with("callsign", callsign)
+            }
+            CallsignProblem::Reserved(callsign) => {
+                Message::new("error.callsign.reserved").with("callsign", callsign)
+            }
+        }
+    }
+}
+
 /// 频率编码：`118.000` → `"18000"`（开头的 1 和小数点是协议隐含的）。
 ///
 /// 认不出来给 `None`。发一个错的频率出去比不发更糟——席位会挂在一个没人听的

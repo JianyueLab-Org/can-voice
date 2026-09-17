@@ -11,6 +11,12 @@
 //! 住在 `can-voice-fsd` 和 `can-voice-sim` 里。`can-audio` 那边这两支客户端是
 //! 两份近似副本，改一处要改两遍。
 //!
+//! # 观察员是例外：只连语音，频率可以手输
+//!
+//! 双人机组的右座（#36，设计 §7.3）不开 FSD 连接，频率手输优先、没填才跟本机
+//! COM1，位置借机长那架的（`HELLO.follow`）。和 `xpc-for-can` 是同一套接线，
+//! 规则在 [`can_voice_app::observer`]。
+//!
 //! # SimConnect 那一半只在 Windows 上编译，但确实编
 //!
 //! 开发机是 macOS，而 `SimConnect.dll` 只有 Windows 有。DLL 是**运行时**加载的
@@ -24,6 +30,7 @@
 
 use tauri::Manager;
 use can_voice_app::Bridge;
+use can_voice_i18n::Message;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
 use can_voice_sim::msfs::{SimConnectSource, SimConnectTraffic, SimVarSource, TrafficSink};
@@ -48,8 +55,9 @@ pub struct SimLink {
 struct SimState {
     connected: bool,
     snapshot: Option<Snapshot>,
-    /// 打不开时的原因，界面要说得出来。
-    problem: Option<String>,
+    /// 打不开时的原因，界面要说得出来。SimConnect 自己给的那句英文原样放在
+    /// `detail` 里——"DLL 太旧"和"模拟器没开"要做的事不一样，丢掉它就分不开了。
+    problem: Option<Message>,
 }
 
 impl SimLink {
@@ -68,7 +76,7 @@ impl SimLink {
         self.state.lock().expect("sim").connected
     }
 
-    pub fn problem(&self) -> Option<String> {
+    pub fn problem(&self) -> Option<Message> {
         self.state.lock().expect("sim").problem.clone()
     }
 
@@ -85,7 +93,11 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
             {
                 let mut state = state.lock().expect("sim");
                 state.connected = false;
-                state.problem = Some(e);
+                state.problem = Some(if can_voice_sim::msfs::available() {
+                    Message::new("simconnect.not_running").with("detail", e)
+                } else {
+                    Message::new("simconnect.unavailable")
+                });
             }
             // 模拟器没开是常态，不是错误。隔几秒再试一次。
             std::thread::sleep(Duration::from_secs(5));
@@ -105,7 +117,7 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
                 Err(e) => {
                     let mut state = state.lock().expect("sim");
                     state.connected = false;
-                    state.problem = Some(e);
+                    state.problem = Some(Message::new("simconnect.lost").with("detail", e));
                     break;
                 }
             }
@@ -186,6 +198,16 @@ pub struct Settings {
     /// 半路换级别要一整套 reload 句柄，为一个排障开关不值得。
     #[serde(default)]
     pub debug_log: bool,
+    /// 观察员模式（双人机组的右座）：只连语音，不上 FSD。**连着的时候改不了**。
+    #[serde(default)]
+    pub observer: bool,
+    /// 观察员跟随的呼号——机长那架飞机的。和 `callsign` 分开存：同一个人换回
+    /// 自己飞的时候，呼号框里不该预填着别人的呼号。
+    #[serde(default)]
+    pub follow: String,
+    /// 观察员手输的频率（kHz）。`None` = 跟随本机 COM1。
+    #[serde(default)]
+    pub observer_frequency: Option<u32>,
 }
 
 fn yes() -> bool {
@@ -311,6 +333,17 @@ pub struct App {
     /// 因为只有它们的标题在不同机器上是同一个字符串。
     hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
     hangar_loading: Arc<std::sync::atomic::AtomicBool>,
+    /// 以观察员身份连着时是跟随的那个呼号；没连、或者正常上着网是 `None`。
+    ///
+    /// **界面靠它判断观察员"上线了没有"**：观察员没有 FSD，`link` 永远是 `None`，
+    /// 只看 `link` 的话连上之后登录表单不消失。
+    observing: Mutex<Option<String>>,
+    /// 观察员手输的频率（kHz），0 = 没填。给频率那条循环每一拍读，所以是原子量。
+    manual_frequency: Arc<std::sync::atomic::AtomicU32>,
+    /// 让订阅跟上频率的那条循环。**下线时停掉**：留着的话，换个身份再连上来时
+    /// 新旧两条一起改台面——一条跟手输的频率，一条跟 COM1——台面上就有两个
+    /// 都开着发射的频率。
+    pump: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl App {
@@ -324,6 +357,11 @@ impl App {
             sim: SimLink::spawn(),
             fsd: Mutex::new(None),
             link: Arc::new(Mutex::new(None)),
+            observing: Mutex::new(None),
+            manual_frequency: Arc::new(std::sync::atomic::AtomicU32::new(saved_manual_frequency(
+                &settings,
+            ))),
+            pump: Mutex::new(None),
             store,
             inject: Arc::new(std::sync::atomic::AtomicBool::new(settings.inject)),
             settings: Mutex::new(settings),
@@ -359,6 +397,48 @@ impl App {
             tracing::warn!(error = %e, "could not save the settings");
         }
     }
+
+    /// 以观察员身份连着的话，跟随的是谁。
+    fn observing(&self) -> Option<String> {
+        match self.observing.lock() {
+            Ok(o) => o.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// 连着没有，不论是哪种身份。**不看 `link`**：它要等 FSD 的第一条事件才有值，
+    /// 而观察员压根没有 FSD。
+    fn is_online(&self) -> bool {
+        self.fsd.lock().map(|f| f.is_some()).unwrap_or(true) || self.observing().is_some()
+    }
+
+    /// 观察员手输的频率，没填是 `None`。
+    fn manual_frequency(&self) -> Option<u32> {
+        Some(
+            self.manual_frequency
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|&k| k != 0)
+    }
+
+    /// 换一条频率循环上来，旧的先停掉。
+    fn replace_pump(&self, pump: Option<tokio::task::AbortHandle>) {
+        let mut slot = match self.pump.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        if let Some(old) = std::mem::replace(&mut *slot, pump) {
+            old.abort();
+        }
+    }
+}
+
+/// 设置文件里存的手输频率，0 表示没有。**再过一遍波段**：设置文件是人能手改的，
+/// 一个波段外的数进了循环，语音会落在谁也不在的频率上。
+fn saved_manual_frequency(s: &Settings) -> u32 {
+    s.observer_frequency
+        .filter(|k| can_voice_app::observer::BAND_KHZ.contains(k))
+        .unwrap_or(0)
 }
 
 impl Default for App {
@@ -375,7 +455,7 @@ pub struct View {
     pub sim_connected: bool,
     /// 连不上时的原因。**非 Windows 上就是"这个系统没有 SimConnect"**，
     /// 界面要直说，而不是让人对着一个永远灰着的灯猜。
-    pub sim_problem: Option<String>,
+    pub sim_problem: Option<Message>,
     pub sim: Option<Snapshot>,
     pub link: Option<can_voice_fsd::session::FsdState>,
     pub reason: Option<can_voice_fsd::session::Reason>,
@@ -387,6 +467,21 @@ pub struct View {
     pub controllers: Vec<ControllerEntry>,
     /// 本机机库扫的结果。
     pub hangar: HangarView,
+    /// 以观察员身份连着时的状况；没连、或者正常上着网是 `None`。
+    pub observer: Option<ObserverView>,
+}
+
+/// 观察员那一侧的状况。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ObserverView {
+    /// 跟随的呼号。
+    pub follow: String,
+    /// 语音此刻该在的频率（kHz）。`None` = 还没有频率：没手输，COM1 也读不到。
+    ///
+    /// **要报出来**：没有频率的观察员连得上、灯是绿的，却什么也听不见。
+    pub frequency: Option<u32>,
+    /// 这个频率是手输的，不是跟着 COM1 来的。
+    pub manual: bool,
 }
 
 /// 机库扫到了什么，给界面看的。
@@ -437,6 +532,36 @@ fn voice_frequency(s: &Snapshot) -> Option<u32> {
     (118_000.0..=136_975.0).contains(&khz).then_some(khz as u32)
 }
 
+/// 语音连接的配置。`follow` 只有观察员填。
+fn voice_config(saved: &Settings, follow: String) -> can_voice_client::Config {
+    let (voice_server, voice_name) = saved.endpoints.voice();
+    can_voice_client::Config {
+        server: voice_server,
+        server_name: voice_name,
+        token: String::new(),
+        client_id: concat!("msfs-for-can/", env!("CARGO_PKG_VERSION")).into(),
+        follow,
+        // 一人一个账号，没有席位标记：同一个成员号第二次登录顶掉第一条。
+        station: String::new(),
+        input_device: saved.input_device.clone(),
+        output_device: saved.output_device.clone(),
+        audio_devices: true,
+        extra_roots: Vec::new(),
+    }
+}
+
+/// 清空台面。**每次上线之前做**：台面在桥里，下线不清——上一次以观察员身份
+/// 手输的频率留在上面的话，这一次正常上网络时 COM1 那个频率加上去，台面上
+/// 就是两个都开着发射的频率。
+fn clear_radios(voice: &Bridge) {
+    voice.with_stack(|stack| {
+        let tuned: Vec<u32> = stack.radios().iter().map(|r| r.freq_khz).collect();
+        for khz in tuned {
+            stack.remove(khz);
+        }
+    });
+}
+
 // ——— 命令 ———
 
 #[tauri::command]
@@ -447,9 +572,13 @@ async fn connect(
     callsign: String,
     aircraft: String,
     real_name: String,
-) -> Result<(), String> {
-    can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.to_string())?;
+    follow: String,
+) -> Result<(), Message> {
     let saved = app.settings_snapshot();
+    if saved.observer {
+        return connect_observer(&app, &saved, cid, password, follow).await;
+    }
+    can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.message())?;
 
     // 语音先连。凭据只在这里出现一次，换成一张短期票之后就不再需要——
     // 重连带的是票不是密码，所以一个卡在重连里的客户端不会把账号锁出语音。
@@ -459,24 +588,12 @@ async fn connect(
         password.clone(),
         app.http.clone(),
     );
-    let (voice_server, voice_name) = saved.endpoints.voice();
-    let voice_cfg = can_voice_client::Config {
-        server: voice_server,
-        server_name: voice_name,
-        token: String::new(),
-        client_id: concat!("msfs-for-can/", env!("CARGO_PKG_VERSION")).into(),
-        follow: String::new(),
-        // 一人一个账号，没有席位标记：同一个成员号第二次登录顶掉第一条。
-        station: String::new(),
-        input_device: saved.input_device.clone(),
-        output_device: saved.output_device.clone(),
-        audio_devices: true,
-        extra_roots: Vec::new(),
-    };
+    app.replace_pump(None);
+    clear_radios(&app.voice);
     app.voice
-        .connect(voice_cfg, &tokens)
+        .connect(voice_config(&saved, String::new()), &tokens)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.message())?;
 
     let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let fsd = pilot_client::connect(PilotConfig {
@@ -513,7 +630,11 @@ async fn connect(
         app.chime.clone(),
     );
     spawn_asking(fsd.clone(), app.traffic.clone());
-    spawn_pump(fsd.clone(), app.sim.clone(), app.voice.clone());
+    app.replace_pump(Some(spawn_pump(
+        fsd.clone(),
+        app.sim.clone(),
+        app.voice.clone(),
+    )));
     spawn_ai_injection(
         app.sim.clone(),
         app.traffic.clone(),
@@ -533,8 +654,49 @@ async fn connect(
     Ok(())
 }
 
+/// 观察员上线：只连语音。
+///
+/// **不开 FSD 连接**，所以没有他机、没有文字消息、不能拍发计划也不能识别——
+/// 那些都是机长那条连接的事。位置借机长那架飞机的：服务端拿 `follow` 去
+/// datafeed 里查。
+async fn connect_observer(
+    app: &App,
+    saved: &Settings,
+    cid: String,
+    password: String,
+    follow: String,
+) -> Result<(), Message> {
+    use can_voice_app::observer;
+    let follow = observer::follow_callsign(&follow).map_err(|e| e.message())?;
+    let tokens = TokenSource::new(
+        &saved.endpoints.api_origin(),
+        cid.clone(),
+        password,
+        app.http.clone(),
+    );
+    app.replace_pump(None);
+    clear_radios(&app.voice);
+    app.voice
+        .connect(voice_config(saved, follow.clone()), &tokens)
+        .await
+        .map_err(|e| e.message())?;
+    app.replace_pump(Some(spawn_observer_pump(
+        app.sim.clone(),
+        app.voice.clone(),
+        app.manual_frequency.clone(),
+    )));
+    *app.observing.lock().expect("observing") = Some(follow.clone());
+    app.update_settings(|s| {
+        s.cid = cid;
+        s.follow = follow;
+    });
+    Ok(())
+}
+
 #[tauri::command]
 async fn disconnect(app: tauri::State<'_, App>) -> Result<(), String> {
+    app.replace_pump(None);
+    *app.observing.lock().expect("observing") = None;
     if let Some(fsd) = app.fsd.lock().expect("fsd").take() {
         fsd.stop();
     }
@@ -549,6 +711,42 @@ async fn disconnect(app: tauri::State<'_, App>) -> Result<(), String> {
 #[tauri::command]
 fn settings(app: tauri::State<'_, App>) -> Settings {
     app.settings_snapshot()
+}
+
+/// 开 / 关观察员模式。**连着的时候不许改**：身份是上线那一刻定的，一架正在网上
+/// 的飞机半路变成观察员，FSD 那条连接断不断都说不通。
+#[tauri::command]
+fn set_observer(app: tauri::State<'_, App>, on: bool) -> Result<(), Message> {
+    set_observer_mode(&app, on)
+}
+
+fn set_observer_mode(app: &App, on: bool) -> Result<(), Message> {
+    if app.is_online() {
+        return Err(Message::new("problem.observer_locked"));
+    }
+    app.update_settings(|s| s.observer = on);
+    Ok(())
+}
+
+/// 观察员手输的频率。空的 = 回到跟随 COM1。
+///
+/// **连着也能改，立刻生效**：频率那条循环每一拍读它。读不出来就不存，把哪里
+/// 不对说出来——存进去一个错的数，语音会落在谁也不在的频率上，而界面看着
+/// 一切正常。回的是真正存下的那一份，界面照它回填。
+#[tauri::command]
+fn set_observer_frequency(
+    app: tauri::State<'_, App>,
+    text: String,
+) -> Result<Option<u32>, Message> {
+    set_manual_frequency(&app, &text)
+}
+
+fn set_manual_frequency(app: &App, text: &str) -> Result<Option<u32>, Message> {
+    let khz = can_voice_app::observer::parse_frequency(text).map_err(|e| e.message())?;
+    app.manual_frequency
+        .store(khz.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
+    app.update_settings(|s| s.observer_frequency = khz);
+    Ok(khz)
 }
 
 /// 开 / 关他机注入。
@@ -672,6 +870,7 @@ fn view(app: tauri::State<'_, App>) -> View {
 /// `online` / `connected` 全由它推导，于是连上之后界面整个锁死在登录态。
 fn build_view(app: &App) -> View {
     let sim = app.sim.snapshot();
+    let com1 = sim.as_ref().and_then(voice_frequency);
     let now = monotonic();
     let origin = sim.as_ref().map(|s| (s.latitude, s.longitude));
     let last_link = app.link.lock().expect("link").clone();
@@ -711,6 +910,15 @@ fn build_view(app: &App) -> View {
             .lock()
             .expect("controllers")
             .snapshot(now, origin),
+        // 和频率循环走的是同一条规则，所以这里算出来的就是那条循环 200 ms 内会收敛到的。
+        observer: app.observing().map(|follow| {
+            let manual = app.manual_frequency();
+            ObserverView {
+                follow,
+                frequency: can_voice_app::observer::frequency_for(manual, com1),
+                manual: manual.is_some(),
+            }
+        }),
     }
 }
 
@@ -719,16 +927,20 @@ fn build_view(app: &App) -> View {
 /// 返回 `Err` 而不是 `false`：发不出去有三种不同的原因（没上线、没写正文、
 /// 既没填收件人又没有 COM1 频率），而一个 `false` 让界面只能说"发送失败"。
 #[tauri::command]
-fn send_text(app: tauri::State<'_, App>, recipient: String, message: String) -> Result<(), String> {
+fn send_text(
+    app: tauri::State<'_, App>,
+    recipient: String,
+    message: String,
+) -> Result<(), Message> {
     let com1 = app.sim.snapshot().as_ref().and_then(voice_frequency);
     // 收件人和正文在**这里**定下来，然后原样交给 FSD 那一侧——聊天记录里
     // 那一行必须和真正发出去的那一包是同一个答案。
     let out = can_voice_sim::chat::outgoing(&recipient, &message, com1)
-        .ok_or_else(|| "没有可发的内容：正文是空的，或者既没填收件人也没有 COM1 频率".to_string())?;
+        .ok_or_else(|| Message::new("problem.nothing_to_send"))?;
     match app.fsd.lock().expect("fsd").as_ref() {
         Some(fsd) => fsd.send_text(out.to.clone(), out.text.clone()),
         // **没发出去就不记**：记了的话聊天区里那句话看起来发出去了。
-        None => return Err("还没上线".into()),
+        None => return Err(Message::new("problem.offline")),
     }
     record_sent(&app, out.to, out.text);
     Ok(())
@@ -969,7 +1181,7 @@ fn to_aircraft_config(a: &can_voice_sim::Animation) -> can_voice_fsd::pilot::Air
 }
 
 /// 每 200 ms 把模拟器那一帧喂给 FSD，并让语音订阅跟上 COM1。
-fn spawn_pump(fsd: PilotHandle, sim: SimLink, voice: Arc<Bridge>) {
+fn spawn_pump(fsd: PilotHandle, sim: SimLink, voice: Arc<Bridge>) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PUMP_INTERVAL);
         let mut current_freq: Option<u32> = None;
@@ -994,26 +1206,60 @@ fn spawn_pump(fsd: PilotHandle, sim: SimLink, voice: Arc<Bridge>) {
                 can_voice_fsd::packet::RATING_OBSERVER,
             ));
 
-            let wanted = voice_frequency(&snapshot);
-            if wanted != current_freq {
-                let previous = current_freq;
-                current_freq = wanted;
-                voice.with_stack(|stack| {
-                    // 换频率就是把旧的撤掉、新的加上。飞行员端的台面永远只有
-                    // 一个频率——COM1 就是那一个。
-                    if let Some(old) = previous {
-                        stack.remove(old);
-                    }
-                    if let Some(khz) = wanted {
-                        stack.add(khz);
-                        stack.set_rx(khz, true);
-                        stack.set_tx(khz, true);
-                        stack.set_selected(khz);
-                    }
-                });
-            }
+            retune(&voice, &mut current_freq, voice_frequency(&snapshot));
+        }
+    })
+    .abort_handle()
+}
+
+/// 让台面落在 `wanted` 上。没变就什么也不做——每一拍都改的话，每一拍都往服务端
+/// 推一份全量声明。
+///
+/// 换频率就是把旧的撤掉、新的加上。飞行员端的台面永远只有一个频率：正常上网络
+/// 时是 COM1，观察员是手输的那个或者 COM1。
+fn retune(voice: &Bridge, current: &mut Option<u32>, wanted: Option<u32>) {
+    if wanted == *current {
+        return;
+    }
+    let previous = std::mem::replace(current, wanted);
+    voice.with_stack(|stack| {
+        if let Some(old) = previous {
+            stack.remove(old);
+        }
+        if let Some(khz) = wanted {
+            stack.add(khz);
+            stack.set_rx(khz, true);
+            stack.set_tx(khz, true);
+            stack.set_selected(khz);
         }
     });
+}
+
+/// 观察员的频率循环：每 200 ms 看一眼该在哪个频率上。
+///
+/// **读不到模拟器也照转**，这是和 [`spawn_pump`] 不一样的地方：手输了频率的
+/// 观察员可以根本不开模拟器，照搬那条"没有模拟器那一帧就跳过"的话，这种人
+/// 永远订阅不上任何频率。
+fn spawn_observer_pump(
+    sim: SimLink,
+    voice: Arc<Bridge>,
+    manual: Arc<std::sync::atomic::AtomicU32>,
+) -> tokio::task::AbortHandle {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(PUMP_INTERVAL);
+        let mut current: Option<u32> = None;
+        loop {
+            tick.tick().await;
+            let typed = Some(manual.load(std::sync::atomic::Ordering::Relaxed)).filter(|&k| k != 0);
+            let com1 = sim.snapshot().as_ref().and_then(voice_frequency);
+            retune(
+                &voice,
+                &mut current,
+                can_voice_app::observer::frequency_for(typed, com1),
+            );
+        }
+    })
+    .abort_handle()
 }
 
 /// 用户自己那张机模表的位置。没有就用内置的。
@@ -1199,9 +1445,10 @@ async fn check_update(
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
         };
-        // 上着网就是"正在工作"。
-        let busy = app.link.lock().expect("link").is_some();
-        (s.skipped_update, busy) };
+        // 上着网就是"正在工作"。观察员没有 FSD 链路，但他同样戴着耳机在听。
+        let busy = app.link.lock().expect("link").is_some() || app.observing().is_some();
+        (s.skipped_update, busy)
+    };
     let origin = app.settings_snapshot().endpoints.api_origin();
     let Some(latest) = can_voice_update::check(&app.http, &origin, "msfs-for-can", env!("CARGO_PKG_VERSION")).await else {
         return Ok(None);
@@ -1224,7 +1471,7 @@ fn skip_update(app: tauri::State<'_, App>, version: String) {
 
 /// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
 #[tauri::command]
-fn open_download(url: String) -> Result<(), String> {
+fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
 }
 
@@ -1245,7 +1492,7 @@ async fn send_log(
     app: tauri::State<'_, App>,
     cid: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let origin = app.settings_snapshot().endpoints.api_origin();
     can_voice_log::upload(
         &app.http,
@@ -1315,11 +1562,12 @@ fn set_appearance(
 fn set_endpoints(
     app: tauri::State<'_, App>,
     endpoints: can_voice_settings::Endpoints,
-) -> Result<can_voice_settings::Endpoints, String> {
+) -> Result<can_voice_settings::Endpoints, Vec<Message>> {
     let endpoints = endpoints.trimmed();
     let problems = endpoints.problems();
     if !problems.is_empty() {
-        return Err(problems.join("；"));
+        // 整张清单交回去，前端按当前语言翻、按当前语言的句读连起来。
+        return Err(problems);
     }
     app.update_settings(|s| s.endpoints = endpoints.clone());
     Ok(endpoints)
@@ -1383,6 +1631,8 @@ pub fn run() {
             open_download,
             connect,
             disconnect,
+            set_observer,
+            set_observer_frequency,
             view,
             send_text,
             ident,
@@ -1499,6 +1749,155 @@ mod tests {
         assert_eq!(v.messages[0].from, "CCA1501");
         assert_eq!(v.messages[0].to, "ZSPD_TWR");
         assert_eq!(v.messages[0].text, "request pushback");
+    }
+
+    // ——— 观察员（#36）———
+
+    /// 一个设置写到仓库 `.temp/` 里的 App。**不能用真的那份**：这几条测试会改设置，
+    /// 而 `for_product` 指的是开发机上真在用的那个设置文件。
+    fn app_with_scratch_settings(name: &str) -> (App, std::path::PathBuf) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../.temp/msfs-tests")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut app = App::new();
+        app.store = can_voice_settings::Store::at(dir.join("settings.json"));
+        (app, dir)
+    }
+
+    /// 老的设置文件里没有这三项。读进来必须是"不是观察员"，而不是读失败退回默认值
+    /// 把别的设置一起丢掉。
+    #[test]
+    fn a_settings_file_from_before_observer_mode_still_loads() {
+        let s: Settings =
+            serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#).expect("parse");
+        assert_eq!(s.cid, "1234567");
+        assert!(!s.observer);
+        assert_eq!(s.follow, "");
+        assert_eq!(s.observer_frequency, None);
+    }
+
+    /// **观察员没有 FSD，`link` 永远是 `None`**，而前端的 `online` 原本全由它推导。
+    /// 不单独报出来的话，观察员连上之后登录表单不消失。
+    #[test]
+    fn an_observer_shows_as_online_without_an_fsd_link() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let (app, dir) = app_with_scratch_settings("online");
+        assert!(build_view(&app).observer.is_none());
+        assert!(!app.is_online());
+
+        *app.observing.lock().expect("observing") = Some("CCA1501".into());
+
+        let v = build_view(&app);
+        assert_eq!(v.link, None);
+        assert_eq!(v.observer.expect("observer").follow, "CCA1501");
+        assert!(app.is_online());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 身份是上线那一刻定的：连着的时候切换观察员模式要被拒绝，而且不能存进去。
+    #[test]
+    fn observer_mode_cannot_be_switched_while_connected() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let (app, dir) = app_with_scratch_settings("switch");
+        assert_eq!(set_observer_mode(&app, true), Ok(()));
+        assert!(app.settings_snapshot().observer);
+
+        *app.observing.lock().expect("observing") = Some("CCA1501".into());
+
+        assert!(set_observer_mode(&app, false).is_err());
+        assert!(app.settings_snapshot().observer);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 手输的频率立刻进快照（频率循环读的是同一个原子量），清空就回到跟随 COM1。
+    /// 没开模拟器、也没手输的观察员要报"没有频率"，而不是报一个它不在的频率。
+    #[test]
+    fn a_typed_frequency_takes_effect_and_clearing_it_follows_com1_again() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let (app, dir) = app_with_scratch_settings("typed");
+        *app.observing.lock().expect("observing") = Some("CCA1501".into());
+
+        assert_eq!(set_manual_frequency(&app, "121.8"), Ok(Some(121_800)));
+        let o = build_view(&app).observer.expect("observer");
+        assert_eq!(o.frequency, Some(121_800));
+        assert!(o.manual);
+        assert_eq!(app.settings_snapshot().observer_frequency, Some(121_800));
+
+        assert_eq!(set_manual_frequency(&app, ""), Ok(None));
+        let o = build_view(&app).observer.expect("observer");
+        assert!(!o.manual);
+        // 测试里没有模拟器，COM1 读不到。
+        assert_eq!(o.frequency, None);
+        assert_eq!(app.settings_snapshot().observer_frequency, None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 打错的字不存，已经生效的那个频率也不动：存进去的话语音会落在谁也不在的频率上。
+    #[test]
+    fn a_typo_does_not_replace_the_frequency_in_use() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let (app, dir) = app_with_scratch_settings("typo");
+        assert_eq!(set_manual_frequency(&app, "124.350"), Ok(Some(124_350)));
+
+        assert!(set_manual_frequency(&app, "124,35").is_err());
+        assert!(set_manual_frequency(&app, "140.000").is_err());
+
+        assert_eq!(app.manual_frequency(), Some(124_350));
+        assert_eq!(app.settings_snapshot().observer_frequency, Some(124_350));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 设置文件是人能手改的，波段外的数不进频率循环。
+    #[test]
+    fn a_saved_frequency_outside_the_band_is_ignored() {
+        let with = |khz| Settings {
+            observer_frequency: khz,
+            ..Default::default()
+        };
+        assert_eq!(saved_manual_frequency(&with(Some(121_800))), 121_800);
+        assert_eq!(saved_manual_frequency(&with(Some(99_500))), 0);
+        assert_eq!(saved_manual_frequency(&with(None)), 0);
+    }
+
+    /// **飞行员端的台面永远只有一个频率。** 换频率时旧的必须撤掉——留着的话两个
+    /// 频率都开着发射，一按 PTT 两边一起说。
+    #[test]
+    fn retuning_leaves_exactly_one_frequency() {
+        let voice = Bridge::new();
+        let mut current = None;
+
+        retune(&voice, &mut current, Some(121_800));
+        retune(&voice, &mut current, Some(124_350));
+
+        let radios = voice.radios();
+        assert_eq!(radios.len(), 1);
+        assert_eq!(radios[0].freq_khz, 124_350);
+        assert!(radios[0].rx && radios[0].tx);
+
+        retune(&voice, &mut current, None);
+        assert!(voice.radios().is_empty());
+    }
+
+    /// 台面在桥里，下线不清。上一次以观察员身份手输的频率留着的话，这一次正常
+    /// 上网络时 COM1 加上去，台面上就是两个频率。
+    #[test]
+    fn going_online_again_starts_from_an_empty_stack() {
+        let voice = Bridge::new();
+        let mut observer_session = None;
+        retune(&voice, &mut observer_session, Some(121_800));
+
+        clear_radios(&voice);
+        let mut pilot_session = None;
+        retune(&voice, &mut pilot_session, Some(124_350));
+
+        let radios = voice.radios();
+        assert_eq!(radios.len(), 1);
+        assert_eq!(radios[0].freq_khz, 124_350);
     }
 
     /// **COM1 电门关着就退订。** 关了电门还在频率上说话，对管制来说是个幽灵。

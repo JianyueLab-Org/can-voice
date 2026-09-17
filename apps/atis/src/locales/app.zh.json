@@ -1,0 +1,208 @@
+{
+  "app": {
+    "title": "通播制作"
+  },
+  "login": {
+    "cid": "CAN 号",
+    "password": "密码"
+  },
+  "dialog": {
+    "cancel": "取消",
+    "confirm": "确定",
+    "dismiss": "关掉"
+  },
+  "busy": {
+    "fetching": "正在取…",
+    "importing": "正在导入…"
+  },
+  "list": {
+    "more": "{list} 等 {count} 个"
+  },
+  "profile": {
+    "new": "新配置",
+    "rename": "改名",
+    "remove": "删除",
+    "confirm_remove": "删除配置「{name}」？",
+    "new_title": "新配置的名字",
+    "new_placeholder": "例如：浦东",
+    "rename_title": "改配置的名字"
+  },
+  "station": {
+    "new": "+ 新席位",
+    "new_title": "新席位",
+    "new_placeholder": "机场四字码，例如 ZSPD",
+    "pick": "左边挑一个席位，或者新建一个",
+    "remove": "删除席位",
+    "airport": "机场",
+    "frequency": "频率",
+    "type": "类型",
+    "type_combined": "综合",
+    "type_departure": "离场",
+    "type_arrival": "进场",
+    "name": "机场名（语音念这个）",
+    "voice_language": "播报语言",
+    "voice_en": "英文",
+    "voice_zh": "中文",
+    "voice_both": "中英双语",
+    "code_range": "情报字母范围",
+    "chinese_name": "中文台名",
+    "chinese_name_hint": "上海浦东",
+    "chinese_runway": "中文跑道（席位默认）",
+    "chinese_runway_hint": "三五左",
+    "presets": "构型",
+    "add_preset": "新增",
+    "remove_preset": "删除"
+  },
+  "preset": {
+    "new_name": "构型 {n}",
+    "template": "模板",
+    "airport_conditions": "机场条件（ARPT_COND）",
+    "transition_level": "过渡高度层（TL）",
+    "closing": "收尾语（留空用内置那句）",
+    "chinese_runway": "中文跑道（留空用席位那个）",
+    "chinese_extra": "中文附加说明"
+  },
+  "import": {
+    "title": "导入",
+    "network": "全网通播配置…",
+    "vatis": "vATIS 配置文件…",
+    "online": "此刻在线的通播席位",
+    "online_tip": "只有机场和频率，模板和构型要另外补",
+    "vatis_heading": "从 vATIS 配置「{source}」导入",
+    "vatis_failures": "{count} 个席位无法导入：{list}",
+    "vatis_skipped": "以下 vATIS 设置本客户端没有对应功能，已跳过：{list}",
+    "online_heading": "从数据源导入在线通播席位",
+    "online_defaults": "新加的席位用的是默认模板：构型和 NOTAM 要自己补，或者取一次网络配置。",
+    "network_heading": "并入全网通播配置",
+    "unsupported": {
+      "atis_format": "细粒度的格式设置（风、能见度等各自的读法选项）",
+      "ids_endpoint": "IDS 推送端点",
+      "airport_condition_definitions": "预置的机场条件短语库",
+      "notam_definitions": "预置的 NOTAM 短语库",
+      "atis_voice": "语音录制设置",
+      "external_generator": "外部生成器"
+    }
+  },
+  "merge": {
+    "added": "新增 {count} 个：{list}",
+    "replaced": "覆盖 {count} 个：{list}",
+    "kept": "本地已有、原样保留 {count} 个：{list}",
+    "skipped": "正在播出、没有动 {count} 个：{list}（停播后再来一次）",
+    "nothing": "没有任何变化"
+  },
+  "network": {
+    "title": "全网通播配置 {label}",
+    "previous": "上次并到的是 {version}",
+    "problems": "有 {count} 个席位读不进来：{list}",
+    "up_to_date": "本地已经是这一版（{count} 个席位一致）。",
+    "add_missing": "补上本地没有的 {count} 个：",
+    "overwrite": "用网络版覆盖内容不同的 {count} 个：",
+    "overwrite_note": "会盖掉本地改过的构型、模板和 NOTAM。情报字母保留本地的。",
+    "on_air": "{list} 正在播出，这次不会动它们。",
+    "apply": "并进来",
+    "label": {
+      "both": "{updated}（{version}）",
+      "one": "{value}",
+      "unknown": "未知版本"
+    }
+  },
+  "airing": {
+    "title": "播出",
+    "refresh": "报文周期",
+    "seconds": "秒",
+    "rating": "登录等级",
+    "rating_auto": "自动（跟随本人）",
+    "rating_note": "等级下次上线才生效。"
+  },
+  "draft": {
+    "start": "上线",
+    "preset_tip": "换一套跑道构型（会推进一格字母）",
+    "bump": "推字母",
+    "bump_tip": "播错了，或者报文没变但场面条件变了",
+    "refresh": "取报文",
+    "stop": "停止",
+    "unknown_variables": "模板里这几个变量认不出来，会被原样念出去：{list}",
+    "metar_live": "服务端给的报文",
+    "metar_sample": "试算用的报文",
+    "fetch_metar": "取真实报文",
+    "fetch_metar_tip": "从气象源取这个机场此刻的真实报文，不用上线",
+    "no_metar": "还没拿到",
+    "text": "文字通播（飞行员读的）",
+    "voice_en": "英文语音稿",
+    "voice_zh": "中文语音稿",
+    "wire": "发上 FSD 的那一份"
+  },
+  "state": {
+    "not_online": "未上线",
+    "online": "在播",
+    "connecting": "连接中…",
+    "reconnecting": "重连中…",
+    "stopped": "已停止",
+    "offline": "已下线（重连用尽）",
+    "reason": {
+      "unknown": "出错了",
+      "login_timeout": "登录超时：服务端没有回应",
+      "closed": "登录时对端关掉了连接",
+      "dropped": "连接断了",
+      "rejected": "服务端拒绝登录（{code}）：{message}",
+      "connect_failed": "连不上：{detail}",
+      "callsign": "呼号不合服务端的规矩",
+      "bad_frequency": "认不出这个频率：{frequency}",
+      "send_failed": "发送失败：{detail}",
+      "retrying": "重连中（第 {attempt} / {limit} 次）",
+      "gave_up": "重连 {limit} 次都没成，这个席位已下线"
+    }
+  },
+  "problem": {
+    "profile": {
+      "duplicate_station": "已经有呼号为 {callsign} 的席位了",
+      "empty_name": "配置的名字不能是空的",
+      "duplicate_profile": "已经有一份叫「{name}」的配置了",
+      "missing_profile": "没有叫「{name}」的配置",
+      "last_profile": "最后一份配置不能删"
+    },
+    "station": {
+      "missing": "没有 {callsign} 这个席位",
+      "no_presets": "这个席位没有构型",
+      "no_preset": "没有叫「{preset}」的构型",
+      "bad_frequency": "{frequency} 不是一个频率",
+      "already_on_air": "{callsign} 已经在播了",
+      "not_on_air": "{callsign} 没有在播",
+      "stop_first": "先停掉再删"
+    },
+    "datafeed": {
+      "unreachable": "取不到数据源（{url}）"
+    },
+    "network": {
+      "not_checked": "先取一次网络配置，看过差异再并"
+    },
+    "netconfig": {
+      "rate_limited": "请求太频繁，被服务器限流了，过一会儿再试",
+      "status": "服务器返回 {status}（{url}）",
+      "unreachable": "连不上 {url}：{detail}",
+      "not_json": "返回的内容不是合法 JSON：{detail}",
+      "not_a_document": "返回的内容不是一份配置文档",
+      "no_stations": "配置里没有任何席位",
+      "nothing_usable": "配置里没有能用的席位",
+      "station_unreadable": "{station}：{detail}",
+      "out_of_band": "{station}：频率 {frequency} 不在甚高频范围",
+      "bad_frequency": "{station}：频率 {frequency} 无法识别"
+    },
+    "vatis": {
+      "unreadable": "打不开文件：{detail}",
+      "not_json": "不是合法的 JSON：{detail}",
+      "not_a_profile": "这个文件看起来不是 vATIS 的配置",
+      "no_stations": "配置里没有任何席位（stations / composites 都是空的）",
+      "no_identifier": "席位缺少 identifier",
+      "bad_frequency": "频率 {frequency} 无法识别",
+      "out_of_band": "频率 {frequency} 超出甚高频范围",
+      "nothing_usable": "没有能导入的席位"
+    },
+    "weather": {
+      "not_icao": "{code} 不是 4 位 ICAO 代码",
+      "unreachable": "取 {icao} 的 METAR 失败：{detail}",
+      "certificate": "取 {icao} 的 METAR 失败：{detail}；证书校验没过。服务器证书通常没问题，先看本机时间对不对、系统根证书是不是太旧，或者有没有中间人代理",
+      "missing": "气象源里没有 {icao} 的报文"
+    }
+  }
+}

@@ -16,6 +16,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+can-voice-i18n = { path = "../../../crates/can-voice-i18n" }
 can-voice-atis = { path = "../../../crates/can-voice-atis" }
 can-voice-datafeed = { path = "../../../crates/can-voice-datafeed" }
 can-voice-fsd = { path = "../../../crates/can-voice-fsd" }

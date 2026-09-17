@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 can-voice-app = { path = "../../../crates/can-voice-app" }
+can-voice-i18n = { path = "../../../crates/can-voice-i18n" }
 can-voice-client = { path = "../../../crates/can-voice-client" }
 can-voice-fsd = { path = "../../../crates/can-voice-fsd" }
 can-voice-ptt = { path = "../../../crates/can-voice-ptt" }

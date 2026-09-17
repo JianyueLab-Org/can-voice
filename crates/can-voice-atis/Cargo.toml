@@ -13,6 +13,7 @@ name = "can-voice-atis"
 path = "src/main.rs"
 
 [dependencies]
+can-voice-i18n = { path = "../can-voice-i18n" }
 can-voice-client = { path = "../can-voice-client" }
 can-voice-proto = { path = "../can-voice-proto" }
 can-voice-token = { path = "../can-voice-token" }

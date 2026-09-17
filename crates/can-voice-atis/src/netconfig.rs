@@ -34,6 +34,7 @@
 //! 判断不会因为谁忘了手动进位而失效。
 
 use crate::profile::{Profile, Station};
+use can_voice_i18n::Message;
 use serde_json::Value;
 
 /// 配置在哪。
@@ -50,22 +51,59 @@ pub const USER_AGENT: &str = "Mozilla/5.0 (compatible; CanATIS/3.0)";
 /// 甚高频航空频段，单位千赫。频率算不出来的席位留着只会在开播时才炸。
 const VHF_KHZ: std::ops::RangeInclusive<u32> = 100_000..=200_000;
 
+/// `Display` 是给日志的英文；界面上的那几句走 [`NetConfigError::messages`]（#29）。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NetConfigError {
-    #[error("请求太频繁，被服务器限流了，过一会儿再试")]
+    #[error("rate limited by the server")]
     RateLimited,
-    #[error("服务器返回 {status}（{url}）")]
+    #[error("the server answered {status} ({url})")]
     Status { status: u16, url: String },
-    #[error("连不上 {url}：{detail}")]
+    #[error("could not reach {url}: {detail}")]
     Unreachable { url: String, detail: String },
-    #[error("返回的内容不是合法 JSON：{0}")]
+    #[error("the response is not valid JSON: {0}")]
     NotJson(String),
-    #[error("返回的内容不是一份配置文档")]
+    #[error("the response is not a configuration document")]
     NotADocument,
-    #[error("配置里没有任何席位")]
+    #[error("the configuration has no stations")]
     NoStations,
-    #[error("配置里没有能用的席位：{0}")]
-    NothingUsable(String),
+    /// 装的是前三个席位各自的问题。
+    #[error("the configuration has no usable station: {}", joined(.0))]
+    NothingUsable(Vec<Message>),
+}
+
+fn joined(problems: &[Message]) -> String {
+    problems
+        .iter()
+        .map(Message::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+impl NetConfigError {
+    /// 给人看的那一句。"没有能用的席位"后面跟着是哪几个、为什么，挂在
+    /// [`Message::details`] 上——前端一条条翻、按当前语言的标点连起来。
+    pub fn message(&self) -> Message {
+        match self {
+            NetConfigError::RateLimited => Message::new("problem.netconfig.rate_limited"),
+            NetConfigError::Status { status, url } => Message::new("problem.netconfig.status")
+                .with("status", status)
+                .with("url", url),
+            NetConfigError::Unreachable { url, detail } => {
+                Message::new("problem.netconfig.unreachable")
+                    .with("url", url)
+                    .with("detail", detail)
+            }
+            NetConfigError::NotJson(detail) => {
+                Message::new("problem.netconfig.not_json").with("detail", detail)
+            }
+            NetConfigError::NotADocument => Message::new("problem.netconfig.not_a_document"),
+            NetConfigError::NoStations => Message::new("problem.netconfig.no_stations"),
+            NetConfigError::NothingUsable(problems) => {
+                Message::new("problem.netconfig.nothing_usable")
+                    .with_details(problems.iter().cloned())
+            }
+        }
+    }
 }
 
 /// 解析好的一份网络配置。
@@ -76,17 +114,19 @@ pub struct NetworkConfig {
     pub notes: String,
     pub stations: Vec<Station>,
     /// 单个读不进来的席位在这里报出来，别让人以为全都拿到了。
-    pub problems: Vec<String>,
+    pub problems: Vec<Message>,
 }
 
 impl NetworkConfig {
-    /// 界面上显示的版本说明。
-    pub fn label(&self) -> String {
+    /// 界面上显示的版本说明。括号是哪一种、"未知版本"怎么说，归字典（#29）。
+    pub fn label(&self) -> Message {
         match (self.updated.is_empty(), self.version.is_empty()) {
-            (false, false) => format!("{}（{}）", self.updated, self.version),
-            (false, true) => self.updated.clone(),
-            (true, false) => self.version.clone(),
-            (true, true) => "未知版本".to_string(),
+            (false, false) => Message::new("network.label.both")
+                .with("updated", &self.updated)
+                .with("version", &self.version),
+            (false, true) => Message::new("network.label.one").with("value", &self.updated),
+            (true, false) => Message::new("network.label.one").with("value", &self.version),
+            (true, true) => Message::new("network.label.unknown"),
         }
     }
 
@@ -176,30 +216,35 @@ pub fn parse(document: &Value) -> Result<NetworkConfig, NetConfigError> {
         let mut station: Station = match serde_json::from_value(entry.clone()) {
             Ok(s) => s,
             Err(e) => {
-                problems.push(format!("{named}：{e}"));
+                // serde 的报错是英文原文，当作数据交出去。
+                problems.push(
+                    Message::new("problem.netconfig.station_unreadable")
+                        .with("station", &named)
+                        .with("detail", e),
+                );
                 continue;
             }
         };
         station.normalise();
         match station.frequency_khz() {
             Some(khz) if VHF_KHZ.contains(&khz) => stations.push(station),
-            Some(_) => problems.push(format!(
-                "{named}：频率 {} 不在甚高频范围",
-                station.frequency
-            )),
-            None => problems.push(format!("{named}：频率 {} 无法识别", station.frequency)),
+            Some(_) => problems.push(
+                Message::new("problem.netconfig.out_of_band")
+                    .with("station", &named)
+                    .with("frequency", &station.frequency),
+            ),
+            None => problems.push(
+                Message::new("problem.netconfig.bad_frequency")
+                    .with("station", &named)
+                    .with("frequency", &station.frequency),
+            ),
         }
     }
 
     if stations.is_empty() {
-        return Err(NetConfigError::NothingUsable(
-            problems
-                .iter()
-                .take(3)
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("；"),
-        ));
+        // 报前三条。全列出来的话一份坏文件会刷满整块提示。
+        problems.truncate(3);
+        return Err(NetConfigError::NothingUsable(problems));
     }
     stations.sort_by_key(Station::callsign);
     Ok(NetworkConfig {
@@ -391,13 +436,18 @@ mod tests {
     #[test]
     fn the_version_and_the_date_both_show_up_in_the_label() {
         let config = parse(&document(json!([wire("ZSPD", "127.850")]))).unwrap();
-        assert_eq!(config.label(), "2026-07-30（3f6d746b8451）");
+        assert_eq!(
+            config.label(),
+            Message::new("network.label.both")
+                .with("updated", "2026-07-30")
+                .with("version", "3f6d746b8451")
+        );
     }
 
     #[test]
     fn a_config_that_names_neither_is_still_labelled() {
         let config = parse(&json!({"stations": [wire("ZSPD", "127.850")]})).unwrap();
-        assert_eq!(config.label(), "未知版本");
+        assert_eq!(config.label(), Message::new("network.label.unknown"));
     }
 
     /// 频率算不出来的席位留着只会在开播时才炸，那时候人已经在台上了。
@@ -409,10 +459,11 @@ mod tests {
         ])))
         .unwrap();
         assert_eq!(config.stations.len(), 1);
-        assert!(
-            config.problems.iter().any(|p| p.contains("ZBAA")),
-            "{:?}",
-            config.problems
+        assert_eq!(
+            config.problems,
+            [Message::new("problem.netconfig.out_of_band")
+                .with("station", "ZBAA")
+                .with("frequency", "8.500")]
         );
     }
 
@@ -425,6 +476,27 @@ mod tests {
         .unwrap();
         assert_eq!(config.stations.len(), 1);
         assert_eq!(config.problems.len(), 1);
+        assert_eq!(
+            config.problems[0].key,
+            "problem.netconfig.station_unreadable"
+        );
+        assert_eq!(config.problems[0].values["station"], "?");
+    }
+
+    /// 一个能用的都没有时，界面上要说出是哪几个、为什么——不是一句光秃秃的"没有"。
+    #[test]
+    fn nothing_usable_names_the_first_few_stations_and_why() {
+        let err = parse(&document(json!([
+            wire("ZBAA", "8.500"),
+            wire("ZGGG", "x"),
+            wire("ZSSS", "1.0"),
+            wire("ZUUU", "2.0"),
+        ])))
+        .expect_err("nothing usable");
+        let said = err.message();
+        assert_eq!(said.key, "problem.netconfig.nothing_usable");
+        assert_eq!(said.details.len(), 3, "the first three: {said:?}");
+        assert_eq!(said.details[1].key, "problem.netconfig.bad_frequency");
     }
 
     #[test]
@@ -720,6 +792,7 @@ mod tests {
             .await
             .expect_err("unreachable");
         assert!(format!("{err}").contains("127.0.0.1:1"), "{err}");
+        assert_eq!(err.message().values["url"], "http://127.0.0.1:1/atis");
     }
 
     #[tokio::test]

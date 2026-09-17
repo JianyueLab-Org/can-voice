@@ -9,8 +9,17 @@ import UpdateBanner from "./components/UpdateBanner.vue";
 import LogPanel from "./components/LogPanel.vue";
 import NameDialog from "./components/NameDialog.vue";
 import NetworkDialog from "./components/NetworkDialog.vue";
-import type { ImportReport, Live, Merged, NetworkPreview, Rendered, Station } from "./types";
-import { callsignOf, describeMerge, stateText } from "./types";
+import type {
+  ImportReport,
+  Live,
+  Merged,
+  NetworkPreview,
+  Notice,
+  Rendered,
+  Station,
+} from "./types";
+import { callsignOf, noticeLines, stateText } from "./types";
+import { errorText, t, type Key, type Message } from "./i18n";
 
 /** 设置对话框开没开。 */
 const showPrefs = ref(false);
@@ -22,7 +31,11 @@ const stations = ref<Station[]>([]);
 const selected = ref("");
 const presetName = ref("");
 const live = ref<Record<string, Live>>({});
-const error = ref("");
+/**
+ * 上一次失败交回来的东西，**原样存着**（#29）：Rust 给的是 `Message`，在模板里用
+ * `errorText` 现翻，切了语言跟着变。`null` 是没出错。
+ */
+const error = ref<unknown>(null);
 
 const cid = ref("");
 const password = ref("");
@@ -34,7 +47,9 @@ const refreshSecs = ref(300);
 const rating = ref(0);
 
 /** 导入 / 取配置之后给人看的结果。和 `error` 分开：这不是出错。 */
-const notice = ref<string[]>([]);
+const notice = ref<Notice | null>(null);
+/** 提示的那几行。computed 里现翻，所以切了语言跟着变。 */
+const noticeText = computed(() => (notice.value ? noticeLines(notice.value) : []));
 /** 正在跑的那个外部请求。按钮据此变灰，免得连点出两次请求。 */
 const busy = ref<"metar" | "vatis" | "online" | "network" | null>(null);
 const network = ref<NetworkPreview | null>(null);
@@ -96,16 +111,16 @@ async function renderPreview() {
       letter: current.value?.letter ?? s.letter,
     });
   } catch (e) {
-    error.value = String(e);
+    error.value = e;
   }
 }
 
 async function guard(fn: () => Promise<unknown>) {
-  error.value = "";
+  error.value = null;
   try {
     await fn();
   } catch (e) {
-    error.value = String(e);
+    error.value = e;
   }
   await reload();
 }
@@ -128,7 +143,8 @@ const addStation = (icao: string) =>
 
 const removeStation = () =>
   guard(async () => {
-    if (onAir.value) throw new Error("先停掉再删");
+    // 抛的是 key 不是一句话：和 Rust 交回来的错误同一个形状，显示时才翻。
+    if (onAir.value) throw { key: "problem.station.stop_first" satisfies Key } satisfies Message;
     await invoke("remove_station", { callsign: selected.value });
     selected.value = "";
   });
@@ -179,7 +195,7 @@ const renameProfile = (name: string) =>
 const removeProfile = () =>
   guard(async () => {
     // 删掉的是一整份配置，问一句。这是这个界面上唯一不可撤销的动作。
-    if (!window.confirm(`删除配置「${profiles.value.active}」？`)) return;
+    if (!window.confirm(t("profile.confirm_remove", { name: profiles.value.active }))) return;
     await invoke("remove_profile", { name: profiles.value.active });
   });
 
@@ -187,13 +203,13 @@ const pickProfile = (name: string) => guard(() => invoke("select_profile", { nam
 
 /** 跑一个外部请求：清掉上一次的提示、按钮变灰、失败了说出为什么。 */
 async function fetching(kind: NonNullable<typeof busy.value>, fn: () => Promise<void>) {
-  error.value = "";
-  notice.value = [];
+  error.value = null;
+  notice.value = null;
   busy.value = kind;
   try {
     await fn();
   } catch (e) {
-    error.value = String(e);
+    error.value = e;
   } finally {
     busy.value = null;
   }
@@ -224,11 +240,7 @@ async function importVatis(event: Event) {
   if (!file) return;
   await fetching("vatis", async () => {
     const report = await invoke<ImportReport>("import_vatis", { body: await file.text() });
-    notice.value = [
-      `从 vATIS 配置「${report.source || file.name}」导入`,
-      ...describeMerge(report.merged),
-      ...report.notes,
-    ];
+    notice.value = { kind: "vatis", source: report.source || file.name, report };
   });
 }
 
@@ -236,11 +248,7 @@ async function importVatis(event: Event) {
 const importOnline = () =>
   fetching("online", async () => {
     const merged = await invoke<Merged>("import_online");
-    notice.value = [
-      "从数据源导入在线通播席位",
-      ...describeMerge(merged),
-      ...(merged.added.length ? ["新加的席位用的是默认模板：构型和 NOTAM 要自己补，或者取一次网络配置。"] : []),
-    ];
+    notice.value = { kind: "online", merged };
   });
 
 /** 取全网配置，**只看差异**。动手在对话框里。 */
@@ -253,7 +261,7 @@ const applyNetwork = (addMissing: boolean, overwrite: boolean) =>
   fetching("network", async () => {
     network.value = null;
     const merged = await invoke<Merged>("apply_network_config", { addMissing, overwrite });
-    notice.value = ["并入全网通播配置", ...describeMerge(merged)];
+    notice.value = { kind: "network", merged };
   });
 
 watch([selected, presetName, sampleMetar], () => {
@@ -292,7 +300,7 @@ onUnmounted(() => window.clearInterval(timer));
   >
     <header class="flex items-center gap-3">
       <template v-if="!compact">
-        <h1 class="text-base font-semibold">通播制作</h1>
+        <h1 class="text-base font-semibold">{{ t("app.title") }}</h1>
         <select
           :value="profiles.active"
           class="rounded border px-2 py-1 text-xs"
@@ -300,27 +308,33 @@ onUnmounted(() => window.clearInterval(timer));
         >
           <option v-for="n in profiles.names" :key="n">{{ n }}</option>
         </select>
-        <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">新配置</button>
+        <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">
+          {{ t("profile.new") }}
+        </button>
         <button
           class="rounded border px-2 py-1 text-xs"
           :disabled="!profiles.active"
           @click="asking = 'rename'"
         >
-          改名
+          {{ t("profile.rename") }}
         </button>
         <button
           class="rounded border px-2 py-1 text-xs"
           :disabled="profiles.names.length < 2"
           @click="removeProfile"
         >
-          删除
+          {{ t("profile.remove") }}
         </button>
         <div class="ml-auto flex items-center gap-2">
-          <input v-model="cid" placeholder="CAN 号" class="w-24 rounded border px-2 py-1 text-xs" />
+          <input
+            v-model="cid"
+            :placeholder="t('login.cid')"
+            class="w-24 rounded border px-2 py-1 text-xs"
+          />
           <input
             v-model="password"
             type="password"
-            placeholder="密码"
+            :placeholder="t('login.password')"
             class="w-28 rounded border px-2 py-1 text-xs"
           />
         </div>
@@ -331,19 +345,21 @@ onUnmounted(() => window.clearInterval(timer));
 
     <UpdateBanner v-if="!compact" />
 
-    <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
-      {{ error }}
+    <p v-if="error !== null" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
+      {{ errorText(error) }}
     </p>
     <div
-      v-if="notice.length"
+      v-if="noticeText.length"
       class="flex items-start gap-2 rounded border border-sky-400 px-3 py-2 text-xs"
     >
       <div class="flex flex-col gap-0.5">
-        <p v-for="(line, i) in notice" :key="i" :class="i === 0 ? 'font-semibold' : ''">
+        <p v-for="(line, i) in noticeText" :key="i" :class="i === 0 ? 'font-semibold' : ''">
           {{ line }}
         </p>
       </div>
-      <button class="ml-auto opacity-60" title="关掉" @click="notice = []">×</button>
+      <button class="ml-auto opacity-60" :title="t('dialog.dismiss')" @click="notice = null">
+        ×
+      </button>
     </div>
 
     <div class="flex min-h-0 flex-1 gap-4">
@@ -371,10 +387,10 @@ onUnmounted(() => window.clearInterval(timer));
           class="rounded border border-dashed px-2 py-1 text-xs"
           @click="asking = 'station'"
         >
-          + 新席位
+          {{ t("station.new") }}
         </button>
         <details class="rounded border px-2 py-1 text-xs">
-          <summary class="cursor-pointer opacity-70">导入</summary>
+          <summary class="cursor-pointer opacity-70">{{ t("import.title") }}</summary>
           <div class="flex flex-col gap-1 pt-2">
             <!-- 配置本身：席位、频率、构型预设、模板、中文用词。先看差异再并。 -->
             <button
@@ -382,14 +398,14 @@ onUnmounted(() => window.clearInterval(timer));
               :disabled="busy !== null"
               @click="checkNetwork"
             >
-              {{ busy === "network" ? "正在取…" : "全网通播配置…" }}
+              {{ busy === "network" ? t("busy.fetching") : t("import.network") }}
             </button>
             <button
               class="rounded border px-2 py-1 text-left"
               :disabled="busy !== null"
               @click="vatisFile?.click()"
             >
-              {{ busy === "vatis" ? "正在导入…" : "vATIS 配置文件…" }}
+              {{ busy === "vatis" ? t("busy.importing") : t("import.vatis") }}
             </button>
             <input
               ref="vatisFile"
@@ -402,20 +418,20 @@ onUnmounted(() => window.clearInterval(timer));
             <button
               class="rounded border px-2 py-1 text-left"
               :disabled="busy !== null"
-              title="只有机场和频率，模板和构型要另外补"
+              :title="t('import.online_tip')"
               @click="importOnline"
             >
-              {{ busy === "online" ? "正在取…" : "此刻在线的通播席位" }}
+              {{ busy === "online" ? t("busy.fetching") : t("import.online") }}
             </button>
           </div>
         </details>
 
         <!-- 折叠着：平时不占地方。 -->
         <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
-          <summary class="cursor-pointer opacity-70">播出</summary>
+          <summary class="cursor-pointer opacity-70">{{ t("airing.title") }}</summary>
           <div class="flex flex-col gap-2 pt-2">
             <label class="flex items-center gap-2">
-              <span class="opacity-60">报文周期</span>
+              <span class="opacity-60">{{ t("airing.refresh") }}</span>
               <input
                 v-model.number="refreshSecs"
                 type="number"
@@ -424,10 +440,10 @@ onUnmounted(() => window.clearInterval(timer));
                 class="w-20 rounded border px-1 py-0.5"
                 @change="applyRefresh"
               />
-              <span class="opacity-60">秒</span>
+              <span class="opacity-60">{{ t("airing.seconds") }}</span>
             </label>
             <label class="flex items-center gap-2">
-              <span class="opacity-60">登录等级</span>
+              <span class="opacity-60">{{ t("airing.rating") }}</span>
               <select
                 v-model.number="rating"
                 class="flex-1 rounded border px-1 py-0.5"
@@ -435,7 +451,7 @@ onUnmounted(() => window.clearInterval(timer));
               >
                 <!-- 自动是默认：写死观察员的话，一个 C1 开的通播在雷达图上
                      显示成观察员，而管制席位上的同一个人是 C1。 -->
-                <option :value="0">自动（跟随本人）</option>
+                <option :value="0">{{ t("airing.rating_auto") }}</option>
                 <option :value="1">OBS</option>
                 <option :value="2">S1</option>
                 <option :value="3">S2</option>
@@ -447,12 +463,12 @@ onUnmounted(() => window.clearInterval(timer));
                 <option :value="11">SUP</option>
               </select>
             </label>
-            <p class="opacity-50">等级下次上线才生效。</p>
+            <p class="opacity-50">{{ t("airing.rating_note") }}</p>
           </div>
         </details>
 
         <details v-if="!compact" class="rounded border px-2 py-1 text-xs">
-          <summary class="cursor-pointer opacity-70">日志</summary>
+          <summary class="cursor-pointer opacity-70">{{ t("log.title") }}</summary>
           <div class="pt-2">
             <LogPanel :cid="cid" />
           </div>
@@ -469,7 +485,7 @@ onUnmounted(() => window.clearInterval(timer));
           @pick="(n) => (presetName = n)"
           @remove="removeStation"
         />
-        <p v-else class="py-8 text-center text-xs opacity-50">左边挑一个席位，或者新建一个</p>
+        <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
       </div>
 
       <!-- 稿子 -->
@@ -483,7 +499,7 @@ onUnmounted(() => window.clearInterval(timer));
             :disabled="!station"
             @click="start"
           >
-            上线
+            {{ t("draft.start") }}
           </button>
           <template v-else>
             <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
@@ -492,19 +508,23 @@ onUnmounted(() => window.clearInterval(timer));
             <select
               v-model="presetName"
               class="ml-auto rounded border px-2 py-1 text-xs"
-              title="换一套跑道构型（会推进一格字母）"
+              :title="t('draft.preset_tip')"
             >
               <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
             </select>
             <button
               class="rounded border px-2 py-1 text-xs"
-              title="播错了，或者报文没变但场面条件变了"
+              :title="t('draft.bump_tip')"
               @click="bumpLetter"
             >
-              推字母
+              {{ t("draft.bump") }}
             </button>
-            <button class="rounded border px-2 py-1 text-xs" @click="refresh">取报文</button>
-            <button class="rounded border px-2 py-1 text-xs" @click="stop">停止</button>
+            <button class="rounded border px-2 py-1 text-xs" @click="refresh">
+              {{ t("draft.refresh") }}
+            </button>
+            <button class="rounded border px-2 py-1 text-xs" @click="stop">
+              {{ t("draft.stop") }}
+            </button>
           </template>
         </div>
 
@@ -514,20 +534,20 @@ onUnmounted(() => window.clearInterval(timer));
           v-if="problems.length"
           class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
         >
-          模板里这几个变量认不出来，会被原样念出去：{{ problems.join("、") }}
+          {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
         </p>
 
         <label class="flex flex-col gap-1">
           <span class="flex items-center text-xs opacity-60">
-            {{ onAir ? "服务端给的报文" : "试算用的报文" }}
+            {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
             <button
               v-if="!onAir"
               class="ml-auto rounded border px-2 py-0.5"
               :disabled="!station || busy !== null"
-              title="从气象源取这个机场此刻的真实报文，不用上线"
+              :title="t('draft.fetch_metar_tip')"
               @click.prevent="fetchMetar"
             >
-              {{ busy === "metar" ? "正在取…" : "取真实报文" }}
+              {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
             </button>
           </span>
           <textarea
@@ -537,30 +557,30 @@ onUnmounted(() => window.clearInterval(timer));
             class="rounded border px-2 py-1 font-mono text-xs"
           />
           <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-            current?.metar || "还没拿到"
+            current?.metar || t("draft.no_metar")
           }}</pre>
         </label>
 
         <template v-if="shown">
           <div>
-            <p class="text-xs opacity-60">文字通播（飞行员读的）</p>
+            <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
             <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
           </div>
           <div>
-            <p class="text-xs opacity-60">英文语音稿</p>
+            <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
             <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
               shown.voice_en
             }}</pre>
           </div>
           <div v-if="station && station.voice_language !== 'en'">
-            <p class="text-xs opacity-60">中文语音稿</p>
+            <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
             <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
               shown.voice_zh
             }}</pre>
           </div>
           <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
           <details>
-            <summary class="cursor-pointer text-xs opacity-60">发上 FSD 的那一份</summary>
+            <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
             <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
               shown.wire
             }}</pre>
@@ -571,14 +591,14 @@ onUnmounted(() => window.clearInterval(timer));
 
     <NameDialog
       :open="asking === 'profile'"
-      title="新配置的名字"
-      placeholder="例如：浦东"
+      :title="t('profile.new_title')"
+      :placeholder="t('profile.new_placeholder')"
       @confirm="addProfile"
       @cancel="asking = null"
     />
     <NameDialog
       :open="asking === 'rename'"
-      title="改配置的名字"
+      :title="t('profile.rename_title')"
       :initial="profiles.active"
       @confirm="renameProfile"
       @cancel="asking = null"
@@ -586,8 +606,8 @@ onUnmounted(() => window.clearInterval(timer));
     <NetworkDialog :preview="network" @apply="applyNetwork" @cancel="network = null" />
     <NameDialog
       :open="asking === 'station'"
-      title="新席位"
-      placeholder="机场四字码，例如 ZSPD"
+      :title="t('station.new_title')"
+      :placeholder="t('station.new_placeholder')"
       @confirm="addStation"
       @cancel="asking = null"
     />

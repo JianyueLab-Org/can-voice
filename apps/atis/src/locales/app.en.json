@@ -1,0 +1,208 @@
+{
+  "app": {
+    "title": "ATIS Maker"
+  },
+  "login": {
+    "cid": "CAN ID",
+    "password": "Password"
+  },
+  "dialog": {
+    "cancel": "Cancel",
+    "confirm": "OK",
+    "dismiss": "Dismiss"
+  },
+  "busy": {
+    "fetching": "Fetching…",
+    "importing": "Importing…"
+  },
+  "list": {
+    "more": "{list} and others ({count} in total)"
+  },
+  "profile": {
+    "new": "New profile",
+    "rename": "Rename",
+    "remove": "Delete",
+    "confirm_remove": "Delete the profile “{name}”?",
+    "new_title": "Name the new profile",
+    "new_placeholder": "e.g. Pudong",
+    "rename_title": "Rename the profile"
+  },
+  "station": {
+    "new": "+ New station",
+    "new_title": "New station",
+    "new_placeholder": "Four-letter airport code, e.g. ZSPD",
+    "pick": "Pick a station on the left, or create one",
+    "remove": "Delete station",
+    "airport": "Airport",
+    "frequency": "Frequency",
+    "type": "Type",
+    "type_combined": "Combined",
+    "type_departure": "Departure",
+    "type_arrival": "Arrival",
+    "name": "Airport name (read out in the voice)",
+    "voice_language": "Broadcast language",
+    "voice_en": "English",
+    "voice_zh": "Chinese",
+    "voice_both": "Chinese and English",
+    "code_range": "Information letter range",
+    "chinese_name": "Chinese station name",
+    "chinese_name_hint": "上海浦东",
+    "chinese_runway": "Chinese runway (station default)",
+    "chinese_runway_hint": "三五左",
+    "presets": "Preset",
+    "add_preset": "Add",
+    "remove_preset": "Delete"
+  },
+  "preset": {
+    "new_name": "Preset {n}",
+    "template": "Template",
+    "airport_conditions": "Airport conditions (ARPT_COND)",
+    "transition_level": "Transition level (TL)",
+    "closing": "Closing (leave blank for the built-in one)",
+    "chinese_runway": "Chinese runway (leave blank for the station's)",
+    "chinese_extra": "Chinese additional remarks"
+  },
+  "import": {
+    "title": "Import",
+    "network": "Network ATIS configuration…",
+    "vatis": "vATIS profile file…",
+    "online": "ATIS stations online now",
+    "online_tip": "Airport and frequency only; templates and presets have to be added separately",
+    "vatis_heading": "Imported from the vATIS profile “{source}”",
+    "vatis_failures": "{count} station(s) could not be imported: {list}",
+    "vatis_skipped": "These vATIS settings have no counterpart in this client and were skipped: {list}",
+    "online_heading": "Imported the ATIS stations online on the data feed",
+    "online_defaults": "The new stations use the default template: add presets and NOTAMs yourself, or fetch the network configuration.",
+    "network_heading": "Merged the network ATIS configuration",
+    "unsupported": {
+      "atis_format": "fine-grained format settings (reading options for wind, visibility and so on)",
+      "ids_endpoint": "IDS push endpoint",
+      "airport_condition_definitions": "predefined airport condition phrases",
+      "notam_definitions": "predefined NOTAM phrases",
+      "atis_voice": "voice recording settings",
+      "external_generator": "external generator"
+    }
+  },
+  "merge": {
+    "added": "Added {count}: {list}",
+    "replaced": "Overwrote {count}: {list}",
+    "kept": "Already here, kept as they were ({count}): {list}",
+    "skipped": "On the air, left untouched ({count}): {list} (try again after stopping them)",
+    "nothing": "Nothing changed"
+  },
+  "network": {
+    "title": "Network ATIS configuration {label}",
+    "previous": "Last merged: {version}",
+    "problems": "{count} station(s) could not be read: {list}",
+    "up_to_date": "Already on this version ({count} stations match).",
+    "add_missing": "Add the {count} missing here:",
+    "overwrite": "Overwrite the {count} that differ with the network version:",
+    "overwrite_note": "This replaces locally edited presets, templates and NOTAMs. The information letter stays as it is locally.",
+    "on_air": "{list}: on the air, so they will not be touched this time.",
+    "apply": "Merge",
+    "label": {
+      "both": "{updated} ({version})",
+      "one": "{value}",
+      "unknown": "unknown version"
+    }
+  },
+  "airing": {
+    "title": "Broadcast",
+    "refresh": "METAR interval",
+    "seconds": "s",
+    "rating": "Login rating",
+    "rating_auto": "Automatic (your own rating)",
+    "rating_note": "The rating takes effect the next time you go online."
+  },
+  "draft": {
+    "start": "Go online",
+    "preset_tip": "Switch to another runway preset (advances the information letter)",
+    "bump": "Next letter",
+    "bump_tip": "A wrong broadcast, or the METAR is unchanged but conditions on the field changed",
+    "refresh": "Fetch METAR",
+    "stop": "Stop",
+    "unknown_variables": "These template variables are not recognised and will be read out literally: {list}",
+    "metar_live": "METAR from the server",
+    "metar_sample": "Sample METAR for the preview",
+    "fetch_metar": "Fetch real METAR",
+    "fetch_metar_tip": "Fetch this airport's current METAR from the weather source, without going online",
+    "no_metar": "Not received yet",
+    "text": "Text ATIS (what pilots read)",
+    "voice_en": "English voice script",
+    "voice_zh": "Chinese voice script",
+    "wire": "What goes to FSD"
+  },
+  "state": {
+    "not_online": "Not online",
+    "online": "On the air",
+    "connecting": "Connecting…",
+    "reconnecting": "Reconnecting…",
+    "stopped": "Stopped",
+    "offline": "Offline (reconnect attempts used up)",
+    "reason": {
+      "unknown": "Something went wrong",
+      "login_timeout": "Login timed out: the server did not respond",
+      "closed": "The server closed the connection during login",
+      "dropped": "The connection dropped",
+      "rejected": "The server refused the login ({code}): {message}",
+      "connect_failed": "Could not connect: {detail}",
+      "callsign": "The callsign does not meet the server's rules",
+      "bad_frequency": "Unrecognised frequency: {frequency}",
+      "send_failed": "Sending failed: {detail}",
+      "retrying": "Reconnecting (attempt {attempt} of {limit})",
+      "gave_up": "Reconnecting failed {limit} times; this station is now offline"
+    }
+  },
+  "problem": {
+    "profile": {
+      "duplicate_station": "A station with callsign {callsign} already exists",
+      "empty_name": "The profile name cannot be empty",
+      "duplicate_profile": "A profile named “{name}” already exists",
+      "missing_profile": "There is no profile named “{name}”",
+      "last_profile": "The last profile cannot be deleted"
+    },
+    "station": {
+      "missing": "There is no station {callsign}",
+      "no_presets": "This station has no presets",
+      "no_preset": "There is no preset named “{preset}”",
+      "bad_frequency": "{frequency} is not a frequency",
+      "already_on_air": "{callsign} is already on the air",
+      "not_on_air": "{callsign} is not on the air",
+      "stop_first": "Stop it before deleting it"
+    },
+    "datafeed": {
+      "unreachable": "Could not fetch the data feed ({url})"
+    },
+    "network": {
+      "not_checked": "Fetch the network configuration and review the differences before merging"
+    },
+    "netconfig": {
+      "rate_limited": "Too many requests: the server is rate-limiting. Try again in a while",
+      "status": "The server answered {status} ({url})",
+      "unreachable": "Could not reach {url}: {detail}",
+      "not_json": "The response is not valid JSON: {detail}",
+      "not_a_document": "The response is not a configuration document",
+      "no_stations": "The configuration has no stations",
+      "nothing_usable": "The configuration has no usable stations",
+      "station_unreadable": "{station}: {detail}",
+      "out_of_band": "{station}: frequency {frequency} is outside the VHF band",
+      "bad_frequency": "{station}: frequency {frequency} cannot be read"
+    },
+    "vatis": {
+      "unreadable": "Could not open the file: {detail}",
+      "not_json": "Not valid JSON: {detail}",
+      "not_a_profile": "This file does not look like a vATIS profile",
+      "no_stations": "The profile has no stations (stations / composites are both empty)",
+      "no_identifier": "A station has no identifier",
+      "bad_frequency": "Frequency {frequency} cannot be read",
+      "out_of_band": "Frequency {frequency} is outside the VHF band",
+      "nothing_usable": "No station could be imported"
+    },
+    "weather": {
+      "not_icao": "{code} is not a four-letter ICAO code",
+      "unreachable": "Fetching the METAR for {icao} failed: {detail}",
+      "certificate": "Fetching the METAR for {icao} failed: {detail}; certificate verification failed. The server's certificate is usually fine: check this computer's clock first, then whether the system root certificates are too old, or whether a man-in-the-middle proxy is in the way",
+      "missing": "The weather source has no report for {icao}"
+    }
+  }
+}

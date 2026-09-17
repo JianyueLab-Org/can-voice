@@ -20,6 +20,7 @@
 //! 异常走的是另一条路。Rust 的 `panic::set_hook` 是**进程级**的，任何线程里的
 //! panic 都从它过，所以一个就够——包括 cpal 的音频线程和 tokio 的工作线程。
 
+use can_voice_i18n::Message;
 use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -294,9 +295,10 @@ pub async fn upload(
     version: &str,
     cid: &str,
     password: &str,
-) -> Result<(), String> {
-    let path = path().ok_or("这台机器上没有日志文件——日志目录写不进去")?;
-    let raw = std::fs::read_to_string(&path).map_err(|e| format!("读不了日志文件：{e}"))?;
+) -> Result<(), Message> {
+    let path = path().ok_or_else(|| Message::new("error.log.no_file"))?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| Message::new("error.log.unreadable").with("detail", e))?;
     upload_text(
         http,
         api_origin,
@@ -319,7 +321,7 @@ pub async fn upload_once(
     version: &str,
     cid: &str,
     password: &str,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     upload(
         &reqwest::Client::new(),
         api_origin,
@@ -341,7 +343,7 @@ async fn upload_text(
     cid: &str,
     password: &str,
     log: &str,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let url = format!("{}/api/v1/logs", api_origin.trim_end_matches('/'));
     let resp = http
         .post(&url)
@@ -357,21 +359,21 @@ async fn upload_text(
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "log upload could not reach can-api");
-            "连不上 can-api，日志没有寄出去".to_string()
+            Message::new("error.log.unreachable")
         })?;
 
     match resp.status() {
         s if s.is_success() => Ok(()),
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            Err("CAN 号或者密码不对".to_string())
+            Err(Message::new("error.log.credentials"))
         }
-        reqwest::StatusCode::TOO_MANY_REQUESTS => Err("寄得太频繁了，稍后再试".to_string()),
+        reqwest::StatusCode::TOO_MANY_REQUESTS => Err(Message::new("error.log.rate_limited")),
         reqwest::StatusCode::SERVICE_UNAVAILABLE => {
             // can-api 的 `LogUploadMailTo` 没配的时候就是这一条。告诉用户
             // "服务端没开这个功能"，比让他反复重试强。
-            Err("服务端没有开启日志回传".to_string())
+            Err(Message::new("error.log.disabled"))
         }
-        other => Err(format!("服务端拒绝了这次回传：HTTP {}", other.as_u16())),
+        other => Err(Message::new("error.log.rejected").with("status", other.as_u16())),
     }
 }
 
@@ -574,7 +576,7 @@ mod tests {
         )
         .await
         .expect_err("401 is not a success");
-        assert!(err.contains("密码"), "got {err:?}");
+        assert_eq!(err.key, "error.log.credentials");
     }
 
     /// 限流也有自己的话：can-api 对这条路径按 IP 和按成员各限一道，
@@ -593,7 +595,7 @@ mod tests {
         )
         .await
         .expect_err("429 is not a success");
-        assert!(err.contains("频繁") || err.contains("稍后"), "got {err:?}");
+        assert_eq!(err.key, "error.log.rate_limited");
     }
 
     // ——— panic 要留下记录 ———

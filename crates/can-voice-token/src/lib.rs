@@ -14,6 +14,7 @@
 use can_voice_client::client::Error as ClientError;
 use can_voice_client::conn::Error as ConnError;
 use can_voice_client::{Config, VoiceClient};
+use can_voice_i18n::Message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -30,6 +31,39 @@ pub enum Error {
     Http(#[from] reqwest::Error),
     #[error("voice: {0}")]
     Voice(#[from] ClientError),
+}
+
+impl Error {
+    /// 给人看的那一句（#29）。`Display` 是给日志的英文，这里是界面上的。
+    ///
+    /// 服务端拒绝的几种原因**各说各的**：版本太旧该去更新、票过期多半是时钟不对，
+    /// 而一句笼统的"被拒绝"会把这些人都送去查密码。
+    pub fn message(&self) -> Message {
+        use can_voice_client::conn::RefusedReason;
+        match self {
+            Error::Credentials => Message::new("error.token.credentials"),
+            Error::Rejected(status) => {
+                Message::new("error.token.rejected").with("status", status.as_u16())
+            }
+            Error::Http(e) => Message::new("error.token.unreachable").with("detail", e),
+            Error::Voice(ClientError::Conn(ConnError::Refused(reason))) => match reason {
+                RefusedReason::TokenExpired => Message::new("error.voice.token_expired"),
+                RefusedReason::TokenInvalid => Message::new("error.voice.token_invalid"),
+                RefusedReason::Refused => Message::new("error.voice.refused"),
+                RefusedReason::ProtoUnsupported => Message::new("error.voice.proto_unsupported"),
+                RefusedReason::Other(why) => {
+                    Message::new("error.voice.refused_other").with("reason", why)
+                }
+            },
+            Error::Voice(ClientError::Conn(ConnError::BadCallsign(callsign))) => {
+                Message::new("error.voice.bad_callsign").with("callsign", callsign)
+            }
+            Error::Voice(ClientError::BadAddress(address)) => {
+                Message::new("error.voice.bad_address").with("address", address)
+            }
+            Error::Voice(e) => Message::new("error.voice.unreachable").with("detail", e),
+        }
+    }
 }
 
 /// 换票的地方。
@@ -132,6 +166,28 @@ mod tests {
     use super::*;
     use can_voice_client::client::Error as ClientError;
     use can_voice_client::conn::{Error as ConnError, RefusedReason};
+
+    /// 界面上的话按原因分开说（#29）：版本太旧的人该去更新，打错密码的人该重打
+    /// 一遍，而这两种人都不该看到一句笼统的"连不上"。
+    #[test]
+    fn each_failure_tells_the_member_what_to_do_about_it() {
+        let refused = |r| Error::Voice(ClientError::Conn(ConnError::Refused(r)));
+        assert_eq!(Error::Credentials.message().key, "error.token.credentials");
+        assert_eq!(
+            refused(RefusedReason::ProtoUnsupported).message().key,
+            "error.voice.proto_unsupported"
+        );
+        assert_eq!(
+            refused(RefusedReason::TokenExpired).message().key,
+            "error.voice.token_expired"
+        );
+        let other = refused(RefusedReason::Other("maintenance".into())).message();
+        assert_eq!(other.key, "error.voice.refused_other");
+        assert_eq!(other.values["reason"], "maintenance");
+        let status = Error::Rejected(reqwest::StatusCode::BAD_GATEWAY).message();
+        assert_eq!(status.key, "error.token.rejected");
+        assert_eq!(status.values["status"], "502");
+    }
 
     fn refused(r: RefusedReason) -> ClientError {
         ClientError::Conn(ConnError::Refused(r))

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref, watch } from "vue";
+import { t } from "../i18n";
 
 /**
  * 要一个名字。
@@ -53,9 +54,11 @@ function confirm() {
         @keyup.escape="emit('cancel')"
       />
       <div class="flex justify-end gap-2">
-        <button class="rounded border px-3 py-1 text-xs" @click="emit('cancel')">取消</button>
+        <button class="rounded border px-3 py-1 text-xs" @click="emit('cancel')">
+          {{ t("dialog.cancel") }}
+        </button>
         <button class="rounded border px-3 py-1 text-xs" :disabled="!value.trim()" @click="confirm">
-          确定
+          {{ t("dialog.confirm") }}
         </button>
       </div>
     </div>

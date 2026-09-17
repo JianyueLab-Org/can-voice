@@ -9,6 +9,7 @@
 //! 照着 `can-audio/atis/weather.py` 移植。默认地址也是 can-fsd 自己在用的那个
 //! （它 `config.json` 的 weather 项），所以和网络上其它地方看到的天气是同一份。
 
+use can_voice_i18n::Message;
 use std::time::Duration;
 
 /// 默认气象源。ICAO 直接接在后面。
@@ -30,14 +31,42 @@ pub const RETRIES: u32 = 1;
 /// 两次尝试之间等多久。
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
+/// `Display` 是给日志的英文；界面上的那一句走 [`WeatherError::message`]（#29）。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum WeatherError {
-    #[error("{0} 不是 4 位 ICAO 代码")]
+    #[error("{0} is not a four-letter ICAO code")]
     NotIcao(String),
-    #[error("取 {icao} 的 METAR 失败：{detail}")]
+    #[error("fetching the METAR for {icao} failed: {detail}")]
     Unreachable { icao: String, detail: String },
-    #[error("气象源里没有 {0} 的报文")]
+    /// 证书校验没过。和 `Unreachable` 分开，因为该查的地方不一样，见 [`unreachable`]。
+    #[error("fetching the METAR for {icao} failed: {detail} (certificate verification)")]
+    Certificate { icao: String, detail: String },
+    #[error("the weather source has no report for {0}")]
     Missing(String),
+}
+
+impl WeatherError {
+    /// 给人看的那一句。
+    pub fn message(&self) -> Message {
+        match self {
+            WeatherError::NotIcao(code) => {
+                Message::new("problem.weather.not_icao").with("code", code)
+            }
+            WeatherError::Unreachable { icao, detail } => {
+                Message::new("problem.weather.unreachable")
+                    .with("icao", icao)
+                    .with("detail", detail)
+            }
+            WeatherError::Certificate { icao, detail } => {
+                Message::new("problem.weather.certificate")
+                    .with("icao", icao)
+                    .with("detail", detail)
+            }
+            WeatherError::Missing(icao) => {
+                Message::new("problem.weather.missing").with("icao", icao)
+            }
+        }
+    }
 }
 
 /// 四位字母才是 ICAO 代码。
@@ -69,19 +98,18 @@ pub fn pick(body: &str, icao: &str) -> Option<String> {
     body.lines().find_map(|line| normalize(line, icao))
 }
 
-/// 把底层错误翻译成能照着查的说法。
+/// 把底层错误归到能照着查的那一种。
 ///
 /// 证书校验失败尤其容易被误读成"服务器坏了"——实测遇到过一次
 /// `certificate has expired`，而服务器证书本身好好的，几分钟后自己就恢复了。
-/// 真要排查，能动的只有本机时间和系统根证书。
-pub fn explain(error: &str) -> String {
-    if error.contains("CERTIFICATE_VERIFY_FAILED") || error.contains("certificate") {
-        return format!(
-            "{error}；证书校验没过。服务器证书通常没问题，先看本机时间对不对、\
-系统根证书是不是太旧，或者有没有中间人代理"
-        );
+/// 真要排查，能动的只有本机时间和系统根证书。**该查什么的那句话在字典里**
+/// （`problem.weather.certificate`），这里只分出是哪一种；底层错误原样带着。
+pub fn unreachable(icao: String, detail: String) -> WeatherError {
+    if detail.contains("CERTIFICATE_VERIFY_FAILED") || detail.contains("certificate") {
+        WeatherError::Certificate { icao, detail }
+    } else {
+        WeatherError::Unreachable { icao, detail }
     }
-    error.to_string()
 }
 
 /// 取一份原始 METAR 电码。
@@ -126,10 +154,7 @@ pub async fn fetch(
             tokio::time::sleep(RETRY_DELAY).await;
         }
     }
-    Err(WeatherError::Unreachable {
-        icao,
-        detail: explain(&last),
-    })
+    Err(unreachable(icao, last))
 }
 
 #[cfg(test)]
@@ -179,16 +204,32 @@ mod tests {
     }
 
     /// 证书校验失败最容易被读成"服务器坏了"，而能动的其实是本机。
+    ///
+    /// 该查什么的那句话在字典的 `problem.weather.certificate` 里；这里钉的是它被
+    /// 认出来、而底层那句原样带到了界面上。
     #[test]
     fn a_certificate_failure_says_what_to_check() {
-        let said = explain("CERTIFICATE_VERIFY_FAILED: certificate has expired");
-        assert!(said.contains("本机时间"), "{said}");
-        assert!(said.contains("certificate has expired"), "{said}");
+        let said = unreachable(
+            "ZSPD".into(),
+            "CERTIFICATE_VERIFY_FAILED: certificate has expired".into(),
+        )
+        .message();
+        assert_eq!(said.key, "problem.weather.certificate");
+        assert_eq!(
+            said.values["detail"],
+            "CERTIFICATE_VERIFY_FAILED: certificate has expired"
+        );
     }
 
     #[test]
     fn an_ordinary_failure_is_passed_through_unchanged() {
-        assert_eq!(explain("connection refused"), "connection refused");
+        assert_eq!(
+            unreachable("ZSPD".into(), "connection refused".into()),
+            WeatherError::Unreachable {
+                icao: "ZSPD".into(),
+                detail: "connection refused".into()
+            }
+        );
     }
 
     // ——— 真的去问一次 ———

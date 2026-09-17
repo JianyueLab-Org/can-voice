@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import PresetEditor from "./PresetEditor.vue";
+import { t } from "../i18n";
 import type { Station } from "../types";
 import { callsignOf } from "../types";
 
@@ -15,7 +16,9 @@ const preset = computed(
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 
 function addPreset() {
-  const name = `构型 ${props.station.presets.length + 1}`;
+  // 起名用的是**此刻的界面语言**，而且存下来之后就不再变：这是用户的数据，和他
+  // 自己起的名字一样，不是一句跟着语言切换的界面文字（#29）。
+  const name = t("preset.new_name", { n: props.station.presets.length + 1 });
   props.station.presets.push({
     ...JSON.parse(JSON.stringify(props.station.presets[0])),
     name,
@@ -40,13 +43,13 @@ function removePreset() {
       <h2 class="font-mono text-sm font-semibold">{{ callsignOf(station) }}</h2>
       <span class="text-xs opacity-60">{{ station.frequency }} MHz</span>
       <button class="ml-auto text-xs opacity-60 hover:opacity-100" @click="$emit('remove')">
-        删除席位
+        {{ t("station.remove") }}
       </button>
     </header>
 
     <div class="grid grid-cols-3 gap-2">
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">机场</span>
+        <span class="text-xs opacity-60">{{ t("station.airport") }}</span>
         <input
           v-model="station.identifier"
           class="rounded border px-2 py-1 font-mono text-xs uppercase"
@@ -54,7 +57,7 @@ function removePreset() {
         />
       </label>
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">频率</span>
+        <span class="text-xs opacity-60">{{ t("station.frequency") }}</span>
         <input
           v-model="station.frequency"
           class="rounded border px-2 py-1 font-mono text-xs"
@@ -62,22 +65,22 @@ function removePreset() {
         />
       </label>
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">类型</span>
+        <span class="text-xs opacity-60">{{ t("station.type") }}</span>
         <select
           v-model="station.atis_type"
           class="rounded border px-2 py-1 text-xs"
           @change="$emit('change')"
         >
-          <option value="combined">综合</option>
-          <option value="departure">离场</option>
-          <option value="arrival">进场</option>
+          <option value="combined">{{ t("station.type_combined") }}</option>
+          <option value="departure">{{ t("station.type_departure") }}</option>
+          <option value="arrival">{{ t("station.type_arrival") }}</option>
         </select>
       </label>
     </div>
 
     <div class="grid grid-cols-3 gap-2">
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">机场名（语音念这个）</span>
+        <span class="text-xs opacity-60">{{ t("station.name") }}</span>
         <!-- 语音念全名，文字稿留 ICAO：念 "Z S P D" 听着像在拼写。 -->
         <input
           v-model="station.name"
@@ -87,19 +90,20 @@ function removePreset() {
         />
       </label>
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">播报语言</span>
+        <span class="text-xs opacity-60">{{ t("station.voice_language") }}</span>
         <select
           v-model="station.voice_language"
           class="rounded border px-2 py-1 text-xs"
           @change="$emit('change')"
         >
-          <option value="en">英文</option>
-          <option value="zh">中文</option>
-          <option value="both">中英双语</option>
+          <!-- 值是播给飞行员的内容语言，和界面语言无关；只有这几个字跟着界面翻。 -->
+          <option value="en">{{ t("station.voice_en") }}</option>
+          <option value="zh">{{ t("station.voice_zh") }}</option>
+          <option value="both">{{ t("station.voice_both") }}</option>
         </select>
       </label>
       <div class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">情报字母范围</span>
+        <span class="text-xs opacity-60">{{ t("station.code_range") }}</span>
         <!-- 离场和进场分用不同字母段，避免飞行员把两份通播搞混。
              允许跨 Z 回绕，例如 Y..B。 -->
         <div class="flex items-center gap-1">
@@ -124,19 +128,19 @@ function removePreset() {
 
     <div v-if="chineseShown" class="grid grid-cols-2 gap-2">
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">中文台名</span>
+        <span class="text-xs opacity-60">{{ t("station.chinese_name") }}</span>
         <input
           v-model="station.chinese_name"
-          placeholder="上海浦东"
+          :placeholder="t('station.chinese_name_hint')"
           class="rounded border px-2 py-1 text-xs"
           @change="$emit('change')"
         />
       </label>
       <label class="flex flex-col gap-1">
-        <span class="text-xs opacity-60">中文跑道（席位默认）</span>
+        <span class="text-xs opacity-60">{{ t("station.chinese_runway") }}</span>
         <input
           v-model="station.chinese_runway"
-          placeholder="三五左"
+          :placeholder="t('station.chinese_runway_hint')"
           class="rounded border px-2 py-1 text-xs"
           @change="$emit('change')"
         />
@@ -144,7 +148,7 @@ function removePreset() {
     </div>
 
     <div class="flex items-center gap-2 border-t pt-3">
-      <span class="text-xs opacity-60">构型</span>
+      <span class="text-xs opacity-60">{{ t("station.presets") }}</span>
       <select
         :value="presetName"
         class="rounded border px-2 py-1 text-xs"
@@ -158,13 +162,15 @@ function removePreset() {
         class="w-28 rounded border px-2 py-1 text-xs"
         @change="$emit('change')"
       />
-      <button class="rounded border px-2 py-1 text-xs" @click="addPreset">新增</button>
+      <button class="rounded border px-2 py-1 text-xs" @click="addPreset">
+        {{ t("station.add_preset") }}
+      </button>
       <button
         class="rounded border px-2 py-1 text-xs"
         :disabled="station.presets.length <= 1"
         @click="removePreset"
       >
-        删除
+        {{ t("station.remove_preset") }}
       </button>
     </div>
 
