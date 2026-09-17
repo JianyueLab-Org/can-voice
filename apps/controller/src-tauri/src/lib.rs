@@ -783,6 +783,7 @@ pub fn run() {
     let saved: Settings = can_voice_settings::Store::for_product("audio-for-can").load();
     can_voice_log::init(
         "audio-for-can",
+        env!("CARGO_PKG_VERSION"),
         std::env::args().any(|a| a == "--debug") || saved.debug_log,
     );
 
