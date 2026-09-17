@@ -168,6 +168,11 @@
     "inspect": "Check",
     "install": "Install",
     "reinstall": "Reinstall",
-    "installed": "Installed: {path}. If X-Plane is running, restart it to load the plugin."
+    "installed": "Installed: {path}. If X-Plane is running, restart it to load the plugin.",
+    "manual": {
+      "explain": "You can also copy it by hand: this client was installed with a copy of the plugin, in the folder below. Copy {file} from it into {target} inside your X-Plane folder (create that folder if it does not exist). If X-Plane is installed somewhere that needs administrator rights, the system will ask; allow it. Restart X-Plane if it is running.",
+      "copy": "Copy path",
+      "copied": "Copied"
+    }
   }
 }

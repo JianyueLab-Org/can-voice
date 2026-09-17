@@ -24,6 +24,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": {
+      "../plugin/PI_XpcTraffic.py": "PythonPlugins/PI_XpcTraffic.py"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -168,6 +168,11 @@
     "inspect": "看一下",
     "install": "安装",
     "reinstall": "重新安装",
-    "installed": "装好了：{path}。X-Plane 正开着的话，要重启它才会加载。"
+    "installed": "装好了：{path}。X-Plane 正开着的话，要重启它才会加载。",
+    "manual": {
+      "explain": "也可以自己拷：这个客户端安装时就带着一份插件，在下面这个文件夹里。把里面的 {file} 拷进 X-Plane 目录下的 {target}（没有这个文件夹就新建一个）。X-Plane 装在要管理员权限的位置时，系统会问一句，确认即可；X-Plane 正开着的话要重启它。",
+      "copy": "复制路径",
+      "copied": "已复制"
+    }
   }
 }

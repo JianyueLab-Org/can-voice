@@ -14,8 +14,16 @@ const busy = ref(false);
  * 存成句子的话，切了语言那一行还停在旧语言上。
  */
 const outcome = ref<{ ok: true; path: string } | { ok: false; error: unknown } | null>(null);
+/**
+ * 安装目录里带着的那份插件所在的文件夹。装不进去时叫人自己去拷它。
+ * `null` = 没找到——那就不指，指着一个空文件夹比不指更糟。
+ */
+const bundledDir = ref<string | null>(null);
+const copied = ref(false);
+const bundledPath = ref<HTMLElement | null>(null);
 
 onMounted(async () => {
+  bundledDir.value = await invoke<string | null>("bundled_plugin_dir");
   installs.value = await invoke<string[]>("xplane_installs");
   await look(null);
   // Rust 那边已经把"记住的、再不然自动探测到的"那个挑出来了，照着回填，
@@ -35,9 +43,27 @@ function pick(path: string) {
   void look(path);
 }
 
+/**
+ * 把那个文件夹的路径放进剪贴板，让人贴进文件管理器的地址栏。
+ *
+ * 给的是文件夹不是文件：Windows 上把一个 `.py` 的路径贴进资源管理器，关联了
+ * Python 的机器会直接**运行**它。打开文件夹要多装一个 Tauri 插件，不值得。
+ */
+async function copyBundledDir() {
+  if (!bundledDir.value) return;
+  try {
+    await navigator.clipboard.writeText(bundledDir.value);
+    copied.value = true;
+  } catch {
+    // webview 不给剪贴板时退一步：把路径整段选中，让人自己按复制。
+    if (bundledPath.value) window.getSelection()?.selectAllChildren(bundledPath.value);
+  }
+}
+
 async function install() {
   busy.value = true;
   outcome.value = null;
+  copied.value = false;
   try {
     const path = await invoke<string>("install_plugin", { root: root.value });
     outcome.value = { ok: true, path };
@@ -116,5 +142,29 @@ async function install() {
     <p v-if="outcome" :class="outcome.ok ? 'text-green-700' : 'text-red-600'">
       {{ outcome.ok ? t("plugin.installed", { path: outcome.path }) : errorText(outcome.error) }}
     </p>
+
+    <!-- 装不进去多半是权限：X-Plane 在 Program Files 这类要管理员权限的地方，程序
+         自己提不了权，人可以。安装包里带着一份（tauri.conf.json 的 bundle.resources），
+         所以就地告诉他在哪、拷到哪，而不是叫他回下载页找那个 zip。 -->
+    <div
+      v-if="outcome && !outcome.ok && bundledDir"
+      class="flex flex-col gap-1 rounded border border-amber-400 px-2 py-1"
+    >
+      <p>
+        {{
+          t("plugin.manual.explain", {
+            file: "PI_XpcTraffic.py",
+            target: "Resources/plugins/PythonPlugins/",
+          })
+        }}
+      </p>
+      <div class="flex items-center gap-2">
+        <!-- 插值贴着标签写：两边留了空白，选中复制出来的路径就带着空格。 -->
+        <span ref="bundledPath" class="flex-1 select-all break-all font-mono opacity-80">{{ bundledDir }}</span>
+        <button class="shrink-0 rounded border px-2 py-0.5" @click="copyBundledDir">
+          {{ copied ? t("plugin.manual.copied") : t("plugin.manual.copy") }}
+        </button>
+      </div>
+    </div>
   </div>
 </template>
