@@ -108,9 +108,14 @@ pub fn bundled_copy_dir(resource_dir: &Path) -> Option<PathBuf> {
     dir.join(PLUGIN_NAME).is_file().then_some(dir)
 }
 
-/// 插件该落在哪。
+/// 插件该落在哪：`Resources/plugins/PythonPlugins/`，XPPython3 只看这里。
+///
+/// 这里曾经少了 `plugins` 那一层，写到 `Resources/PythonPlugins/`。XPPython3 从来
+/// 不去那里找，而 `inspect` 查的是同一个错地方，所以装完界面显示"最新"、天上
+/// 一架他机都没有——两边都自洽，没有任何东西会红。
 fn plugin_path(root: &Path) -> PathBuf {
     root.join("Resources")
+        .join("plugins")
         .join("PythonPlugins")
         .join(PLUGIN_NAME)
 }
@@ -437,7 +442,7 @@ mod tests {
         let root = fake_xplane("install");
         let path = install(&root).expect("install");
         assert!(
-            path.ends_with("Resources/PythonPlugins/PI_XpcTraffic.py"),
+            path.ends_with("Resources/plugins/PythonPlugins/PI_XpcTraffic.py"),
             "{path:?}"
         );
         assert_eq!(std::fs::read_to_string(&path).expect("read"), BUNDLED);
@@ -458,7 +463,7 @@ mod tests {
     #[test]
     fn an_older_protocol_version_is_reported_on_its_own() {
         let root = fake_xplane("mismatch");
-        let dir = root.join("Resources").join("PythonPlugins");
+        let dir = root.join("Resources").join("plugins").join("PythonPlugins");
         std::fs::create_dir_all(&dir).expect("dir");
         std::fs::write(dir.join(PLUGIN_NAME), "PROTOCOL_VERSION = 1\n# 旧的\n").expect("write");
 
