@@ -6,7 +6,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 	"github.com/JianyueLab-Org/can-voice/server/internal/router"
+	"github.com/JianyueLab-Org/can-voice/server/internal/tlscert"
 	"github.com/JianyueLab-Org/can-voice/server/internal/transport"
 )
 
@@ -28,7 +28,9 @@ func main() {
 		slog.Error("configuration is incomplete", "error", err)
 		os.Exit(1)
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.Cert, cfg.Key)
+	// 不是 tls.LoadX509KeyPair 一次：Let's Encrypt 续期只换磁盘上的文件，
+	// 读一次的话旧证书过期那天全网连不上，而进程还活着（#68）。
+	certs, err := tlscert.Load(cfg.Cert, cfg.Key)
 	if err != nil {
 		slog.Error("cannot load the TLS key pair", "error", err)
 		os.Exit(1)
@@ -49,7 +51,7 @@ func main() {
 	slog.Info("starting", "addr", cfg.Addr, "feed", cfg.FeedURL, "max_rx", cfg.MaxRX)
 	if err := transport.Serve(ctx, transport.Config{
 		Addr:      cfg.Addr,
-		TLS:       &tls.Config{Certificates: []tls.Certificate{cert}},
+		TLS:       certs.Config(),
 		PublicKey: cfg.PubKey,
 		MaxRX:     cfg.MaxRX,
 	}, r); err != nil && ctx.Err() == nil {

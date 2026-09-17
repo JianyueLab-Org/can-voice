@@ -240,6 +240,7 @@ func (s *connSet) closeAll(grace time.Duration) {
 
 // SelfSignedCert 仅供测试。生产用 Let's Encrypt 证书链——
 // 客户端因此不需要指纹固定，也就没有"证书换了则全网拒连"的风险（spec 6）。
+// 生产证书的续期由 internal/tlscert 跟上（#68）。
 func SelfSignedCert() (tls.Certificate, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
