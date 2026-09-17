@@ -1599,6 +1599,7 @@ pub fn run() {
     let saved: Settings = can_voice_settings::Store::for_product("xpc-for-can").load();
     can_voice_log::init(
         "xpc-for-can",
+        env!("CARGO_PKG_VERSION"),
         std::env::args().any(|a| a == "--debug") || saved.debug_log,
     );
 

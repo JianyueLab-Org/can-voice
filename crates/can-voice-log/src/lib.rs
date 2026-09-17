@@ -48,7 +48,11 @@ static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 ///
 /// `product` 是四个产品名之一（`audio-for-can` 等），它同时是目录名和文件名。
 /// 具体落在哪见 [`log_path`]。
-pub fn init(product: &str, debug: bool) -> Option<PathBuf> {
+///
+/// `version` 由调用方传 `env!("CARGO_PKG_VERSION")`。**不能在这里自己取**：在这个
+/// crate 里展开的是 can-voice-log 自己的版本（workspace 的 0.1.0），于是每一份
+/// 日志头都写着 0.1.0，和 [`upload`] 报的、更新检查比的那个版本对不上。
+pub fn init(product: &str, version: &str, debug: bool) -> Option<PathBuf> {
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::EnvFilter;
@@ -100,7 +104,7 @@ pub fn init(product: &str, debug: bool) -> Option<PathBuf> {
     // 日志写在哪。问一遍要一个来回，写进去零成本。
     tracing::info!(
         product,
-        version = env!("CARGO_PKG_VERSION"),
+        version,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         log = %path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into()),

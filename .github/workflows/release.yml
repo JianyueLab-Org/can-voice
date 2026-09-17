@@ -18,6 +18,16 @@
 # ——和现在的 can-audio 一模一样（它的测试说明里就写着这一句）。**这不是可以
 # 悄悄跳过的一步**：release 说明里必须写出来，否则第一批测试者会以为下载到了
 # 病毒。
+#
+# # 版本号只从 tag 来
+#
+# 打包前 `scripts/release-version.ts` 按 tag 改写四个客户端的 `Cargo.toml` /
+# `tauri.conf.json` / `package.json`，仓库里那个数只是本地构建的占位。此前 tag
+# 只用来打 git tag，和写进包里的版本没有任何联系——而 can-api 报给更新检查的是
+# tag，客户端比的是自己编译进去的那个数，两边对不上就永远提示有新版。
+#
+# 同一个 tag 也决定发不发成预发布：`vXX.YY.ZZ` 里 **`YY = 0` 是测试版**，
+# 其余是正式版。
 
 name: Release
 
@@ -27,7 +37,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "版本号，形如 v27.0.1"
+        description: "版本号，形如 v27.1.0（次版本为 0 的发成预发布）"
         required: true
       dry_run:
         description: "只打包不发布（验证打包这一段，不动 release）"
@@ -39,7 +49,33 @@ permissions:
   packages: read
 
 jobs:
+  # 八个构建开始之前先把 tag 校验一遍。形状不对的 tag（`v27.1`、`v27.1.0-rc1`）
+  # 在这里就红，而不是等 MSI 那一步在八个 runner 上各红一次。
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.parse.outputs.tag }}
+      version: ${{ steps.parse.outputs.version }}
+      prerelease: ${{ steps.parse.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # tag 经 env 进来，不直接展开进脚本：workflow_dispatch 的输入是手打的。
+      - id: parse
+        env:
+          TAG: ${{ github.event.inputs.version || github.ref_name }}
+        # 不写成 `bun … | tee -a`：没写 shell 时是 `bash -e`，不带 pipefail，
+        # 脚本拒绝了 tag 也会被 tee 的退出码盖掉，这一步照样绿。
+        run: |
+          bun scripts/release-version.ts "$TAG" > parsed.txt
+          cat parsed.txt
+          cat parsed.txt >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     name: ${{ matrix.app }} (${{ matrix.os == 'windows-latest' && 'windows' || 'linux' }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -78,6 +114,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # 必须在 tauri build 之前：`env!("CARGO_PKG_VERSION")` 是编译期展开的。
+      # shell 写明 bash，Windows 上默认是 pwsh，`"$TAG"` 在那边不是环境变量。
+      - name: 写入版本号
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: bun scripts/release-version.ts "$TAG" --write
+
       # tauri build 自己会调 beforeBuildCommand（也就是 bun run build），
       # 所以前端不用单独再跑一遍。
       - run: bun run tauri build
@@ -113,7 +157,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [version, build]
     # 试跑时只打包不发布——打包那一段和编译是两条不同的路（图标那次就是这么
     # 漏过去的），而验证它不该以切一个版本为代价。
     if: github.event.inputs.dry_run != 'true'
@@ -142,67 +186,28 @@ jobs:
           cp apps/xpc/plugin/PI_XpcTraffic.py plugin/PythonPlugins/
           cd plugin && zip -r ../out/xpc-for-can-xplane-plugin.zip PythonPlugins
           cd .. && ls -lh out/xpc-for-can-xplane-plugin.zip
+      # 测试版那一段只在预发布时带上。正式版的正文里写着"这是测试版"，和
+      # release 上那个 Latest 标记是互相打架的两句话。
+      - name: 拼 release 正文
+        env:
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          {
+            if [ "$PRERELEASE" = true ]; then
+              cat .github/release-notes/prerelease.md
+              echo
+            fi
+            cat .github/release-notes/common.md
+          } > release-body.md
+          cat release-body.md
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version || github.ref_name }}
-          # **beta 一律 prerelease。** 一个标着 Latest 的版本会被没在看群的人
-          # 当成正式版装上，而这几个包连一次真实服务端都没连过。
-          prerelease: true
+          tag_name: ${{ needs.version.outputs.tag }}
+          # **预发布与否跟着版本号走，不再一律 prerelease。** `YY = 0` 是测试版：
+          # 一个标着 Latest 的测试版会被没在看群的人当成正式版装上。反过来
+          # 正式版必须**不是** prerelease——can-api 取的是 `/releases/latest`，
+          # 它跳过预发布，一律 prerelease 的话切过去那天下载和更新检查都是 503。
+          prerelease: ${{ needs.version.outputs.prerelease }}
           generate_release_notes: true
           files: out/*
-          body: |
-            ## ⚠️ 这是测试版
-
-            这几个客户端**没有连过真实的语音服务端**，也**没有签名**。
-
-            - **Windows 会弹蓝色的"已保护你的电脑"**：点「更多信息」→「仍要运行」。
-              这是因为没有数字签名，不是杀毒软件误报。现在的 can-audio 也是这样。
-            - **和现在的 Mumble 客户端不通。** 两套语音是两个互不相通的系统，
-              同一个频率上不会互相听见。测试时请约好时间，或者同时开着老客户端守听。
-
-            ## 装哪一个
-
-            | 文件 | 给谁 |
-            |---|---|
-            | `audio-for-can` | 管制员的语音客户端 |
-            | `atis-for-can` | 做通播的 |
-            | `xpc-for-can` | X-Plane 飞行员 |
-            | `msfs-for-can` | MSFS 飞行员 |
-
-            **Windows**：`.exe` 是安装程序，`.msi` 是给有组策略的机器用的，
-            装一个就行。
-
-            **Linux**：`.deb` 给 Debian / Ubuntu，`.rpm` 给 Fedora / openSUSE，
-            `.AppImage` 给别的发行版（下载后 `chmod +x` 直接跑）。
-
-            > **AppImage 有 77 MB，deb 和 rpm 只有 5 MB。** 差别是 AppImage 把
-            > 整个 webkit 运行时打了进去；deb/rpm 用系统自己的。**发行版对得上
-            > 就装 deb 或 rpm**，不要因为 AppImage 看起来省事就下那个。
-
-            > **Linux 上的 PTT 只在 X11 下有效。** 全局按键监听走的是 Xlib，
-            > 而 Wayland 不允许一个普通程序监听全局按键——在 Wayland 会话里
-            > 键盘 PTT 不会响应，手柄 PTT 照常。界面上那个「按住发话」按钮
-            > 任何时候都能用。
-
-            还没有 macOS 版，缺的是签名和公证那一套。
-
-            ## 已知还不行的
-
-            - **MSFS 的他机用的是默认机模。** AI 机注入已经接上了，但机型对到
-              MSFS 机模标题这一步只认得第一方（Asobo）那十几种——别的机型会顺着
-              同族、同类机身退化，最后退到 C172。装了 FSLTL / AIG 这类 AI 机模包
-              的人可以自己写一张表放在
-              `%LOCALAPPDATA%\msfs-for-can\titles.json`，格式是
-              `{"A20N": "你的机模标题"}` 或者 `{"A20N": ["首选", "备选"]}`。
-            - **X-Plane 要单独装插件**才看得见他机（需要先装
-              [XPPython3](https://xppython3.readthedocs.io/)）：把
-              `PI_XpcTraffic.py` 放进 X-Plane 目录的 `Resources/plugins/PythonPlugins/`。
-              不装也能连上、能说话，只是天上是空的。
-              **装好的 xpc-for-can 自己就带着一份**：Windows 在安装目录的
-              `PythonPlugins\` 里，deb / rpm 在 `/usr/lib/xpc-for-can/PythonPlugins/`。
-              客户端里「本机 → X-Plane 他机插件」装不进去时（比如 X-Plane 在要
-              管理员权限的目录里），界面会给出这一份的确切位置。
-              也可以用下面的 `xpc-for-can-xplane-plugin.zip`，解压后把
-              `PythonPlugins/` 整个放进 `Resources/plugins/` 下面——用 AppImage 的
-              选这个，AppImage 里那份只在程序开着时才看得到。
-            - **通播不出声**：声音由服务端的机队播，客户端这边只做稿子。
+          body_path: release-body.md

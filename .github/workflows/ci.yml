@@ -281,3 +281,15 @@ jobs:
       # `build` 就是 `vue-tsc --noEmit && vite build`。类型检查那一半是重点：
       # 没有它，一个只在模板里出现的类型错误要等到有人打开那个窗口才发现。
       - run: bun run build
+
+  release-version:
+    name: release-version script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # 发版时它按 tag 改写四个客户端的清单文件。它的正则跟着那些文件的形状走，
+      # 形状一变就该在这里红，而不是在打 tag 之后八个打包 job 里红。
+      - run: bun test scripts

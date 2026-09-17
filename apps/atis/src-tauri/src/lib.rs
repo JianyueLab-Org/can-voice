@@ -1162,6 +1162,7 @@ pub fn run() {
     let saved: Settings = can_voice_settings::Store::for_product("atis-for-can").load();
     can_voice_log::init(
         "atis-for-can",
+        env!("CARGO_PKG_VERSION"),
         std::env::args().any(|a| a == "--debug") || saved.debug_log,
     );
 
