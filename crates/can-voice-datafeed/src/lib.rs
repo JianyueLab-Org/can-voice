@@ -334,4 +334,38 @@ mod tests {
         assert_eq!(r.get("2000").map(String::as_str), Some("CES2345"));
         assert_eq!(r.get("3000").map(String::as_str), Some("ZSPD_ATIS"));
     }
+
+    /// 上面几条吃的都是自己写的 JSON，只证明这个 crate 和自己一致。这一条吃
+    /// can-fsd 的**黄金文件**（逐字节副本，每天和上游对一次账，见
+    /// `.github/workflows/datafeed-golden.yml`）：can-fsd 把 `frequency`、`facility`、
+    /// `cid`、`rating` 改了名或改了类型，副本一同步这里就红。
+    #[test]
+    fn can_fsds_golden_datafeed_reads_the_way_the_client_expects() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../server/testdata/datafeed_golden.json"
+        );
+        let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let feed: Value = serde_json::from_slice(&raw).expect("parse the golden datafeed");
+
+        let lax = Position {
+            cid: "5158".into(),
+            callsign: "LAX_25_CTR".into(),
+            freq_khz: 126_525,
+            facility: 6,
+        };
+        assert_eq!(controller_for("5158", &feed), Some(lax.clone()));
+        let callsigns: Vec<_> = online_positions(&feed)
+            .into_iter()
+            .map(|p| p.callsign)
+            .collect();
+        assert_eq!(callsigns, ["ZSHA_CTR", "LAX_25_CTR"], "sorted by frequency");
+
+        assert_eq!(rating_for("5158", &feed), Some(10));
+        assert_eq!(rating_for("1000", &feed), Some(1));
+
+        let r = roster(&feed);
+        assert_eq!(r.get("5158").map(String::as_str), Some("LAX_25_CTR"));
+        assert_eq!(r.get("1012").map(String::as_str), Some("CCA5852"));
+    }
 }

@@ -261,22 +261,28 @@ mod tests {
             );
         }
     }
-    /// 拿仓库里那份**真实的 datafeed 样本**过一遍。
+    /// 拿 can-fsd 的 **datafeed 黄金文件**过一遍。
     ///
-    /// 它是 `server/internal/fsdfeed` 的测试夹具，也就是服务端那一侧读同一份
-    /// 文档时用的东西——所以这条测试同时钉住"两边读的是同一个契约"。
-    /// 自造的 JSON 证明不了这件事：它只证明我们和自己一致。
+    /// `server/testdata/datafeed_golden.json` 是 can-fsd 那一份的逐字节副本，每天
+    /// 对一次账（`.github/workflows/datafeed-golden.yml`），服务端的
+    /// `internal/fsdfeed` 读的也是它——所以这条测试钉住的是上游的契约，而不是
+    /// 我们以为的契约。自造的 JSON 证明不了这件事：它只证明我们和自己一致。
     #[test]
-    fn the_repositorys_real_datafeed_sample_parses() {
+    fn can_fsds_golden_datafeed_parses() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../server/testdata/datafeed_sample.json"
+            "/../../server/testdata/datafeed_golden.json"
         );
         let raw = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        let feed: serde_json::Value = serde_json::from_slice(&raw).expect("parse the sample");
+        let feed: serde_json::Value =
+            serde_json::from_slice(&raw).expect("parse the golden datafeed");
 
         let s = stations_from(&feed);
-        assert_eq!(s.len(), 1, "the sample carries one ATIS station: {s:?}");
+        assert_eq!(
+            s.len(),
+            1,
+            "the golden datafeed carries one ATIS station: {s:?}"
+        );
         assert_eq!(s[0].callsign, "ZSSS_ATIS");
         assert_eq!(s[0].freq_khz, 132_250);
         assert!(s[0].text.starts_with("ZSSS ATIS A 1200Z"), "{}", s[0].text);

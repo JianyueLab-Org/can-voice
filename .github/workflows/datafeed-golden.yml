@@ -1,0 +1,95 @@
+# server/testdata/datafeed_golden.json 和 can-fsd 上那一份逐字节对账（#38）。
+#
+# 那个文件是 can-fsd `internal/api/testdata/datafeed_golden.json` 的副本。三组测试吃它：
+# 语音服务端的射程过滤（server/internal/fsdfeed）、客户端的在线席位
+# （crates/can-voice-datafeed）、通播端的在线列表（crates/can-voice-atis）。
+#
+# **契约的方向是 can-fsd 定的。** 它的 datafeed_test 拿黄金文件去比线上的文档：往 datafeed
+# 里**加**字段是自由的，黄金文件不用动；**改名、改类型**就必须一起改黄金文件，不然 can-fsd
+# 自己先红。所以"那边的黄金文件变了"几乎就等于"这边读的东西可能坏了"。这个 job 把前一件事
+# 变成一次红灯；把副本同步过来之后，上面三组解析测试回答后一件。
+#
+# 以前这份副本叫 datafeed_sample.json，是照着抄的，没有任何东西去和上游对账——can-fsd 改了
+# 字段，这边不会红。
+#
+# 为什么单独一个 workflow、还要定时跑：can-fsd 改了东西，这个仓库里没有任何提交，ci.yml 那种
+# 跟着 push / PR 触发的 job 一次都不会跑。能发现上游变化的只有定时。push 和 PR 只在有人动了
+# 副本或者这个文件时跑，确认同步过来的就是上游那一份。
+#
+# GitHub 会停掉**公开仓库里 60 天没有任何活动**的定时 workflow，并发邮件说一声。收到那封
+# 邮件时在 Actions 页面把它重新打开，否则对账会安静地停掉。
+
+name: datafeed golden
+
+on:
+  schedule:
+    # 每天一次，UTC 01:23（东八区 09:23）。挑一个不整的分钟：整点的定时任务在 GitHub 那边
+    # 排队最挤，会被推迟甚至丢掉。
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - server/testdata/datafeed_golden.json
+      - .github/workflows/datafeed-golden.yml
+  pull_request:
+    paths:
+      - server/testdata/datafeed_golden.json
+      - .github/workflows/datafeed-golden.yml
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    name: 副本和 can-fsd main 上的黄金文件逐字节一致
+    runs-on: ubuntu-latest
+    steps:
+      # can-fsd 是私有仓库，GITHUB_TOKEN 只能读本仓库。CAN_FSD_DEPLOY_KEY 是挂在 can-fsd 上
+      # 的一把**只读** deploy key 的私钥。
+      #
+      # 先查它在不在：密钥是空的时候 actions/checkout 会退回用 GITHUB_TOKEN，报出来的是
+      # "repository not found"，一点也不像少了一个密钥。
+      - name: 读 can-fsd 的密钥在不在
+        env:
+          KEY: ${{ secrets.CAN_FSD_DEPLOY_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::没有 CAN_FSD_DEPLOY_KEY，读不了 can-fsd。它应该是 can-fsd 上一把只读 deploy key 的私钥，设在本仓库的 Actions secrets 里。从 fork 来的 PR 拿不到仓库密钥，这种情况下这一步必然失败。"
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: JianyueLab-Org/can-fsd
+          ref: main
+          ssh-key: ${{ secrets.CAN_FSD_DEPLOY_KEY }}
+          persist-credentials: false
+          path: .can-fsd
+          sparse-checkout: internal/api/testdata/datafeed_golden.json
+          sparse-checkout-cone-mode: false
+      # 按字节比，不按 JSON 语义比：这是一份副本，不是一份"大致相同"的东西。上游只是重新排版
+      # 也会红，同步一下就好——那比猜哪些差异无所谓要便宜。
+      - name: 逐字节比
+        run: |
+          upstream=.can-fsd/internal/api/testdata/datafeed_golden.json
+          local=server/testdata/datafeed_golden.json
+          commit=$(git -C .can-fsd rev-parse --short HEAD)
+          if cmp -s "$upstream" "$local"; then
+            echo "一致：can-fsd ${commit}"
+            exit 0
+          fi
+          echo "::error file=${local}::和 can-fsd main（${commit}）上的黄金文件不一致。"
+          diff -u "$local" "$upstream" || true
+          cat <<'EOF'
+
+          can-fsd 改了 datafeed 的黄金文件。同步副本，再跑一遍吃它的测试：
+
+            gh api repos/JianyueLab-Org/can-fsd/contents/internal/api/testdata/datafeed_golden.json \
+              -H 'Accept: application/vnd.github.raw' > server/testdata/datafeed_golden.json
+            go test ./server/internal/fsdfeed/
+            cargo test -p can-voice-datafeed -p can-voice-atis
+
+          测试还是绿的，说明改的是这边不读的字段，提交副本就好。红了就是这边的解析要跟着改。
+          EOF
+          exit 1

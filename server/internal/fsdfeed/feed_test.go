@@ -18,9 +18,18 @@ import (
 	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
 )
 
+// sample 读 can-fsd 自己的 datafeed 黄金文件。
+//
+// testdata/datafeed_golden.json 是 can-fsd internal/api/testdata/datafeed_golden.json
+// 的**逐字节副本**，不是照着抄的快照：.github/workflows/datafeed-golden.yml 每天拿它
+// 和 can-fsd main 上那一份比。can-fsd 那边改名、改类型就必须改黄金文件，于是那边一改
+// 这边的对账就红，同步过来之后这里的解析测试回答"读的东西坏没坏"。
+//
+// **别往这份文件里加东西**：想测 can-fsd 黄金文件里没有的情形，在测试里自己写 JSON，
+// 本文件里已经有很多这样的例子。
 func sample(t *testing.T) Snapshot {
 	t.Helper()
-	b, err := os.ReadFile("../../testdata/datafeed_sample.json")
+	b, err := os.ReadFile("../../testdata/datafeed_golden.json")
 	if err != nil {
 		t.Fatalf("read sample: %v", err)
 	}
