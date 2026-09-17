@@ -132,6 +132,10 @@ jobs:
       # **X-Plane 的插件也要发出去。** 说明里原本只写"见仓库里
       # apps/xpc/plugin/"——而仓库是私有的，测试者点不进去。装了 xpc-for-can
       # 的人会连上、能说话，然后看不见任何他机，也没有任何东西告诉他缺了什么。
+      #
+      # 装好的 xpc-for-can 里也带着一份（tauri.conf.json 的 bundle.resources），
+      # 这个 zip 照发：AppImage 里那份只在程序运行时挂着，而且想先装插件、再装
+      # 客户端的人也要拿得到。
       - name: 打包 X-Plane 插件
         run: |
           mkdir -p plugin/PythonPlugins
@@ -190,9 +194,15 @@ jobs:
               的人可以自己写一张表放在
               `%LOCALAPPDATA%\msfs-for-can\titles.json`，格式是
               `{"A20N": "你的机模标题"}` 或者 `{"A20N": ["首选", "备选"]}`。
-            - **X-Plane 要单独装插件**才看得见他机：下面的
-              `xpc-for-can-xplane-plugin.zip`，解压后把 `PythonPlugins/` 整个
-              放进 X-Plane 目录的 `Resources/plugins/` 下面（需要先装
-              [XPPython3](https://xppython3.readthedocs.io/)）。不装也能连上、
-              能说话，只是天上是空的。
+            - **X-Plane 要单独装插件**才看得见他机（需要先装
+              [XPPython3](https://xppython3.readthedocs.io/)）：把
+              `PI_XpcTraffic.py` 放进 X-Plane 目录的 `Resources/plugins/PythonPlugins/`。
+              不装也能连上、能说话，只是天上是空的。
+              **装好的 xpc-for-can 自己就带着一份**：Windows 在安装目录的
+              `PythonPlugins\` 里，deb / rpm 在 `/usr/lib/xpc-for-can/PythonPlugins/`。
+              客户端里「本机 → X-Plane 他机插件」装不进去时（比如 X-Plane 在要
+              管理员权限的目录里），界面会给出这一份的确切位置。
+              也可以用下面的 `xpc-for-can-xplane-plugin.zip`，解压后把
+              `PythonPlugins/` 整个放进 `Resources/plugins/` 下面——用 AppImage 的
+              选这个，AppImage 里那份只在程序开着时才看得到。
             - **通播不出声**：声音由服务端的机队播，客户端这边只做稿子。

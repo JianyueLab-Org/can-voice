@@ -1455,6 +1455,17 @@ fn install_plugin(app: tauri::State<'_, App>, root: String) -> Result<String, Me
     Ok(path.display().to_string())
 }
 
+/// 安装目录里带着的那份插件在哪个文件夹。没有就是 `None`。
+///
+/// 应用内安装写不进去时界面拿它给人指路。**位置在运行时问 Tauri**，不写死：
+/// Windows 是程序目录，deb/rpm 是 `/usr/lib/xpc-for-can`，AppImage 是运行时才挂上的
+/// 那个镜像，开发时又是 `target/debug`。
+#[tauri::command]
+fn bundled_plugin_dir(handle: tauri::AppHandle) -> Option<String> {
+    let resources = handle.path().resource_dir().ok()?;
+    install::bundled_copy_dir(&resources).map(|p| p.display().to_string())
+}
+
 // ——— 日志 ———
 
 /// 当前这份日志在哪。界面上显示给用户，让他知道要发的是哪个文件。
@@ -1615,6 +1626,7 @@ pub fn run() {
             xplane_installs,
             plugin_install_status,
             install_plugin,
+            bundled_plugin_dir,
             connect,
             disconnect,
             set_observer,

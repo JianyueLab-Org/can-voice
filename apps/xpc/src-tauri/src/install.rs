@@ -30,14 +30,32 @@
 use can_voice_i18n::Message;
 use std::path::{Path, PathBuf};
 
+/// 插件源码相对 `src-tauri/` 的位置。
+///
+/// **只写这一处。** 插件在包里有两份：[`BUNDLED`] 编进二进制，给应用内安装用；
+/// `tauri.conf.json` 的 `bundle.resources` 再放一份进安装目录，给装不进去、只能
+/// 自己拷的人用。两份各指一个源文件的话迟早一份更新了另一份没有，所以两边都从
+/// 这里取，测试钉着后者。写成宏而不是常量，是因为 `include_str!` 只收字面量。
+macro_rules! plugin_source {
+    () => {
+        "../plugin/PI_XpcTraffic.py"
+    };
+}
+
 /// 随包带的那份插件源码。
 ///
 /// `include_str!` 编进二进制，不从磁盘找：打包之后当前目录是用户双击时所在的
 /// 目录，不是程序目录，相对路径取不到——can-audio 那边为此专门处理了
 /// PyInstaller 的 `sys._MEIPASS`，而这里一开始就不需要那一步。
-pub const BUNDLED: &str = include_str!("../../plugin/PI_XpcTraffic.py");
+pub const BUNDLED: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", plugin_source!()));
 
 pub const PLUGIN_NAME: &str = "PI_XpcTraffic.py";
+
+/// 安装目录里那一份所在的文件夹名，相对 Tauri 的资源目录。
+///
+/// 和 XPPython3 那个文件夹同名，是为了让人拷的时候形状就是对的；发布页那个
+/// zip 里也是这个文件夹。
+pub const RESOURCE_DIR: &str = "PythonPlugins";
 
 /// 探测的结果。界面直接照着它画。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -78,6 +96,16 @@ pub struct Status {
 /// （没装 XPPython3 就没有），拿后者判断会把好目录判成坏的。
 pub fn is_xplane_root(root: &Path) -> bool {
     !root.as_os_str().is_empty() && root.join("Resources").join("plugins").is_dir()
+}
+
+/// 安装目录里带着的那一份在哪个文件夹。`resource_dir` 是 Tauri 的资源目录。
+///
+/// 应用内安装写不进去时（X-Plane 装在要管理员权限的地方）界面拿它给人指路：
+/// 程序自己提不了权，人可以。文件不在就是 `None`——指着一个空文件夹叫人去拷，
+/// 比不指更糟。
+pub fn bundled_copy_dir(resource_dir: &Path) -> Option<PathBuf> {
+    let dir = resource_dir.join(RESOURCE_DIR);
+    dir.join(PLUGIN_NAME).is_file().then_some(dir)
 }
 
 /// 插件该落在哪。
@@ -290,6 +318,52 @@ mod tests {
             protocol_version(BUNDLED),
             Some(can_voice_sim::bridge::PROTOCOL_VERSION),
         );
+    }
+
+    /// **安装目录里那一份和编进二进制的那一份必须是同一个文件。**
+    ///
+    /// 应用内安装写的是 `BUNDLED`；装不进去时界面叫人去拷的，是 `bundle.resources`
+    /// 放进安装目录的那一份。两者一旦指向不同的源文件，手拷的那个人迟早拿到一份
+    /// 协议号对不上的旧插件——而那种故障是静默丢帧、两端日志都干净。
+    #[test]
+    fn the_copy_in_the_install_directory_is_the_file_this_binary_embeds() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let conf: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("tauri.conf.json")).expect("tauri.conf.json"),
+        )
+        .expect("tauri.conf.json 不是合法的 JSON");
+        let resources = conf["bundle"]["resources"]
+            .as_object()
+            .expect("bundle.resources 要写成「源 → 目标」的映射，不然文件落在 _up_/ 底下");
+
+        let target = format!("{RESOURCE_DIR}/{PLUGIN_NAME}");
+        let sources: Vec<&str> = resources
+            .iter()
+            .filter(|(_, t)| t.as_str() == Some(target.as_str()))
+            .map(|(s, _)| s.as_str())
+            .collect();
+        assert_eq!(
+            sources,
+            vec![plugin_source!()],
+            "{target} 必须恰好来自 include_str! 编进去的那个文件"
+        );
+        assert_eq!(
+            std::fs::read_to_string(manifest.join(plugin_source!())).expect("read"),
+            BUNDLED
+        );
+    }
+
+    /// 资源目录里真有那个文件才给路径：界面不该叫人去一个空文件夹里拷东西。
+    #[test]
+    fn the_packaged_copy_is_pointed_at_only_when_it_is_there() {
+        let dir = scratch("resources");
+        assert_eq!(bundled_copy_dir(&dir), None);
+
+        std::fs::create_dir_all(dir.join(RESOURCE_DIR)).expect("dir");
+        assert_eq!(bundled_copy_dir(&dir), None, "只有文件夹、没有文件也不算");
+
+        std::fs::write(dir.join(RESOURCE_DIR).join(PLUGIN_NAME), BUNDLED).expect("write");
+        assert_eq!(bundled_copy_dir(&dir), Some(dir.join(RESOURCE_DIR)));
     }
 
     /// 版本号是**读**出来的，不是执行出来的：用户手上那份可能是改过的、甚至是坏的，
