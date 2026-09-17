@@ -9,6 +9,7 @@
 //! 它也是**唯一**需要知道"哪些事件改变了什么"的地方——前端只读这个结构。
 
 use can_voice_client::conn::{LinkState, RefusedReason};
+use can_voice_client::stack::TxBudget;
 use can_voice_client::Event;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,6 +66,15 @@ pub struct Snapshot {
     /// 吗"——三秒前有人说过话和二十分钟没动静是两种处境，而绿点灭了之后这两者
     /// 长得一模一样。
     pub last_talk: BTreeMap<u32, LastTalk>,
+    /// 服务端给这一条链路的发射上限（READY 的 `max_tx`）。没连上、或者掉了线是
+    /// `None`：上限写在票里、按人签，下一次 READY 可能是另一个数。
+    pub max_tx: Option<u32>,
+    /// 台面相对 `max_tx` 的处境：此刻声明几个 TX、在哪几格上再开会超额。
+    ///
+    /// **由 [`crate::Bridge::snapshot`] 在读的那一刻填**，事件从不碰它：它一半是台面
+    /// 的状态，存一份副本就会有两个真相，而对不上的那一刻界面提示的是一份过期的
+    /// 处境。`max_tx` 是 `None` 时它也是 `None`，界面据此什么都不说。
+    pub tx_budget: Option<TxBudget>,
 }
 
 /// 某个频率上最近一次通话。
@@ -92,6 +102,8 @@ impl Default for Snapshot {
             health: None,
             notices: Vec::new(),
             last_talk: BTreeMap::new(),
+            max_tx: None,
+            tx_budget: None,
         }
     }
 }
@@ -123,6 +135,7 @@ impl Snapshot {
     pub fn apply_at(&mut self, event: &Event, now_unix: u64) {
         match event {
             Event::State(state) => self.on_state(*state),
+            Event::Limits(limits) => self.max_tx = Some(limits.max_tx),
             Event::Refused { reason } => self.ended = Some(Ended::Refused(reason.clone())),
             Event::RxStart { freq_khz, speaker } => {
                 self.receiving
@@ -191,6 +204,10 @@ impl Snapshot {
 
     fn on_state(&mut self, state: LinkState) {
         self.link = state;
+        // 链路一掉，这一条的上限就不作数了。`Online` 不清：`Limits` 在它之前到。
+        if state != LinkState::Online {
+            self.max_tx = None;
+        }
         match state {
             LinkState::Online => {
                 // 一份新的声明正在路上，旧的拒绝清掉——留着会让界面一直显示
@@ -225,6 +242,7 @@ impl Snapshot {
 mod tests {
     use super::*;
     use can_voice_client::conn::RefusedReason;
+    use can_voice_client::session::Limits;
 
     fn online() -> Snapshot {
         let mut s = Snapshot::default();
@@ -510,6 +528,43 @@ mod tests {
         assert_eq!(s.notices[0].0, "range_unavailable");
     }
 
+    // ——— 服务端的发射上限 ———
+
+    /// **READY 的发射上限要走到快照里。** 核心库留住了它，却一路没人往上交，
+    /// 于是界面只能从"发射被拒"事后知道——正是 READY 把它带下来要躲开的次序。
+    #[test]
+    fn the_server_tx_limit_reaches_the_snapshot() {
+        let mut s = Snapshot::default();
+        assert_eq!(s.max_tx, None, "before READY there is no limit to show");
+
+        s.apply(&Event::Limits(Limits {
+            max_tx: 4,
+            max_rx: 32,
+        }));
+        s.apply(&Event::State(LinkState::Online));
+
+        assert_eq!(s.max_tx, Some(4));
+    }
+
+    /// 掉线就忘掉：下一次 READY 可能是另一个数（上限在票里，按人签），
+    /// 拿旧的去提示会说错话。
+    #[test]
+    fn losing_the_link_forgets_the_tx_limit() {
+        for state in [
+            LinkState::Reconnecting,
+            LinkState::Offline,
+            LinkState::Evicted,
+        ] {
+            let mut s = online();
+            s.apply(&Event::Limits(Limits {
+                max_tx: 4,
+                max_rx: 32,
+            }));
+            s.apply(&Event::State(state));
+            assert_eq!(s.max_tx, None, "{state:?} must forget the limit");
+        }
+    }
+
     #[test]
     fn health_is_kept_for_the_drop_line() {
         let mut s = online();
@@ -553,6 +608,9 @@ mod tests {
         assert_eq!(v["receiving"]["121800"], serde_json::json!([7]));
         // 二元数组，不是 {a,b}。
         assert_eq!(v["denied_xc"], serde_json::json!([[121_800, 124_550]]));
+        // 没收到上限就是 null，界面据此什么都不说。
+        assert_eq!(v["max_tx"], serde_json::Value::Null);
+        assert_eq!(v["tx_budget"], serde_json::Value::Null);
 
         // 三种终态各自的串——界面对它们说三句不同的话。
         for (ended, want) in [

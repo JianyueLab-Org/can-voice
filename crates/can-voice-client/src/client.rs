@@ -11,6 +11,7 @@
 //! 声明式 API 里没有那个可以记错的字段。
 
 use crate::conn::{self, LinkState, RefusedReason};
+use crate::session::Limits;
 use can_voice_proto::control::Sub;
 
 /// 建立连接所需的一切。
@@ -77,6 +78,11 @@ pub enum Event {
     /// **只在真的变了的时候发。** 每轮都发一遍会把事件流灌满，
     /// 而上层没法从中分辨"状态变了"和"心跳到了"。
     State(LinkState),
+    /// 这一条链路的限额，来自 READY。**每次连上都发一次，在 `State(Online)` 之前。**
+    ///
+    /// 上层要靠它在**声明之前**提示超额，而不是等 `TxDenied` 事后冒出来。掉线之后
+    /// 它就不作数了：上限写在票里、按人签，下一次 READY 可能是另一个数。
+    Limits(Limits),
     /// 握手被拒，带服务端给的原因。
     ///
     /// 这几个串是服务端**专门为客户端造的**：只把它们送进日志，等于协议里

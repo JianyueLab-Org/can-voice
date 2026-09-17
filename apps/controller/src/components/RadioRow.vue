@@ -21,6 +21,13 @@ const props = defineProps<{
   locked: boolean;
   /** 此刻允不允许发射。不在席位上时 TX / XC 是灰的。 */
   transmitAllowed: boolean;
+  /**
+   * 打开这一行的 TX / XC 会不会让发射频率超过服务端的上限。Rust 算好的——
+   * 开 XC 会顺带开 TX，这里不数。
+   */
+  overTxLimit: { tx: boolean; xc: boolean };
+  /** 服务端的发射上限，提示里那句话要用。`null` = 没连上。 */
+  maxTx: number | null;
   /** 这一行此刻正在发射（TX 开着而且 PTT 按着）。 */
   transmitting: boolean;
   /** 这个频率上最近一次通话。`null` = 从挂上到现在没人在这里说过话。 */
@@ -38,6 +45,19 @@ defineEmits<{
 }>();
 
 const mhz = (khz: number) => (khz / 1000).toFixed(3);
+
+/**
+ * 这一格按下去会超额。**只提示，不拦**：拦下来的开关和"不在席位上"长得一模一样，
+ * 而先关哪一个腾出位置是管制员的判断，界面替他选不出来。
+ */
+const overLimit = (s: "rx" | "tx" | "xc") =>
+  s !== "rx" && props.transmitAllowed && props.maxTx !== null && props.overTxLimit[s];
+
+function switchTitle(s: "rx" | "tx" | "xc"): string {
+  if (s !== "rx" && !props.transmitAllowed) return t("radio.no_transmit");
+  if (overLimit(s)) return t("radio.over_tx_limit_tip", { max: props.maxTx ?? 0 });
+  return "";
+}
 
 /**
  * 最后一次通话是什么时候。
@@ -91,8 +111,11 @@ const lastTalkText = (talk: { at: number } | null) =>
       v-for="s in (['rx', 'tx', 'xc'] as const)"
       :key="s"
       class="flex items-center gap-1 uppercase"
-      :class="s !== 'rx' && !transmitAllowed ? 'opacity-40' : ''"
-      :title="s !== 'rx' && !transmitAllowed ? t('radio.no_transmit') : ''"
+      :class="[
+        s !== 'rx' && !transmitAllowed ? 'opacity-40' : '',
+        overLimit(s) ? 'text-amber-600' : '',
+      ]"
+      :title="switchTitle(s)"
     >
       <input
         type="checkbox"

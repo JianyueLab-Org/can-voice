@@ -33,7 +33,9 @@
     "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
     "other": "{kind}: {reason}",
     "other_on": "{kind} · {frequency}: {reason}",
-    "xc_denied": "These cross-couples did not take effect: {pairs}"
+    "xc_denied": "These cross-couples did not take effect: {pairs}",
+    "tx_at_limit": "Transmit is on for as many frequencies as the server allows ({max}); turning on another TX or XC will be denied.",
+    "tx_over_limit": "Transmit is on for {declared} frequencies, but the server allows only {max} this time; the extra ones will be denied, so turn off the ones you do not need."
   },
   "duty": {
     "off": "You are not staffing any position right now (the data feed does not list you). TX is off, but you can still hear. Once you log on in EuroScope, this updates within a minute.",
@@ -61,6 +63,7 @@
     "staffed_tip": "This is the frequency of the position you are staffing",
     "receiving": "Receiving",
     "no_transmit": "You are not staffing any position right now, so you cannot transmit",
+    "over_tx_limit_tip": "Turning this on would take transmit past the server's limit of {max} frequencies, and it would be denied",
     "unmute_tip": "Muted; click to unmute",
     "mute_tip": "Mute this frequency (still receives packets, light still shows)",
     "last_talk": "Last transmission",

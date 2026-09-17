@@ -68,6 +68,23 @@ interface Snapshot {
   notices: [string, number, string][];
   /** 每个频率上最近一次通话。键是频率（kHz）的十进制写法。 */
   last_talk: Record<string, { speaker: number; at: number }>;
+  /** 服务端给这条链路的发射上限。没连上、掉了线是 `null`。 */
+  max_tx: number | null;
+  /**
+   * 台面相对 `max_tx` 的处境。`max_tx` 是 `null` 时它也是，界面据此什么都不说。
+   *
+   * **哪一格会超额是 Rust 算好的**：开 XC 会顺带开 TX，这里自己数就得把耦合规则
+   * 再写一遍。
+   */
+  tx_budget: {
+    max_tx: number;
+    /** 此刻会声明几个 TX。可以已经超过上限：重连时整份重放的台面可能比这一次的上限多。 */
+    declared: number;
+    /** 在这些频率上打开 TX 会超额。 */
+    tx_over: number[];
+    /** 在这些频率上打开 XC 会超额。 */
+    xc_over: number[];
+  } | null;
 }
 
 /** 设置对话框开没开。 */
@@ -229,6 +246,14 @@ function rxDenied(khz: number): boolean {
   return snap.value?.denied_rx?.includes(khz) ?? false;
 }
 
+/** 发射上限的处境。没连上就是 `null`。 */
+const txBudget = computed(() => snap.value?.tx_budget ?? null);
+/** 这一行再开 TX / XC 会不会超额。照着 Rust 给的单子查，不自己数。 */
+function overTxLimit(khz: number) {
+  const b = txBudget.value;
+  return { tx: b?.tx_over.includes(khz) ?? false, xc: b?.xc_over.includes(khz) ?? false };
+}
+
 /**
  * 服务端通知的人话。
  *
@@ -317,6 +342,22 @@ async function act(name: string, args: Record<string, unknown>) {
       {{ t("notice.xc_denied", { pairs: deniedPairs.join(t("common.separator.list")) }) }}
     </p>
 
+    <!-- 发射频率数对着服务端的上限。**要在声明之前说**：超额时服务端只是把多出来的
+         拒掉，只靠"发射被拒"的话，人是按下去之后才知道的。
+         超额那一句是给重连的：存下来的台面整份重放，而这一次的上限可能比存的时候低。 -->
+    <p
+      v-if="txBudget && txBudget.declared > txBudget.max_tx"
+      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+    >
+      {{ t("notice.tx_over_limit", { declared: txBudget.declared, max: txBudget.max_tx }) }}
+    </p>
+    <p
+      v-else-if="txBudget && txBudget.declared === txBudget.max_tx"
+      class="rounded border border-neutral-400 px-3 py-2 text-xs opacity-70"
+    >
+      {{ t("notice.tx_at_limit", { max: txBudget.max_tx }) }}
+    </p>
+
     <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->
     <p
       v-if="connected && !onDuty"
@@ -374,6 +415,8 @@ async function act(name: string, args: Record<string, unknown>) {
         :last-talk="lastTalk(r.freq_khz)"
         :compact="compact"
         :transmit-allowed="mayTransmit"
+        :over-tx-limit="overTxLimit(r.freq_khz)"
+        :max-tx="txBudget?.max_tx ?? null"
         @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
       />
       <p v-if="!radios.length" class="py-6 text-center text-xs opacity-50">

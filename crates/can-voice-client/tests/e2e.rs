@@ -205,14 +205,23 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
     });
 
     let mut denied_tx = Vec::new();
+    // READY 里的上限要作为一个事件交上来：界面在声明**之前**提示超额，靠的就是它。
+    let mut limits = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline && denied_tx.len() < 2 {
-        if let Ok(Ok(can_voice_client::Event::TxDenied { freq_khz, .. })) =
-            tokio::time::timeout(Duration::from_millis(300), events.recv()).await
-        {
-            denied_tx.push(freq_khz);
+        match tokio::time::timeout(Duration::from_millis(300), events.recv()).await {
+            Ok(Ok(can_voice_client::Event::TxDenied { freq_khz, .. })) => {
+                denied_tx.push(freq_khz);
+            }
+            Ok(Ok(can_voice_client::Event::Limits(l))) => limits = Some(l),
+            _ => {}
         }
     }
+    assert_eq!(
+        limits.map(|l| l.max_tx),
+        Some(8),
+        "the max_tx from READY must reach the event stream"
+    );
     assert_eq!(
         denied_tx.len(),
         2,
