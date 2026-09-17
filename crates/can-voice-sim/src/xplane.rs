@@ -570,6 +570,10 @@ pub async fn discover(timeout: Duration) -> Option<SocketAddr> {
                     gather_until.get_or_insert(tokio::time::Instant::now() + BEACON_GATHER);
                 }
             }
+            // 这个 socket 只收不发，按理碰不到 Windows 那个 reset；真碰到了，
+            // 它说的也只是"这一下没收到"，而超时在这里的意思是窗口到头——
+            // 所以回去接着等到窗口到头，而不是提前收工。
+            Ok(Err(e)) if crate::udp::counts_as_timeout(&e) => continue,
             Ok(Err(_)) | Err(_) => break,
         }
     }
@@ -630,8 +634,46 @@ async fn serve(state: &Arc<Mutex<LinkState>>, address: SocketAddr) -> Option<Soc
     let Ok(socket) = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).await else {
         return None;
     };
+    subscribe_and_receive(state, &Peer { socket, address }).await
+}
+
+/// [`serve`] 对 socket 的全部用法：往 X-Plane 发，从 X-Plane 收。
+///
+/// 抽成 trait 只为了测试能喂进一个 `ConnectionReset`——那是 Windows 才有的
+/// 行为（见 [`crate::udp`]），macOS/Linux 上一个真 socket 造不出来。
+trait Wire {
+    fn address(&self) -> SocketAddr;
+    async fn send(&self, packet: &[u8]) -> std::io::Result<()>;
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize>;
+}
+
+struct Peer {
+    socket: UdpSocket,
+    address: SocketAddr,
+}
+
+impl Wire for Peer {
+    fn address(&self) -> SocketAddr {
+        self.address
+    }
+
+    async fn send(&self, packet: &[u8]) -> std::io::Result<()> {
+        self.socket.send_to(packet, self.address).await.map(|_| ())
+    }
+
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.recv(buf).await
+    }
+}
+
+/// [`serve`] 的正文，socket 换成了 [`Wire`]。
+async fn subscribe_and_receive(
+    state: &Arc<Mutex<LinkState>>,
+    wire: &impl Wire,
+) -> Option<SocketAddr> {
+    let address = wire.address();
     for packet in subscribe_all(UPDATE_RATE) {
-        if socket.send_to(&packet, address).await.is_err() {
+        if wire.send(&packet).await.is_err() {
             return None;
         }
     }
@@ -650,11 +692,11 @@ async fn serve(state: &Arc<Mutex<LinkState>>, address: SocketAddr) -> Option<Soc
         if quiet > give_up {
             // 退订一下再走，免得 X-Plane 一直往一个没人听的端口推。
             for packet in subscribe_all(0) {
-                let _ = socket.send_to(&packet, address).await;
+                let _ = wire.send(&packet).await;
             }
             return ever.then_some(address);
         }
-        match tokio::time::timeout(STALE_AFTER, socket.recv(&mut buf)).await {
+        match tokio::time::timeout(STALE_AFTER, wire.recv(&mut buf)).await {
             Ok(Ok(n)) => {
                 let values = parse_values(&buf[..n]);
                 if values.is_empty() {
@@ -668,10 +710,139 @@ async fn serve(state: &Arc<Mutex<LinkState>>, address: SocketAddr) -> Option<Soc
                     state.values.insert(name, value);
                 }
             }
-            Ok(Err(_)) => return ever.then_some(address),
-            Err(_) => {
+            // Windows 上前面几个订阅包撞上还没打开的端口时，收到的是它们的
+            // ICMP 回声，而后面的包可能已经订上了。按超时算，别把一条正在
+            // 起来的链路拆掉——见 `crate::udp`。
+            Ok(Err(e)) if !crate::udp::counts_as_timeout(&e) => return ever.then_some(address),
+            Ok(Err(_)) | Err(_) => {
                 state.lock().expect("link").connected = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::io;
+
+    /// 照剧本回话的 X-Plane：剧本念完就再也不说话。
+    struct Scripted {
+        replies: Mutex<VecDeque<io::Result<Vec<u8>>>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl Scripted {
+        fn new(replies: Vec<io::Result<Vec<u8>>>) -> Self {
+            Self {
+                replies: Mutex::new(replies.into()),
+                sent: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// 发出去的包里有几个是退订（rate = 0）。
+        fn unsubscribes(&self) -> usize {
+            self.sent
+                .lock()
+                .expect("sent")
+                .iter()
+                .filter(|p| p[5..9] == 0i32.to_le_bytes())
+                .count()
+        }
+    }
+
+    impl Wire for Scripted {
+        fn address(&self) -> SocketAddr {
+            SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT))
+        }
+
+        async fn send(&self, packet: &[u8]) -> io::Result<()> {
+            self.sent.lock().expect("sent").push(packet.to_vec());
+            Ok(())
+        }
+
+        async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+            let next = self.replies.lock().expect("replies").pop_front();
+            match next {
+                Some(Ok(packet)) => {
+                    buf[..packet.len()].copy_from_slice(&packet);
+                    Ok(packet.len())
+                }
+                Some(Err(e)) => Err(e),
+                None => std::future::pending().await,
+            }
+        }
+    }
+
+    fn reset() -> io::Result<Vec<u8>> {
+        Err(io::Error::from(io::ErrorKind::ConnectionReset))
+    }
+
+    /// 一个 RREF 回包：index 0（latitude）= 31。
+    fn latitude() -> io::Result<Vec<u8>> {
+        let mut p = b"RREF,".to_vec();
+        p.extend_from_slice(&0i32.to_le_bytes());
+        p.extend_from_slice(&31.0f32.to_le_bytes());
+        Ok(p)
+    }
+
+    /// 跑完一整轮，返回结果和用掉的（暂停时钟上的）时间。
+    async fn run_to_end(wire: &Scripted) -> (Option<SocketAddr>, Duration) {
+        let state = Arc::new(Mutex::new(LinkState::default()));
+        let started = tokio::time::Instant::now();
+        let got = subscribe_and_receive(&state, wire).await;
+        (got, started.elapsed())
+    }
+
+    /// **X-Plane 读盘时最典型的一幕。** 27 个订阅包，前几个撞上还没打开的端口，
+    /// 后面的赶上了——X-Plane 已经开始推数据，而 Windows 先把前面那几个 ICMP
+    /// 报成 `ConnectionReset`。把它当成致命错误的话，一个其实订上了的链路被
+    /// 拆掉，而且**不退订**：X-Plane 一直往一个已经关掉的端口推。
+    #[tokio::test(start_paused = true)]
+    async fn a_connection_reset_does_not_tear_down_a_subscription_that_took() {
+        let wire = Scripted::new(vec![reset(), reset(), latitude()]);
+        let state = Arc::new(Mutex::new(LinkState::default()));
+
+        let got = subscribe_and_receive(&state, &wire).await;
+
+        assert_eq!(got, Some(wire.address()), "the address did give data");
+        assert_eq!(
+            state.lock().expect("link").values.get("latitude"),
+            Some(&31.0)
+        );
+        assert_eq!(
+            wire.unsubscribes(),
+            DATAREFS.len(),
+            "it left by unsubscribing"
+        );
+    }
+
+    /// X-Plane 没开：只有 reset，没有数据。它和一片寂静必须是**同一个结局**——
+    /// 等满同样久、同样退订、同样报"这个地址没给过数据"。
+    #[tokio::test(start_paused = true)]
+    async fn nothing_but_connection_resets_ends_exactly_like_silence() {
+        let silent = Scripted::new(Vec::new());
+        let refused = Scripted::new((0..DATAREFS.len()).map(|_| reset()).collect());
+
+        let (silent_got, silent_took) = run_to_end(&silent).await;
+        let (refused_got, refused_took) = run_to_end(&refused).await;
+
+        assert_eq!(silent_got, None);
+        assert_eq!(refused_got, None);
+        assert!(refused_took > DISCOVER_TIMEOUT, "{refused_took:?}");
+        assert_eq!(refused_took, silent_took);
+        assert_eq!(refused.unsubscribes(), silent.unsubscribes());
+    }
+
+    /// 别的错误照旧：立刻放弃，不等。
+    #[tokio::test(start_paused = true)]
+    async fn any_other_receive_error_still_ends_the_subscription_at_once() {
+        let wire = Scripted::new(vec![Err(io::Error::from(io::ErrorKind::PermissionDenied))]);
+
+        let (got, took) = run_to_end(&wire).await;
+
+        assert_eq!(got, None);
+        assert_eq!(took, Duration::ZERO);
     }
 }

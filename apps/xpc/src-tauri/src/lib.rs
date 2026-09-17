@@ -939,8 +939,13 @@ fn spawn_plugin_status_reader(slot: Arc<Mutex<Option<(std::time::Instant, bridge
         };
         let mut buf = [0u8; 2048];
         loop {
-            let Ok((n, _)) = socket.recv_from(&mut buf).await else {
-                return;
+            let n = match socket.recv_from(&mut buf).await {
+                Ok((n, _)) => n,
+                // Windows 的 ICMP 回声（见 `can_voice_sim::udp`）不说明插件或这个
+                // 端口出了什么事。这条循环没有超时，"超时"在这里就是接着听——
+                // 返回的话，这个客户端开着的整段时间里插件都显示成没装。
+                Err(e) if can_voice_sim::udp::counts_as_timeout(&e) => continue,
+                Err(_) => return,
             };
             if let Some(status) = bridge::decode_status(&buf[..n]) {
                 *slot.lock().expect("plugin") = Some((std::time::Instant::now(), status));

@@ -19,6 +19,7 @@ pub mod controllers;
 pub mod csl;
 pub mod feed;
 pub mod traffic;
+pub mod udp;
 pub mod xplane;
 
 pub mod inject;
