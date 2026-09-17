@@ -11,6 +11,7 @@ rust-version.workspace = true
 # 而通播制作客户端连 PTT 都没有。理由和 can-voice-settings 拆出来时一模一样。
 
 [dependencies]
+can-voice-i18n = { path = "../can-voice-i18n" }
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

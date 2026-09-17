@@ -14,6 +14,7 @@
 //! 界面要能说出某一项此刻被环境变量盖着（[`fields`]）——否则改了没反应，
 //! 看起来就是设置坏了。
 
+use can_voice_i18n::Message;
 use serde::{Deserialize, Serialize};
 
 /// can-api。
@@ -129,23 +130,28 @@ pub fn fsd_target(
     (host, port)
 }
 
-/// 一个 URL 该长什么样。
-fn url_problem(label: &str, value: &str) -> Option<String> {
+/// 一个 URL 缺不缺协议头。
+fn url_lacks_scheme(value: &str) -> bool {
     let v = value.trim();
-    if v.is_empty() || v.starts_with("https://") || v.starts_with("http://") {
-        return None;
-    }
-    Some(format!("{label}要以 http:// 或 https:// 开头：{v}"))
+    !(v.is_empty() || v.starts_with("https://") || v.starts_with("http://"))
 }
 
-/// 一个 `主机:端口` 该长什么样。
-fn server_problem(label: &str, value: &str) -> Option<String> {
+/// 一个 `主机:端口` 哪里不对。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerShape {
+    /// 写成了 URL。
+    HasScheme,
+    /// 主机是空的、带空白，或者端口不是个数。
+    NotHostPort,
+}
+
+fn server_problem(value: &str) -> Option<ServerShape> {
     let v = value.trim();
     if v.is_empty() {
         return None;
     }
     if v.contains("://") {
-        return Some(format!("{label}只写主机和端口，不带 http://：{v}"));
+        return Some(ServerShape::HasScheme);
     }
     let (host, _) = host_port(v, 0);
     // 端口那一段：没有就行，有就得是个数。**不按字节切**——粘进来的东西后面
@@ -158,7 +164,7 @@ fn server_problem(label: &str, value: &str) -> Option<String> {
         None => port_fits(v.rsplit_once(':').map(|(_, p)| p)),
     };
     if host.is_empty() || host.contains(char::is_whitespace) || !port_ok {
-        return Some(format!("{label}要写成 主机:端口：{v}"));
+        return Some(ServerShape::NotHostPort);
     }
     None
 }
@@ -234,15 +240,51 @@ impl Endpoints {
         }
     }
 
-    /// 填得不对的地方，给人看的中文。空的表示都对。
-    pub fn problems(&self) -> Vec<String> {
+    /// 填得不对的地方。空的表示都对。
+    ///
+    /// **每一格、每一种错各有一个 key**，而不是一句"{格子}要……"加一个格子名：
+    /// 格子名本身也要翻译，塞进占位符里的是一个已经定了语言的词。
+    pub fn problems(&self) -> Vec<Message> {
+        // key 都以 `Message::new("…")` 字面量写出来：字典测试扫的就是这个形状。
+        let url = |message: Message, value: &str| {
+            url_lacks_scheme(value).then(|| message.with("value", value.trim()))
+        };
+        let server = |scheme: Message, form: Message, value: &str| {
+            server_problem(value).map(|shape| {
+                match shape {
+                    ServerShape::HasScheme => scheme,
+                    ServerShape::NotHostPort => form,
+                }
+                .with("value", value.trim())
+            })
+        };
         [
-            url_problem("can-api 地址", &self.api_origin),
-            server_problem("语音服务器", &self.voice_server),
-            server_problem("FSD 服务器", &self.fsd_server),
-            url_problem("数据源地址", &self.datafeed_url),
-            url_problem("气象源地址", &self.metar_url),
-            url_problem("通播配置地址", &self.atis_config_url),
+            url(
+                Message::new("error.endpoint.url_scheme.api_origin"),
+                &self.api_origin,
+            ),
+            server(
+                Message::new("error.endpoint.server_scheme.voice_server"),
+                Message::new("error.endpoint.server_form.voice_server"),
+                &self.voice_server,
+            ),
+            server(
+                Message::new("error.endpoint.server_scheme.fsd_server"),
+                Message::new("error.endpoint.server_form.fsd_server"),
+                &self.fsd_server,
+            ),
+            url(
+                Message::new("error.endpoint.url_scheme.datafeed_url"),
+                &self.datafeed_url,
+            ),
+            url(
+                Message::new("error.endpoint.url_scheme.metar_url"),
+                &self.metar_url,
+            ),
+            url(
+                Message::new("error.endpoint.url_scheme.atis_config_url"),
+                &self.atis_config_url,
+            ),
         ]
         .into_iter()
         .flatten()
@@ -438,7 +480,8 @@ mod tests {
         };
         let problems = e.problems();
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(problems[0].contains("http"), "{problems:?}");
+        assert_eq!(problems[0].key, "error.endpoint.url_scheme.api_origin");
+        assert_eq!(problems[0].values["value"], "api.example");
     }
 
     #[test]
@@ -448,6 +491,7 @@ mod tests {
             ..Endpoints::default()
         };
         assert_eq!(e.problems().len(), 1);
+        assert_eq!(e.problems()[0].key, "error.endpoint.server_form.fsd_server");
     }
 
     /// 服务器地址不该带协议头——`https://audio.example:64738` 会被当成主机名
@@ -459,6 +503,10 @@ mod tests {
             ..Endpoints::default()
         };
         assert_eq!(e.problems().len(), 1);
+        assert_eq!(
+            e.problems()[0].key,
+            "error.endpoint.server_scheme.voice_server"
+        );
     }
 
     /// 设置对话框里什么都可能被粘进来。检查一个地址不能把程序检查崩了。

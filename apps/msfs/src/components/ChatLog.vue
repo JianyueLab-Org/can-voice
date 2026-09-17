@@ -2,6 +2,7 @@
 import { nextTick, ref, watch } from "vue";
 import type { ChatMessage } from "../types";
 import { recipientText } from "../types";
+import { t } from "../i18n";
 
 const props = defineProps<{ messages: ChatMessage[] }>();
 const emit = defineEmits<{ (e: "reply", callsign: string): void }>();
@@ -22,7 +23,9 @@ watch(
 
 <template>
   <div ref="box" class="flex flex-col gap-1 overflow-auto text-xs">
-    <div v-if="!messages.length" class="py-6 text-center opacity-50">还没有文字消息</div>
+    <div v-if="!messages.length" class="py-6 text-center opacity-50">
+      {{ t("lists.no_messages") }}
+    </div>
     <div
       v-for="(m, i) in messages"
       :key="`${m.at}-${i}`"

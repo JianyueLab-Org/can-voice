@@ -14,6 +14,7 @@ members = [
     "crates/can-voice-app",
     "crates/can-voice-datafeed",
     "crates/can-voice-chime",
+    "crates/can-voice-i18n",
 ]
 
 # Tauri 应用不进 workspace。

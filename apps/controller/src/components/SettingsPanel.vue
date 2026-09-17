@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import LogPanel from "./LogPanel.vue";
+import { t } from "../i18n";
 
 /// 已经存下来的 CAN 号，寄日志时预填，省得再打一遍。
 const props = defineProps<{ cid?: string }>();
@@ -100,26 +101,26 @@ async function remove(i: number) {
 <template>
   <section class="flex flex-col gap-4 rounded border p-3 text-xs">
     <div class="flex flex-col gap-2">
-      <h2 class="font-semibold">音频设备</h2>
+      <h2 class="font-semibold">{{ t("audio.title") }}</h2>
       <label class="flex items-center gap-2">
-        <span class="w-16 opacity-70">麦克风</span>
+        <span class="w-16 opacity-70">{{ t("audio.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
-          <option value="">跟随系统默认</option>
+          <option value="">{{ t("audio.system_default") }}</option>
           <option v-for="d in inputs" :key="d" :value="d">{{ d }}</option>
         </select>
       </label>
       <label class="flex items-center gap-2">
-        <span class="w-16 opacity-70">耳机</span>
+        <span class="w-16 opacity-70">{{ t("audio.headset") }}</span>
         <select v-model="output" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
-          <option value="">跟随系统默认</option>
+          <option value="">{{ t("audio.system_default") }}</option>
           <option v-for="d in outputs" :key="d" :value="d">{{ d }}</option>
         </select>
       </label>
-      <p class="opacity-60">换设备立刻生效。</p>
+      <p class="opacity-60">{{ t("audio.applies_now") }}</p>
     </div>
 
     <div class="flex flex-col gap-2">
-      <h2 class="font-semibold">按键发话（PTT）</h2>
+      <h2 class="font-semibold">{{ t("ptt.title") }}</h2>
       <ul v-if="bindings.length" class="flex flex-col gap-1">
         <li
           v-for="(b, i) in bindings"
@@ -128,22 +129,23 @@ async function remove(i: number) {
         >
           <span class="font-mono">{{ b.token || "…" }}</span>
           <span v-if="b.unresolved" class="text-red-600">
-            这个绑定在本系统上认不出来，请重新录一次
+            {{ t("ptt.unresolved") }}
           </span>
-          <button class="ml-auto rounded border px-2" @click="remove(i)">删除</button>
+          <button class="ml-auto rounded border px-2" @click="remove(i)">
+            {{ t("ptt.delete") }}
+          </button>
         </li>
       </ul>
-      <p v-else class="opacity-60">还没有绑定。按下面的按钮录一个。</p>
+      <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
 
       <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
-        {{ capturing ? "按一下你要的键…" : "录制一个绑定" }}
+        {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
       </button>
 
       <p v-if="!keyboardOk" class="text-red-600">
-        本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。
-        请改用手柄，或者在 X11 会话下使用。
+        {{ t("ptt.wayland") }}
       </p>
-      <p v-if="!mouseOk" class="opacity-70">本系统不支持鼠标侧键作 PTT，请用键盘或手柄。</p>
+      <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
     </div>
 
     <LogPanel :cid="props.cid" />

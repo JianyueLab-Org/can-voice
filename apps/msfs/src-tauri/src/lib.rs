@@ -30,6 +30,7 @@
 
 use tauri::Manager;
 use can_voice_app::Bridge;
+use can_voice_i18n::Message;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
 use can_voice_sim::msfs::{SimConnectSource, SimConnectTraffic, SimVarSource, TrafficSink};
@@ -54,8 +55,9 @@ pub struct SimLink {
 struct SimState {
     connected: bool,
     snapshot: Option<Snapshot>,
-    /// 打不开时的原因，界面要说得出来。
-    problem: Option<String>,
+    /// 打不开时的原因，界面要说得出来。SimConnect 自己给的那句英文原样放在
+    /// `detail` 里——"DLL 太旧"和"模拟器没开"要做的事不一样，丢掉它就分不开了。
+    problem: Option<Message>,
 }
 
 impl SimLink {
@@ -74,7 +76,7 @@ impl SimLink {
         self.state.lock().expect("sim").connected
     }
 
-    pub fn problem(&self) -> Option<String> {
+    pub fn problem(&self) -> Option<Message> {
         self.state.lock().expect("sim").problem.clone()
     }
 
@@ -91,7 +93,11 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
             {
                 let mut state = state.lock().expect("sim");
                 state.connected = false;
-                state.problem = Some(e);
+                state.problem = Some(if can_voice_sim::msfs::available() {
+                    Message::new("simconnect.not_running").with("detail", e)
+                } else {
+                    Message::new("simconnect.unavailable")
+                });
             }
             // 模拟器没开是常态，不是错误。隔几秒再试一次。
             std::thread::sleep(Duration::from_secs(5));
@@ -111,7 +117,7 @@ fn sim_loop(state: Arc<Mutex<SimState>>) {
                 Err(e) => {
                     let mut state = state.lock().expect("sim");
                     state.connected = false;
-                    state.problem = Some(e);
+                    state.problem = Some(Message::new("simconnect.lost").with("detail", e));
                     break;
                 }
             }
@@ -408,7 +414,11 @@ impl App {
 
     /// 观察员手输的频率，没填是 `None`。
     fn manual_frequency(&self) -> Option<u32> {
-        Some(self.manual_frequency.load(std::sync::atomic::Ordering::Relaxed)).filter(|&k| k != 0)
+        Some(
+            self.manual_frequency
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+        .filter(|&k| k != 0)
     }
 
     /// 换一条频率循环上来，旧的先停掉。
@@ -445,7 +455,7 @@ pub struct View {
     pub sim_connected: bool,
     /// 连不上时的原因。**非 Windows 上就是"这个系统没有 SimConnect"**，
     /// 界面要直说，而不是让人对着一个永远灰着的灯猜。
-    pub sim_problem: Option<String>,
+    pub sim_problem: Option<Message>,
     pub sim: Option<Snapshot>,
     pub link: Option<can_voice_fsd::session::FsdState>,
     pub reason: Option<can_voice_fsd::session::Reason>,
@@ -563,12 +573,12 @@ async fn connect(
     aircraft: String,
     real_name: String,
     follow: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let saved = app.settings_snapshot();
     if saved.observer {
         return connect_observer(&app, &saved, cid, password, follow).await;
     }
-    can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.to_string())?;
+    can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.message())?;
 
     // 语音先连。凭据只在这里出现一次，换成一张短期票之后就不再需要——
     // 重连带的是票不是密码，所以一个卡在重连里的客户端不会把账号锁出语音。
@@ -583,7 +593,7 @@ async fn connect(
     app.voice
         .connect(voice_config(&saved, String::new()), &tokens)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.message())?;
 
     let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let fsd = pilot_client::connect(PilotConfig {
@@ -655,9 +665,9 @@ async fn connect_observer(
     cid: String,
     password: String,
     follow: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     use can_voice_app::observer;
-    let follow = observer::follow_callsign(&follow).map_err(|e| e.to_string())?;
+    let follow = observer::follow_callsign(&follow).map_err(|e| e.message())?;
     let tokens = TokenSource::new(
         &saved.endpoints.api_origin(),
         cid.clone(),
@@ -669,7 +679,7 @@ async fn connect_observer(
     app.voice
         .connect(voice_config(saved, follow.clone()), &tokens)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.message())?;
     app.replace_pump(Some(spawn_observer_pump(
         app.sim.clone(),
         app.voice.clone(),
@@ -706,13 +716,13 @@ fn settings(app: tauri::State<'_, App>) -> Settings {
 /// 开 / 关观察员模式。**连着的时候不许改**：身份是上线那一刻定的，一架正在网上
 /// 的飞机半路变成观察员，FSD 那条连接断不断都说不通。
 #[tauri::command]
-fn set_observer(app: tauri::State<'_, App>, on: bool) -> Result<(), String> {
+fn set_observer(app: tauri::State<'_, App>, on: bool) -> Result<(), Message> {
     set_observer_mode(&app, on)
 }
 
-fn set_observer_mode(app: &App, on: bool) -> Result<(), String> {
+fn set_observer_mode(app: &App, on: bool) -> Result<(), Message> {
     if app.is_online() {
-        return Err("连接期间不能切换观察员模式。先下线，再改。".into());
+        return Err(Message::new("problem.observer_locked"));
     }
     app.update_settings(|s| s.observer = on);
     Ok(())
@@ -724,12 +734,15 @@ fn set_observer_mode(app: &App, on: bool) -> Result<(), String> {
 /// 不对说出来——存进去一个错的数，语音会落在谁也不在的频率上，而界面看着
 /// 一切正常。回的是真正存下的那一份，界面照它回填。
 #[tauri::command]
-fn set_observer_frequency(app: tauri::State<'_, App>, text: String) -> Result<Option<u32>, String> {
+fn set_observer_frequency(
+    app: tauri::State<'_, App>,
+    text: String,
+) -> Result<Option<u32>, Message> {
     set_manual_frequency(&app, &text)
 }
 
-fn set_manual_frequency(app: &App, text: &str) -> Result<Option<u32>, String> {
-    let khz = can_voice_app::observer::parse_frequency(text).map_err(|e| e.to_string())?;
+fn set_manual_frequency(app: &App, text: &str) -> Result<Option<u32>, Message> {
+    let khz = can_voice_app::observer::parse_frequency(text).map_err(|e| e.message())?;
     app.manual_frequency
         .store(khz.unwrap_or(0), std::sync::atomic::Ordering::Relaxed);
     app.update_settings(|s| s.observer_frequency = khz);
@@ -914,16 +927,20 @@ fn build_view(app: &App) -> View {
 /// 返回 `Err` 而不是 `false`：发不出去有三种不同的原因（没上线、没写正文、
 /// 既没填收件人又没有 COM1 频率），而一个 `false` 让界面只能说"发送失败"。
 #[tauri::command]
-fn send_text(app: tauri::State<'_, App>, recipient: String, message: String) -> Result<(), String> {
+fn send_text(
+    app: tauri::State<'_, App>,
+    recipient: String,
+    message: String,
+) -> Result<(), Message> {
     let com1 = app.sim.snapshot().as_ref().and_then(voice_frequency);
     // 收件人和正文在**这里**定下来，然后原样交给 FSD 那一侧——聊天记录里
     // 那一行必须和真正发出去的那一包是同一个答案。
     let out = can_voice_sim::chat::outgoing(&recipient, &message, com1)
-        .ok_or_else(|| "没有可发的内容：正文是空的，或者既没填收件人也没有 COM1 频率".to_string())?;
+        .ok_or_else(|| Message::new("problem.nothing_to_send"))?;
     match app.fsd.lock().expect("fsd").as_ref() {
         Some(fsd) => fsd.send_text(out.to.clone(), out.text.clone()),
         // **没发出去就不记**：记了的话聊天区里那句话看起来发出去了。
-        None => return Err("还没上线".into()),
+        None => return Err(Message::new("problem.offline")),
     }
     record_sent(&app, out.to, out.text);
     Ok(())
@@ -1430,7 +1447,8 @@ async fn check_update(
         };
         // 上着网就是"正在工作"。观察员没有 FSD 链路，但他同样戴着耳机在听。
         let busy = app.link.lock().expect("link").is_some() || app.observing().is_some();
-        (s.skipped_update, busy) };
+        (s.skipped_update, busy)
+    };
     let origin = app.settings_snapshot().endpoints.api_origin();
     let Some(latest) = can_voice_update::check(&app.http, &origin, "msfs-for-can", env!("CARGO_PKG_VERSION")).await else {
         return Ok(None);
@@ -1453,7 +1471,7 @@ fn skip_update(app: tauri::State<'_, App>, version: String) {
 
 /// 用系统浏览器打开下载页。**绝不自动更新**：装不装、什么时候装是人决定的。
 #[tauri::command]
-fn open_download(url: String) -> Result<(), String> {
+fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
 }
 
@@ -1474,7 +1492,7 @@ async fn send_log(
     app: tauri::State<'_, App>,
     cid: String,
     password: String,
-) -> Result<(), String> {
+) -> Result<(), Message> {
     let origin = app.settings_snapshot().endpoints.api_origin();
     can_voice_log::upload(
         &app.http,
@@ -1544,11 +1562,12 @@ fn set_appearance(
 fn set_endpoints(
     app: tauri::State<'_, App>,
     endpoints: can_voice_settings::Endpoints,
-) -> Result<can_voice_settings::Endpoints, String> {
+) -> Result<can_voice_settings::Endpoints, Vec<Message>> {
     let endpoints = endpoints.trimmed();
     let problems = endpoints.problems();
     if !problems.is_empty() {
-        return Err(problems.join("；"));
+        // 整张清单交回去，前端按当前语言翻、按当前语言的句读连起来。
+        return Err(problems);
     }
     app.update_settings(|s| s.endpoints = endpoints.clone());
     Ok(endpoints)
@@ -1750,8 +1769,8 @@ mod tests {
     /// 把别的设置一起丢掉。
     #[test]
     fn a_settings_file_from_before_observer_mode_still_loads() {
-        let s: Settings = serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#)
-            .expect("parse");
+        let s: Settings =
+            serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#).expect("parse");
         assert_eq!(s.cid, "1234567");
         assert!(!s.observer);
         assert_eq!(s.follow, "");

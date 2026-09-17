@@ -20,17 +20,36 @@ use std::ops::RangeInclusive;
 /// 能订阅的频率，kHz。和两个飞行员端给 COM1 夹的是同一个波段。
 pub const BAND_KHZ: RangeInclusive<u32> = 118_000..=136_975;
 
-/// 填的东西哪里不对。**文字是给人看的**，界面原样显示。
+/// 填的东西哪里不对。`Display` 是给日志的英文，界面上的那句是 [`Problem::message`]。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Problem {
-    #[error("频率 {0} 读不出来，写成 121.800 这样")]
+    #[error("frequency {0:?} is not readable")]
     Unreadable(String),
-    #[error("频率 {0} 不在 118.000 – 136.975 之间")]
+    #[error("frequency {0:?} is outside 118.000-136.975")]
     OutOfBand(String),
-    #[error("观察员要填跟随的呼号：机长那架飞机的呼号，语音按它的位置算距离")]
+    #[error("an observer needs a callsign to follow")]
     NoFollow,
-    #[error("跟随的呼号 {0} 不合规矩：2–10 位，只能是字母、数字、- 或 _")]
+    #[error("follow callsign {0:?} is not a callsign: 2-10 chars of A-Z 0-9 - _")]
     BadFollow(String),
+}
+
+impl Problem {
+    /// 给人看的那一句（#29）。
+    pub fn message(&self) -> can_voice_i18n::Message {
+        use can_voice_i18n::Message;
+        match self {
+            Problem::Unreadable(value) => {
+                Message::new("error.observer.unreadable").with("value", value)
+            }
+            Problem::OutOfBand(value) => {
+                Message::new("error.observer.out_of_band").with("value", value)
+            }
+            Problem::NoFollow => Message::new("error.observer.no_follow"),
+            Problem::BadFollow(callsign) => {
+                Message::new("error.observer.bad_follow").with("callsign", callsign)
+            }
+        }
+    }
 }
 
 /// 手输的频率 → kHz。空的是 `Ok(None)`，意思是"跟随 COM1"。
@@ -145,11 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn the_error_names_what_was_typed() {
-        assert_eq!(
-            parse_frequency(" 12x ").unwrap_err().to_string(),
-            "频率 12x 读不出来，写成 121.800 这样"
-        );
+    fn the_message_names_what_was_typed() {
+        let m = parse_frequency(" 12x ").unwrap_err().message();
+        assert_eq!(m.key, "error.observer.unreadable");
+        assert_eq!(m.values["value"], "12x");
     }
 
     #[test]

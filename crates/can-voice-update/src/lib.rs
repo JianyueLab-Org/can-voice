@@ -19,6 +19,7 @@
 //! 后面还埋着第二个：顶层的 `client` 是**包名字符串**，每个构建在
 //! `clients[<name>]` 里。只修第一层的话，下一步就是在一个 `String` 上调 `.get()`。
 
+use can_voice_i18n::Message;
 use serde_json::Value;
 
 /// 一个可下载的新版本。
@@ -141,17 +142,18 @@ fn is_openable(url: &str) -> bool {
 ///
 /// **绝不自动更新**（这个模块的第三条规矩）：这里只是把人送到下载页，
 /// 装不装、什么时候装是他的事。
-pub fn open_in_browser(url: &str) -> Result<(), String> {
+pub fn open_in_browser(url: &str) -> Result<(), Message> {
     if !is_openable(url) {
-        return Err("下载地址不是一个 https 地址，没有打开".into());
+        return Err(Message::new("error.update.not_https"));
     }
-    let (program, args) = opener(std::env::consts::OS).ok_or("不知道这个系统怎么开浏览器")?;
+    let (program, args) =
+        opener(std::env::consts::OS).ok_or_else(|| Message::new("error.update.no_opener"))?;
     std::process::Command::new(program)
         .args(args)
         .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|e| format!("打不开浏览器：{e}"))
+        .map_err(|e| Message::new("error.update.open_failed").with("detail", e))
 }
 
 /// 自带 HTTP 客户端的版本，给手上没有现成 client 的调用方用。

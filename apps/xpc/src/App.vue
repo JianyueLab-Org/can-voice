@@ -10,7 +10,8 @@ import ChatLog from "./components/ChatLog.vue";
 import ControllerList from "./components/ControllerList.vue";
 import PilotPanel from "./components/PilotPanel.vue";
 import type { View } from "./types";
-import { mhz, khzText, xpdrText, voiceText } from "./types";
+import { mhz, khzText, xpdrText, voiceText, linkText } from "./types";
+import { errorText, t } from "./i18n";
 
 /** 设置对话框开没开。 */
 const showPrefs = ref(false);
@@ -28,7 +29,11 @@ const observer = ref(false);
 const follow = ref("");
 /** 手输频率框里的字。空的 = 跟随 COM1。 */
 const manualFrequency = ref("");
-const error = ref("");
+/**
+ * 上一次命令失败的原样错误，`null` = 没有。**存的是错误本身不是那句话**：
+ * 在模板里用 `errorText` 翻，切了语言跟着变。
+ */
+const error = ref<unknown>(null);
 const busy = ref(false);
 const view = ref<View | null>(null);
 const pressed = ref(false);
@@ -70,12 +75,12 @@ onMounted(async () => {
 onUnmounted(() => window.clearInterval(timer));
 
 async function guard(fn: () => Promise<unknown>) {
-  error.value = "";
+  error.value = null;
   busy.value = true;
   try {
     await fn();
   } catch (e) {
-    error.value = String(e);
+    error.value = e;
   } finally {
     busy.value = false;
     await refresh();
@@ -101,12 +106,12 @@ const disconnect = () => guard(() => invoke("disconnect"));
 /** 切换观察员模式。Rust 侧在连着的时候会拒绝——拒了就把勾选框扳回去。 */
 async function toggleObserver() {
   const on = observer.value;
-  error.value = "";
+  error.value = null;
   try {
     await invoke("set_observer", { on });
   } catch (e) {
     observer.value = !on;
-    error.value = String(e);
+    error.value = e;
   }
 }
 
@@ -116,14 +121,14 @@ async function toggleObserver() {
  * 看起来就像它生效了。
  */
 async function applyFrequency() {
-  error.value = "";
+  error.value = null;
   try {
     const khz = await invoke<number | null>("set_observer_frequency", {
       text: manualFrequency.value,
     });
     manualFrequency.value = boxText(khz);
   } catch (e) {
-    error.value = String(e);
+    error.value = e;
     const saved = await invoke<import("./types").Settings>("settings");
     manualFrequency.value = boxText(saved.observer_frequency);
   }
@@ -149,7 +154,7 @@ const send = () =>
     :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
   >
     <header class="flex flex-wrap items-center gap-3">
-      <h1 v-if="!compact" class="text-base font-semibold">X-Plane 飞行客户端</h1>
+      <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
       <!-- 模拟器连没连上要一眼看得见：没连上时下面所有数字都是空的，
            而"空的"和"零"在座舱里是两件事。 -->
       <span
@@ -172,16 +177,16 @@ const send = () =>
           class="h-2 w-2 rounded-full"
           :class="view?.plugin ? 'bg-green-500' : 'bg-neutral-300'"
         />
-        插件
+        {{ t("status.plugin") }}
         <span v-if="view?.plugin" class="opacity-60">{{ view.plugin.drawn }}</span>
       </span>
-      <span v-if="observing" class="text-xs opacity-70">观察员（不上网络）</span>
-      <span v-else-if="online" class="text-xs opacity-70">{{ view?.link }}</span>
+      <span v-if="observing" class="text-xs opacity-70">{{ t("status.observing") }}</span>
+      <span v-else-if="online" class="text-xs opacity-70">{{ linkText(view?.link) }}</span>
       <!-- 语音是另一条链路。不显示的话，被顶号或者声卡打不开时飞行员戴着耳机
            等人回话，而两边都不知道他听不见。 -->
       <span class="text-xs opacity-70">· {{ voiceText(view?.voice) }}</span>
       <span v-if="!mouseSupported && !compact" class="text-xs opacity-60">
-        本系统不支持鼠标侧键作 PTT
+        {{ t("status.no_mouse_ptt") }}
       </span>
       <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
       <WindowToggles class="ml-auto" @settings="showPrefs = true" />
@@ -189,8 +194,8 @@ const send = () =>
 
     <UpdateBanner v-if="!compact" />
 
-    <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
-      {{ error }}
+    <p v-if="error !== null" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
+      {{ errorText(error) }}
     </p>
 
     <!-- 观察员不上 FSD，天上本来就不会有他机：插件装没装和他无关，别拿这两条吓他。 -->
@@ -198,55 +203,53 @@ const send = () =>
       v-if="!observer && view?.plugin && !view.plugin.version_ok"
       class="rounded border border-red-400 px-3 py-2 text-xs text-red-600"
     >
-      X-Plane 插件的协议版本是 {{ view.plugin.version }}，和本客户端对不上。
-      它会丢掉每一帧，天上不会有任何飞机——到下面「本机 → X-Plane 他机插件」点一下重新安装。
+      {{ t("plugin.version_mismatch", { version: view.plugin.version }) }}
     </p>
     <p
       v-else-if="!observer && !view?.plugin"
       class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
     >
-      没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——
-      到下面「本机 → X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。
+      {{ t("plugin.not_heard") }}
     </p>
 
     <section v-if="!online" class="grid grid-cols-5 gap-2">
       <!-- 右座用。两个人要用各自的账号：同一个成员号第二次登录会把第一条顶掉。 -->
       <label class="col-span-5 flex flex-wrap items-center gap-2 text-xs">
         <input v-model="observer" type="checkbox" @change="toggleObserver" />
-        观察员模式（双人机组）
-        <span class="opacity-60">右座用：只连语音，不在网络上产生第二架飞机。两个人要用各自的账号。</span>
+        {{ t("login.observer_mode") }}
+        <span class="opacity-60">{{ t("login.observer_note") }}</span>
       </label>
-      <input v-model="cid" placeholder="CAN 号" class="rounded border px-2 py-1 text-xs" />
+      <input v-model="cid" :placeholder="t('login.cid')" class="rounded border px-2 py-1 text-xs" />
       <input
         v-model="password"
         type="password"
-        placeholder="密码"
+        :placeholder="t('login.password')"
         class="rounded border px-2 py-1 text-xs"
       />
       <!-- 观察员填的是机长的呼号：语音服务端按那架飞机的位置给他算距离。 -->
       <input
         v-if="observer"
         v-model="follow"
-        placeholder="跟随的呼号（机长的）"
-        title="机长那架飞机的呼号。语音服务端按它的位置给你算距离。"
+        :placeholder="t('login.follow')"
+        :title="t('login.follow_tip')"
         class="rounded border px-2 py-1 font-mono text-xs uppercase"
       />
       <input
         v-else
         v-model="callsign"
-        placeholder="呼号 CES123"
+        :placeholder="t('login.callsign')"
         class="rounded border px-2 py-1 font-mono text-xs uppercase"
       />
       <input
         v-model="aircraft"
         :disabled="observer"
-        placeholder="机型 A320"
+        :placeholder="t('login.aircraft')"
         class="rounded border px-2 py-1 text-xs"
       />
       <input
         v-model="realName"
         :disabled="observer"
-        placeholder="姓名"
+        :placeholder="t('login.real_name')"
         class="rounded border px-2 py-1 text-xs"
       />
       <button
@@ -254,19 +257,21 @@ const send = () =>
         class="col-span-5 rounded border px-3 py-1 text-xs"
         @click="connect"
       >
-        上线
+        {{ t("login.connect") }}
       </button>
     </section>
 
     <section v-else class="flex items-center gap-2">
       <!-- 识别是 FSD 的事，观察员没有那条连接。 -->
       <button v-if="!observing" class="rounded border px-3 py-1 text-xs" @click="ident">
-        识别（8 秒）
+        {{ t("session.ident") }}
       </button>
       <span v-else class="text-xs opacity-70">
-        跟随 <span class="font-mono">{{ view?.observer?.follow }}</span>
+        {{ t("session.following") }} <span class="font-mono">{{ view?.observer?.follow }}</span>
       </span>
-      <button class="rounded border px-3 py-1 text-xs" @click="disconnect">下线</button>
+      <button class="rounded border px-3 py-1 text-xs" @click="disconnect">
+        {{ t("session.disconnect") }}
+      </button>
     </section>
 
     <!-- 观察员的频率。正常上网络时频率只跟 COM1 走，界面上没有第二个框；观察员是
@@ -276,21 +281,23 @@ const send = () =>
       v-if="observer"
       class="flex flex-wrap items-center gap-2 rounded border px-3 py-2 text-xs"
     >
-      <span class="opacity-60">语音频率</span>
+      <span class="opacity-60">{{ t("observer.frequency") }}</span>
       <input
         v-model="manualFrequency"
-        placeholder="留空跟随 COM1"
-        title="观察员模式专用：手输一个频率，语音就待在那里。清空则回到跟随座舱 COM1。"
+        :placeholder="t('observer.frequency_placeholder')"
+        :title="t('observer.frequency_tip')"
         class="w-28 rounded border px-2 py-1 font-mono"
         @change="applyFrequency"
       />
       <template v-if="view?.observer">
         <span v-if="view.observer.frequency !== null" class="font-mono">
           {{ khzText(view.observer.frequency) }}
-          <span class="opacity-60">{{ view.observer.manual ? "手输" : "跟随 COM1" }}</span>
+          <span class="opacity-60">{{
+            view.observer.manual ? t("observer.manual") : t("observer.follow_com1")
+          }}</span>
         </span>
         <span v-else class="text-amber-700">
-          还没有频率：在这里输入一个，或者开着模拟器跟 COM1 走
+          {{ t("observer.no_frequency") }}
         </span>
       </template>
     </section>
@@ -304,15 +311,15 @@ const send = () =>
     >
       <div><p class="opacity-60">COM1</p>{{ mhz(view?.sim?.com1) }}</div>
       <div>
-        <p class="opacity-60">应答机</p>
+        <p class="opacity-60">{{ t("cockpit.transponder") }}</p>
         {{ view?.sim ? String(view.sim.squawk).padStart(4, "0") : "—" }}
         <span class="opacity-60">{{ xpdrText(view?.sim?.xpdr_mode) }}</span>
       </div>
-      <div><p class="opacity-60">高度</p>{{ view?.sim?.altitude ?? "—" }} ft</div>
-      <div><p class="opacity-60">地速</p>{{ view?.sim?.groundspeed ?? "—" }} kt</div>
-      <div><p class="opacity-60">航向</p>{{ view?.sim ? Math.round(view.sim.heading) : "—" }}°</div>
+      <div><p class="opacity-60">{{ t("cockpit.altitude") }}</p>{{ view?.sim?.altitude ?? "—" }} ft</div>
+      <div><p class="opacity-60">{{ t("cockpit.groundspeed") }}</p>{{ view?.sim?.groundspeed ?? "—" }} kt</div>
+      <div><p class="opacity-60">{{ t("cockpit.heading") }}</p>{{ view?.sim ? Math.round(view.sim.heading) : "—" }}°</div>
       <div>
-        <p class="opacity-60">气压修正</p>
+        <p class="opacity-60">{{ t("cockpit.pressure_delta") }}</p>
         {{ view?.sim?.pressure_delta ?? "—" }} ft
       </div>
     </section>
@@ -325,11 +332,15 @@ const send = () =>
          是参考，不是值班时要盯的东西。 -->
     <section class="grid min-h-0 flex-1 gap-3" :class="compact ? '' : 'md:grid-cols-2'">
       <div v-if="!compact" class="flex min-h-0 flex-col gap-2">
-        <p class="text-xs opacity-60">附近的飞机（{{ view?.traffic.length ?? 0 }}）</p>
+        <p class="text-xs opacity-60">
+          {{ t("lists.traffic", { count: view?.traffic.length ?? 0 }) }}
+        </p>
         <TrafficList :traffic="view?.traffic ?? []" />
       </div>
       <div class="flex min-h-0 flex-col gap-2">
-        <p v-if="!compact" class="text-xs opacity-60">在线席位（{{ view?.controllers.length ?? 0 }}）</p>
+        <p v-if="!compact" class="text-xs opacity-60">
+          {{ t("lists.controllers", { count: view?.controllers.length ?? 0 }) }}
+        </p>
         <!-- 点一行就把那个席位填进收件人框。 -->
         <ControllerList
           v-if="!compact"
@@ -337,7 +348,7 @@ const send = () =>
           :controllers="view?.controllers ?? []"
           @reply="setRecipient"
         />
-        <p v-if="!compact" class="text-xs opacity-60">文字消息</p>
+        <p v-if="!compact" class="text-xs opacity-60">{{ t("lists.messages") }}</p>
         <ChatLog :messages="view?.messages ?? []" @reply="setRecipient" />
       </div>
     </section>
@@ -350,25 +361,25 @@ const send = () =>
         @pointerup="invoke('set_transmitting', { on: false })"
         @pointerleave="invoke('set_transmitting', { on: false })"
       >
-        {{ pressed ? "发话中" : "按住发话" }}
+        {{ pressed ? t("chat.transmitting") : t("chat.push_to_talk") }}
       </button>
       <input
         v-if="!compact"
         v-model="recipient"
-        placeholder="收件人（留空发到频率）"
+        :placeholder="t('chat.recipient')"
         class="w-40 rounded border px-2 py-1 text-xs"
       />
       <!-- .wallop 在 Rust 侧翻成发往督导，不跟着这个收件人框走。 -->
       <!-- 文字消息走 FSD，观察员没有那条连接，管制员的字只到机长那边。 -->
       <input
         v-model="message"
-        :placeholder="observing ? '观察员不收发文字消息' : '文字消息，.wallop 呼叫督导'"
+        :placeholder="observing ? t('chat.observer_no_text') : t('chat.message')"
         class="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
         :disabled="!connected"
         @keyup.enter="send"
       />
       <button class="rounded border px-3 py-1 text-xs" :disabled="!connected" @click="send">
-        发送
+        {{ t("chat.send") }}
       </button>
     </footer>
     <SettingsDialog :open="showPrefs" @close="showPrefs = false" />

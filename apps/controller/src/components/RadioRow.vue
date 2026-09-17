@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { t } from "../i18n";
+
 interface Radio {
   freq_khz: number;
   rx: boolean;
@@ -43,8 +45,8 @@ const mhz = (khz: number) => (khz / 1000).toFixed(3);
  * 只有时刻，**没有名字**：协议里 `speaker` 是服务端给会话编的号，客户端手上
  * 没有它到 CAN 号的映射，呼号那一半还欠着（见 issue #46）。
  */
-const lastTalkText = (t: { at: number } | null) =>
-  t ? new Date(t.at * 1000).toLocaleTimeString() : "";
+const lastTalkText = (talk: { at: number } | null) =>
+  talk ? new Date(talk.at * 1000).toLocaleTimeString() : "";
 </script>
 
 <template>
@@ -60,7 +62,7 @@ const lastTalkText = (t: { at: number } | null) =>
   >
     <!-- `selected` 是界面标记，**不发给服务端**：它和服务端的"主频率"是两件
          毫不相干的事，所以字段不叫 primary。 -->
-    <button class="w-4 text-sky-600" :title="'选中这一行'" @click="$emit('select')">
+    <button class="w-4 text-sky-600" :title="t('radio.select')" @click="$emit('select')">
       {{ radio.selected ? "▸" : "" }}
     </button>
 
@@ -71,13 +73,15 @@ const lastTalkText = (t: { at: number } | null) =>
     <span class="w-24 truncate font-mono text-xs opacity-70" :title="radio.callsign">
       {{ radio.callsign }}
     </span>
-    <span v-if="locked && !compact" class="text-xs text-sky-600" title="这是你正在管的席位频率">本席</span>
+    <span v-if="locked && !compact" class="text-xs text-sky-600" :title="t('radio.staffed_tip')">
+      {{ t("radio.staffed") }}
+    </span>
 
     <!-- RX 灯：这个频率上**有人在讲**，不是"最后一个开口的人还在讲"。 -->
     <span
       class="h-2.5 w-2.5 rounded-full"
       :class="receiving ? 'bg-green-500' : 'bg-neutral-300'"
-      :title="receiving ? '正在接收' : ''"
+      :title="receiving ? t('radio.receiving') : ''"
     />
 
     <!-- 三个开关。**耦合规则在核心库里**，这里只发意图：
@@ -88,7 +92,7 @@ const lastTalkText = (t: { at: number } | null) =>
       :key="s"
       class="flex items-center gap-1 uppercase"
       :class="s !== 'rx' && !transmitAllowed ? 'opacity-40' : ''"
-      :title="s !== 'rx' && !transmitAllowed ? '你此刻不在任何席位上，不能发射' : ''"
+      :title="s !== 'rx' && !transmitAllowed ? t('radio.no_transmit') : ''"
     >
       <input
         type="checkbox"
@@ -105,7 +109,7 @@ const lastTalkText = (t: { at: number } | null) =>
     <button
       class="w-6 text-center"
       :class="radio.muted ? 'text-red-600' : 'opacity-50'"
-      :title="radio.muted ? '已静音，点一下恢复' : '静音这个频率（仍然收包、仍然亮灯）'"
+      :title="radio.muted ? t('radio.unmute_tip') : t('radio.mute_tip')"
       @click="$emit('mute', !radio.muted)"
     >
       {{ radio.muted ? "🔇" : "🔈" }}
@@ -125,14 +129,22 @@ const lastTalkText = (t: { at: number } | null) =>
 
     <!-- 最后一次通话。绿点只说"此刻有没有人在讲"，而"多久没人说话了"才是
          管制员判断这条频率还活着没有的依据。 -->
-    <span v-if="lastTalk && !compact" class="font-mono text-xs opacity-50" title="最后一次通话">
+    <span
+      v-if="lastTalk && !compact"
+      class="font-mono text-xs opacity-50"
+      :title="t('radio.last_talk')"
+    >
       {{ lastTalkText(lastTalk) }}
     </span>
 
     <!-- 被拒要说出来：一个设好了却不生效、又不知道为什么的开关，
          正是整个重写要逃离的那类故障。 -->
-    <span v-if="txDenied" class="text-xs text-amber-600" title="服务端没有给这个频率的发射权">发射被拒</span>
-    <span v-if="rxDenied" class="text-xs text-amber-600" title="服务端没有给这个频率的接收">接收被拒</span>
+    <span v-if="txDenied" class="text-xs text-amber-600" :title="t('radio.tx_denied_tip')">
+      {{ t("radio.tx_denied") }}
+    </span>
+    <span v-if="rxDenied" class="text-xs text-amber-600" :title="t('radio.rx_denied_tip')">
+      {{ t("radio.rx_denied") }}
+    </span>
 
     <!-- 本席频率删不掉：删掉它的人还坐在席位上，而飞行员在那个频率上叫他
          听不见，两边都以为对方在。 -->
@@ -140,10 +152,10 @@ const lastTalkText = (t: { at: number } | null) =>
       v-if="!compact"
       class="ml-auto text-xs opacity-60 hover:opacity-100 disabled:opacity-25 disabled:hover:opacity-25"
       :disabled="locked"
-      :title="locked ? '这是你正在管的席位频率，先下席位再删' : ''"
+      :title="locked ? t('radio.remove_locked') : ''"
       @click="$emit('remove')"
     >
-      移除
+      {{ t("radio.remove") }}
     </button>
   </div>
 </template>
