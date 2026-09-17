@@ -14,3 +14,7 @@ serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { version = "1.52", features = ["rt", "net", "time", "sync", "macros"] }
+
+[dev-dependencies]
+# 暂停的时钟：链路的几个超时是 3 / 10 / 15 秒，真等的话一条测试要跑十几秒。
+tokio = { version = "1.52", features = ["test-util"] }
