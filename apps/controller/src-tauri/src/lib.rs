@@ -176,6 +176,9 @@ impl Default for App {
 /// **顺序是承重的**：重放要走核心库的耦合规则（关 RX 会清掉 TX/XC），
 /// 所以先 RX 再 TX 再 XC。反过来的话，一个存着 TX 的频率装回来变成只能听不能发，
 /// 而界面看起来完全正常——正是这个项目反复要躲开的那一类。
+///
+/// 运行时不再恢复上一场的台面（和原来 voice 一样，启动是空栈）。测试还走这里。
+#[cfg(test)]
 fn restore_stack(stack: &mut can_voice_client::stack::RadioStack, saved: &[Radio]) {
     for r in saved {
         stack.add_named(r.freq_khz, &r.callsign);
