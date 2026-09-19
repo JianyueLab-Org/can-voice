@@ -526,6 +526,7 @@ fn ptt_pressed(state: tauri::State<'_, App>) -> bool {
 /// "按一下你要的键"。捕获期间事件**不驱动 PTT**——正在录的那一下不能被播出去。
 #[tauri::command]
 fn begin_ptt_capture(state: tauri::State<'_, App>) {
+    state.install_ptt(state.settings().ptt);
     if let Ok(s) = state.ptt.lock() {
         if let Some(w) = s.as_ref() {
             w.begin_capture();
@@ -536,6 +537,15 @@ fn begin_ptt_capture(state: tauri::State<'_, App>) {
 #[tauri::command]
 fn take_captured_binding(state: tauri::State<'_, App>) -> Option<can_voice_ptt::Binding> {
     state.ptt.lock().ok().and_then(|s| s.as_ref().and_then(|w| w.take_captured()))
+}
+
+#[tauri::command]
+fn cancel_ptt_capture(state: tauri::State<'_, App>) {
+    if let Ok(s) = state.ptt.lock() {
+        if let Some(w) = s.as_ref() {
+            w.cancel_capture();
+        }
+    }
 }
 
 /// 把 PTT 的按下状态泵给语音层。
@@ -848,6 +858,7 @@ pub fn run() {
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,
+            cancel_ptt_capture,
             take_captured_binding,
             mouse_ptt_supported,
             audio_devices,

@@ -113,7 +113,7 @@ async function push() {
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 }
 
-/** 监听器是**懒起**的：没推过绑定就没有东西在听，录制会永远录不到。 */
+/** 空栈也要听得到正在绑的那个键。 */
 async function capture() {
   if (capturing.value) return;
   capturing.value = true;
@@ -131,6 +131,7 @@ async function capture() {
     } else if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      void invoke("cancel_ptt_capture");
     }
   }, 150);
 }

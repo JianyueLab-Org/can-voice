@@ -74,8 +74,7 @@ async function push() {
 /**
  * 「按一下你要的键」。
  *
- * 先把当前这组推下去：监听器是**懒起**的，没推过就根本没有东西在听，
- * 于是录制永远录不到——而界面上看不出任何异常。
+ * 先把当前这组推下去，再开始录。空栈也要听得到正在绑的那个键。
  */
 async function capture() {
   if (capturing.value) return;
@@ -98,6 +97,7 @@ async function capture() {
     if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      void invoke("cancel_ptt_capture");
     }
   }, 150);
 }
