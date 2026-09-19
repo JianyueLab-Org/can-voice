@@ -79,6 +79,7 @@ async function push() {
 async function capture() {
   if (capturing.value) return;
   capturing.value = true;
+  (document.activeElement as HTMLElement | null)?.blur();
   await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
   await invoke("begin_ptt_capture");
 

@@ -142,6 +142,14 @@ impl Binding {
         Self::key(format!("{k:?}"))
     }
 
+    /// 网页 `KeyboardEvent.code` → 和 rdev `Key` 的 Debug 名同一套。
+    ///
+    /// macOS 上没辅助功能时 rdev `listen` **不报错，只是收不到键**，录制会空等。
+    /// 绑定时走窗口内的 keydown，名字必须和之后 rdev 按下时的一样，否则录上了也不响。
+    pub fn from_event_code(code: &str) -> Option<Self> {
+        event_code_to_rdev(code).map(Self::key)
+    }
+
     /// 这个绑定现在还能匹配到东西吗。
     pub fn is_live(&self) -> bool {
         match self {
@@ -162,6 +170,70 @@ impl Binding {
             Self::Unresolved { token } => token.clone(),
         }
     }
+}
+
+/// `KeyboardEvent.code` → rdev `Key` 的 `{:?}`。对不上的键返回 `None`，不要猜。
+fn event_code_to_rdev(code: &str) -> Option<String> {
+    if let Some(rest) = code.strip_prefix("Key") {
+        if rest.len() == 1 && rest.as_bytes()[0].is_ascii_uppercase() {
+            return Some(code.to_string());
+        }
+    }
+    if let Some(d) = code.strip_prefix("Digit") {
+        if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() {
+            return Some(format!("Num{d}"));
+        }
+    }
+    if let Some(n) = code.strip_prefix('F') {
+        if let Ok(i) = n.parse::<u32>() {
+            if (1..=12).contains(&i) {
+                return Some(format!("F{i}"));
+            }
+        }
+    }
+    let named = match code {
+        "Space" => "Space",
+        "Tab" => "Tab",
+        "Enter" => "Return",
+        "Backspace" => "Backspace",
+        "Escape" => "Escape",
+        "CapsLock" => "CapsLock",
+        "ControlLeft" => "ControlLeft",
+        "ControlRight" => "ControlRight",
+        "ShiftLeft" => "ShiftLeft",
+        "ShiftRight" => "ShiftRight",
+        "AltLeft" => "Alt",
+        "AltRight" => "AltGr",
+        "MetaLeft" => "MetaLeft",
+        "MetaRight" => "MetaRight",
+        "ArrowUp" => "UpArrow",
+        "ArrowDown" => "DownArrow",
+        "ArrowLeft" => "LeftArrow",
+        "ArrowRight" => "RightArrow",
+        "Delete" => "Delete",
+        "Home" => "Home",
+        "End" => "End",
+        "PageUp" => "PageUp",
+        "PageDown" => "PageDown",
+        "Insert" => "Insert",
+        "Minus" => "Minus",
+        "Equal" => "Equal",
+        "BracketLeft" => "LeftBracket",
+        "BracketRight" => "RightBracket",
+        "Backslash" => "BackSlash",
+        "Semicolon" => "SemiColon",
+        "Quote" => "Quote",
+        "Backquote" => "BackQuote",
+        "Comma" => "Comma",
+        "Period" => "Dot",
+        "Slash" => "Slash",
+        "PrintScreen" => "PrintScreen",
+        "ScrollLock" => "ScrollLock",
+        "Pause" => "Pause",
+        "NumLock" => "NumLock",
+        _ => return None,
+    };
+    Some(named.to_string())
 }
 
 /// can-audio 的旧设置里，PTT 是 `ptt_key` + `joystick_ptt` 两个字段；新版是一个列表。
@@ -239,6 +311,32 @@ fn legacy_key_code(name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_browser_event_code_matches_what_rdev_will_press() {
+        assert_eq!(
+            Binding::from_event_code("KeyV"),
+            Some(Binding::from_rdev_key(rdev::Key::KeyV))
+        );
+        assert_eq!(
+            Binding::from_event_code("Digit1"),
+            Some(Binding::from_rdev_key(rdev::Key::Num1))
+        );
+        assert_eq!(
+            Binding::from_event_code("Space"),
+            Some(Binding::from_rdev_key(rdev::Key::Space))
+        );
+        assert_eq!(
+            Binding::from_event_code("ControlLeft"),
+            Some(Binding::from_rdev_key(rdev::Key::ControlLeft))
+        );
+        assert_eq!(
+            Binding::from_event_code("Enter"),
+            Some(Binding::from_rdev_key(rdev::Key::Return))
+        );
+        assert_eq!(Binding::from_event_code("Unidentified"), None);
+        assert_eq!(Binding::from_event_code("F13"), None);
+    }
 
     #[test]
     fn a_keyboard_binding_round_trips_through_settings() {

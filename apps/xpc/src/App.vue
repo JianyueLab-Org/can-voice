@@ -12,6 +12,7 @@ import PilotPanel from "./components/PilotPanel.vue";
 import type { View } from "./types";
 import { mhz, khzText, xpdrText, voiceText, linkText } from "./types";
 import { errorText, t } from "./i18n";
+import { attachPttKeys } from "./pttKeys";
 
 /** 设置对话框开没开。 */
 const showPrefs = ref(false);
@@ -83,6 +84,7 @@ async function refresh() {
   pressed.value = await invoke<boolean>("ptt_pressed");
 }
 
+let detachPtt: (() => void) | undefined;
 onMounted(async () => {
   void loadAppearance();
   // 上次用的那一组预填。密码不存：它换的是一张短寿命的票。
@@ -98,8 +100,12 @@ onMounted(async () => {
   await refresh();
   // 轮询而不是订阅：事件流是广播，窗口重开之前发生的事收不到。
   timer = window.setInterval(refresh, 250);
+  detachPtt = attachPttKeys();
 });
-onUnmounted(() => window.clearInterval(timer));
+onUnmounted(() => {
+  window.clearInterval(timer);
+  detachPtt?.();
+});
 
 async function guard(fn: () => Promise<unknown>) {
   error.value = null;
