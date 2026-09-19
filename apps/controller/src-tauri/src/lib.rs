@@ -52,6 +52,12 @@ pub struct Settings {
     /// 播放设备。`None` 是系统默认。
     #[serde(default)]
     pub output_device: Option<String>,
+    /// 麦克风总音量，0–200，100 是原声。
+    #[serde(default)]
+    pub mic_volume: can_voice_settings::VolumePercent,
+    /// 喇叭总音量，0–200，100 是原声。
+    #[serde(default)]
+    pub speaker_volume: can_voice_settings::VolumePercent,
     /// 用户说过"这一版不用再问我"的那个版本号。**跳过的是那一个版本，
     /// 不是从此闭嘴**——下一版照样提示。
     #[serde(default)]
@@ -91,21 +97,38 @@ impl App {
         let store = can_voice_app::Store::for_product("audio-for-can");
         let settings: Settings = store.load();
         let bridge = Arc::new(Bridge::new());
-        // 上次的台面先装回去，**在任何连接之前**：声明是幂等全量的，
-        // 连上的那一刻会把它整份推出去。
-        bridge.with_stack(|s| restore_stack(s, &settings.radios));
+        // 台面不从磁盘恢复。原来 voice 每次启动都是空的：频率从数据源来，
+        // 上一场的临时频道多半已经没人，留着看起来一切正常。
+        bridge.set_master_volume(settings.mic_volume.get(), settings.speaker_volume.get());
         Self {
             bridge,
             http: reqwest::Client::builder()
                 .user_agent(concat!("audio-for-can/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .unwrap_or_default(),
-            ptt: std::sync::Mutex::new(None),
+            ptt: std::sync::Mutex::new(None), // setup 里按已存绑定拉起来，和原来 voice 一样
             store,
             settings: std::sync::Mutex::new(settings),
             feed: Arc::new(std::sync::Mutex::new(FeedView::default())),
             user_removed: Arc::new(std::sync::Mutex::new(HashSet::new())),
             feed_task: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// 按当前绑定起 PTT 监听。启动时就要拉起来：原来 voice 一开窗口就听绑定，
+    /// 不是进一次设置才生效。
+    fn install_ptt(&self, bindings: Vec<can_voice_ptt::Binding>) {
+        let mut slot = match self.ptt.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        match slot.as_ref() {
+            Some(w) => w.set_bindings(bindings),
+            None => {
+                let watcher = can_voice_ptt::PttWatcher::new(bindings);
+                spawn_ptt_pump(self.bridge.clone(), watcher.transmitting_flag());
+                *slot = Some(watcher);
+            }
         }
     }
 
@@ -129,7 +152,6 @@ impl App {
             Err(p) => p.into_inner(),
         };
         f(&mut s);
-        s.radios = self.bridge.radios();
         if let Err(e) = self.store.save(&*s) {
             tracing::warn!(error = %e, "could not save the settings");
         }
@@ -154,6 +176,9 @@ impl Default for App {
 /// **顺序是承重的**：重放要走核心库的耦合规则（关 RX 会清掉 TX/XC），
 /// 所以先 RX 再 TX 再 XC。反过来的话，一个存着 TX 的频率装回来变成只能听不能发，
 /// 而界面看起来完全正常——正是这个项目反复要躲开的那一类。
+///
+/// 运行时不再恢复上一场的台面（和原来 voice 一样，启动是空栈）。测试还走这里。
+#[cfg(test)]
 fn restore_stack(stack: &mut can_voice_client::stack::RadioStack, saved: &[Radio]) {
     for r in saved {
         stack.add_named(r.freq_khz, &r.callsign);
@@ -472,6 +497,15 @@ fn set_transmitting(state: tauri::State<'_, App>, on: bool) {
     state.bridge.set_transmitting(on);
 }
 
+#[tauri::command]
+fn set_master_volume(state: tauri::State<'_, App>, mic: u32, speaker: u32) {
+    state.update_settings(|s| {
+        s.mic_volume = can_voice_settings::VolumePercent::new(mic);
+        s.speaker_volume = can_voice_settings::VolumePercent::new(speaker);
+    });
+    state.bridge.set_master_volume(mic, speaker);
+}
+
 /// 换一组 PTT 绑定。
 ///
 /// **监听是懒起的，而且起了就停不掉**——`rdev::listen` 没有 stop。所以只有真的绑了
@@ -480,24 +514,13 @@ fn set_transmitting(state: tauri::State<'_, App>, on: bool) {
 #[tauri::command]
 fn set_ptt_bindings(state: tauri::State<'_, App>, bindings: Vec<can_voice_ptt::Binding>) {
     state.update_settings(|s| s.ptt = bindings.clone());
-    let mut slot = match state.ptt.lock() {
-        Ok(s) => s,
-        Err(p) => p.into_inner(),
-    };
-    match slot.as_ref() {
-        Some(w) => w.set_bindings(bindings),
-        None => {
-            let watcher = can_voice_ptt::PttWatcher::new(bindings);
-            spawn_ptt_pump(state.bridge.clone(), watcher.transmitting_flag());
-            *slot = Some(watcher);
-        }
-    }
+    state.install_ptt(bindings);
 }
 
-/// 读一次当前绑定按下与否，给界面点灯用。
+/// 发话灯。看的是交给语音层的 PTT，屏幕按钮和硬件绑定都算。
 #[tauri::command]
 fn ptt_pressed(state: tauri::State<'_, App>) -> bool {
-    state.ptt.lock().ok().and_then(|s| s.as_ref().map(|w| w.transmitting())).unwrap_or(false)
+    state.bridge.transmitting()
 }
 
 /// "按一下你要的键"。捕获期间事件**不驱动 PTT**——正在录的那一下不能被播出去。
@@ -519,7 +542,7 @@ fn take_captured_binding(state: tauri::State<'_, App>) -> Option<can_voice_ptt::
 ///
 /// 一帧一拍（20 毫秒）：比帧还快没有意义，慢了会让发话的头尾被切掉。
 fn spawn_ptt_pump(bridge: std::sync::Arc<Bridge>, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut last = false;
         let mut tick = tokio::time::interval(std::time::Duration::from_millis(20));
@@ -791,7 +814,9 @@ pub fn run() {
         .manage(App::new())
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
         .setup(|handle| {
-            let appearance = handle.state::<App>().settings().appearance;
+            let app = handle.state::<App>();
+            app.install_ptt(app.settings().ptt);
+            let appearance = app.settings().appearance;
             if let Some(window) = handle.get_webview_window("main") {
                 apply_window(&window, &appearance, appearance.compact);
             }
@@ -819,6 +844,7 @@ pub fn run() {
             set_muted,
             set_selected,
             set_transmitting,
+            set_master_volume,
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,

@@ -163,6 +163,10 @@ pub struct Settings {
     pub input_device: Option<String>,
     #[serde(default)]
     pub output_device: Option<String>,
+    #[serde(default)]
+    pub mic_volume: can_voice_settings::VolumePercent,
+    #[serde(default)]
+    pub speaker_volume: can_voice_settings::VolumePercent,
     /// 往模拟器里注入他机。**默认开**，但要能关：想只用语音不看他机的人
     /// 现在关不掉，而注入是最吃帧数的那一部分。
     #[serde(default = "yes")]
@@ -383,6 +387,22 @@ impl App {
         match self.settings.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// 按当前绑定起 PTT 监听。启动时就要拉起来：原来 voice 一开窗口就听绑定。
+    fn install_ptt(&self, bindings: Vec<can_voice_ptt::Binding>) {
+        let mut slot = match self.ptt.lock() {
+            Ok(s) => s,
+            Err(p) => p.into_inner(),
+        };
+        match slot.as_ref() {
+            Some(w) => w.set_bindings(bindings),
+            None => {
+                let watcher = can_voice_ptt::PttWatcher::new(bindings);
+                spawn_ptt_pump(self.voice.clone(), watcher.transmitting_flag());
+                *slot = Some(watcher);
+            }
         }
     }
 
@@ -988,6 +1008,15 @@ fn set_transmitting(app: tauri::State<'_, App>, on: bool) {
     app.voice.set_transmitting(on);
 }
 
+#[tauri::command]
+fn set_master_volume(app: tauri::State<'_, App>, mic: u32, speaker: u32) {
+    app.update_settings(|s| {
+        s.mic_volume = can_voice_settings::VolumePercent::new(mic);
+        s.speaker_volume = can_voice_settings::VolumePercent::new(speaker);
+    });
+    app.voice.set_master_volume(mic, speaker);
+}
+
 /// 换一组 PTT 绑定。
 ///
 /// **监听是懒起的，而且起了就停不掉**（`rdev::listen` 没有 stop）。所以只有
@@ -996,27 +1025,13 @@ fn set_transmitting(app: tauri::State<'_, App>, on: bool) {
 #[tauri::command]
 fn set_ptt_bindings(app: tauri::State<'_, App>, bindings: Vec<can_voice_ptt::Binding>) {
     app.update_settings(|s| s.ptt = bindings.clone());
-    let mut slot = match app.ptt.lock() {
-        Ok(s) => s,
-        Err(p) => p.into_inner(),
-    };
-    match slot.as_ref() {
-        Some(w) => w.set_bindings(bindings),
-        None => {
-            let watcher = can_voice_ptt::PttWatcher::new(bindings);
-            spawn_ptt_pump(app.voice.clone(), watcher.transmitting_flag());
-            *slot = Some(watcher);
-        }
-    }
+    app.install_ptt(bindings);
 }
 
+/// 发话灯。看的是交给语音层的 PTT，屏幕按钮和硬件绑定都算。
 #[tauri::command]
 fn ptt_pressed(app: tauri::State<'_, App>) -> bool {
-    app.ptt
-        .lock()
-        .ok()
-        .and_then(|s| s.as_ref().map(|w| w.transmitting()))
-        .unwrap_or(false)
+    app.voice.transmitting()
 }
 
 /// "按一下你要的键"。捕获期间事件**不驱动 PTT**——正在录的那一下不能被播出去。
@@ -1047,7 +1062,7 @@ fn mouse_ptt_supported() -> bool {
 ///
 /// 一帧一拍（20 毫秒）：比帧还快没有意义，慢了会让发话的头尾被切掉。
 fn spawn_ptt_pump(voice: Arc<Bridge>, flag: Arc<std::sync::atomic::AtomicBool>) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut last = false;
         let mut tick = tokio::time::interval(Duration::from_millis(20));
@@ -1614,7 +1629,12 @@ pub fn run() {
         .manage(app)
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
         .setup(|handle| {
-            let appearance = handle.state::<App>().settings_snapshot().appearance;
+            let app = handle.state::<App>();
+            let saved = app.settings_snapshot();
+            app.voice
+                .set_master_volume(saved.mic_volume.get(), saved.speaker_volume.get());
+            app.install_ptt(saved.ptt);
+            let appearance = app.settings_snapshot().appearance;
             if let Some(window) = handle.get_webview_window("main") {
                 apply_window(&window, &appearance, appearance.compact);
             }
@@ -1650,6 +1670,7 @@ pub fn run() {
             ptt_bindings,
             audio_devices,
             set_transmitting,
+            set_master_volume,
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,

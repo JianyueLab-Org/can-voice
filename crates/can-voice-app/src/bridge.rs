@@ -19,6 +19,7 @@ use crate::snapshot::{Ended, Snapshot};
 use can_voice_client::stack::RadioStack;
 use can_voice_client::{Config, Event, VoiceClient};
 use can_voice_token::TokenSource;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -55,6 +56,12 @@ struct Inner {
     /// 重连要的两样东西。`disconnect` 会清掉它 —— 否则主动下线会被监护任务
     /// 当成掉线再连回来。
     session: Mutex<Option<(Config, TokenSource)>>,
+    /// 发话灯的真相：最后一次真正交给语音层的 PTT。屏幕按钮和硬件绑定都走
+    /// [`Bridge::set_transmitting`]；没连上时按了也不点灯。
+    transmitting: AtomicBool,
+    /// 麦克风 / 喇叭总音量，百分比 0–200。连上之后和换设备一样立刻推给语音层。
+    mic: AtomicU32,
+    speaker: AtomicU32,
 }
 
 impl Default for Bridge {
@@ -71,6 +78,9 @@ impl Bridge {
                 stack: Mutex::new(RadioStack::new()),
                 snapshot: Mutex::new(Snapshot::default()),
                 session: Mutex::new(None),
+                transmitting: AtomicBool::new(false),
+                mic: AtomicU32::new(100),
+                speaker: AtomicU32::new(100),
             }),
         }
     }
@@ -117,6 +127,7 @@ impl Bridge {
         if let Some(c) = client {
             c.shutdown().await;
         }
+        self.inner.transmitting.store(false, Ordering::Relaxed);
     }
 
     /// 改台面，并把闭包的答案带出来。
@@ -158,13 +169,31 @@ impl Bridge {
             .unwrap_or_default()
     }
 
-    /// 按下 / 松开 PTT。
+    /// 按下 / 松开 PTT。屏幕按钮和硬件绑定都走这里。
+    ///
+    /// 没连上是空操作，发话灯也不亮——和原来 voice 一样：`if self.voice` 才
+    /// `set_transmitting`，灯由那一次真正的切换点亮。
     pub fn set_transmitting(&self, on: bool) {
         if let Ok(c) = self.inner.client.lock() {
             if let Some(c) = c.as_ref() {
                 c.set_transmitting(on);
+                self.inner.transmitting.store(on, Ordering::Relaxed);
             }
         }
+    }
+
+    /// 发话灯。读的是交给语音层的 PTT，不是硬件绑定有没有按下。
+    pub fn transmitting(&self) -> bool {
+        self.inner.transmitting.load(Ordering::Relaxed)
+    }
+
+    /// 麦克风 / 喇叭总音量，百分比 0–200。立刻生效，重连后仍用这份。
+    pub fn set_master_volume(&self, mic: u32, speaker: u32) {
+        let mic = mic.min(200);
+        let speaker = speaker.min(200);
+        self.inner.mic.store(mic, Ordering::Relaxed);
+        self.inner.speaker.store(speaker, Ordering::Relaxed);
+        self.inner.push_master();
     }
 
     /// 换录音 / 播放设备。
@@ -225,12 +254,24 @@ impl Inner {
     /// **重连之后台面要重发**，而重发就是恢复——声明是幂等的全量声明，
     /// 这正是声明式 API 换来的东西。
     fn adopt(self: &Arc<Self>, client: VoiceClient) {
+        self.transmitting.store(false, Ordering::Relaxed);
         let events = client.events();
         if let Ok(mut slot) = self.client.lock() {
             *slot = Some(client);
         }
         tokio::spawn(supervise(self.clone(), events));
         self.push_declaration();
+        self.push_master();
+    }
+
+    fn push_master(&self) {
+        let mic = self.mic.load(Ordering::Relaxed) as f32 / 100.0;
+        let speaker = self.speaker.load(Ordering::Relaxed) as f32 / 100.0;
+        if let Ok(c) = self.client.lock() {
+            if let Some(c) = c.as_ref() {
+                c.set_master_volume(mic, speaker);
+            }
+        }
     }
 
     /// 把台面折算成声明发出去。夹掉的耦合对返回给调用方显示。
@@ -361,6 +402,15 @@ mod tests {
         );
     }
 
+    /// 没连上时按 PTT 不点灯。原来 voice 是 `if self.voice: set_transmitting`，
+    /// 灯由那一次真正的切换点亮；这里同一条规则。
+    #[test]
+    fn ptt_does_not_light_without_a_client() {
+        let b = Bridge::new();
+        b.set_transmitting(true);
+        assert!(!b.transmitting());
+    }
+
     // ——— 掉线之后该不该换票重连 ———
 
     /// **票过期是上层唯一能救的掉线。** 核心库拿不到新票，所以它只能进 Offline；
@@ -455,6 +505,7 @@ mod tests {
         let mut stack = RadioStack::new();
         stack.add(118_000);
         stack.add(121_800);
+        stack.set_rx(118_000, true);
         stack.set_tx(121_800, true);
 
         let d = stack.to_subscription();

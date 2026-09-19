@@ -92,6 +92,7 @@ func TestEncodeDecodeRoundTripsEveryMessageType(t *testing.T) {
 		{"Sub", &Sub{RX: []uint32{118000, 121800}, TX: []uint32{121800}, XC: [][2]uint32{{121800, 124550}}}},
 		{"SubAck", &SubAck{RX: []uint32{118000}, TX: []uint32{121800}, Rejected: []uint32{136975}, RejectedXC: [][2]uint32{{121800, 123450}}}},
 		{"Notice", &Notice{Kind: KindTxDenied, Freq: 121800, Reason: "no active radio track"}},
+		{"Talker", &Notice{Kind: KindTalker, Freq: 121800, Session: 7, CID: "1000"}},
 		{"Ping", &Ping{T: 1700000000}},
 		{"Pong", &Pong{T: 1700000000, ServerT: 1700000042}},
 		{"Bye", &Bye{Reason: "session superseded by a newer login"}},

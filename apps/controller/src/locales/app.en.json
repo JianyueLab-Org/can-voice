@@ -25,6 +25,8 @@
   "freq": {
     "out_of_band": "Frequency must be between 118.000 and 136.975",
     "add": "Add frequency",
+    "hint": "121.800",
+    "callsign_hint": "Callsign (optional)",
     "empty": "No frequencies yet. Enter one above, e.g. 121.800"
   },
   "notice": {
@@ -41,7 +43,9 @@
     "off": "You are not staffing any position right now (the data feed does not list you). TX is off, but you can still hear. Once you log on in EuroScope, this updates within a minute.",
     "dropped_tx": "All TX that was on has been switched off.",
     "unknown": "Data feed not reached yet, position status unknown. Retrying on the next round (within a minute).",
-    "on": "Staffing {callsign}"
+    "on": "Staffing {callsign}",
+    "observer": "Not staffing · RX only",
+    "staffing": "Staffing {callsign}"
   },
   "panel": {
     "open": "Audio & PTT",
@@ -67,6 +71,14 @@
     "unmute_tip": "Muted; click to unmute",
     "mute_tip": "Mute this frequency (still receives packets, light still shows)",
     "last_talk": "Last transmission",
+    "last_rx_none": "Last: --",
+    "last_rx": "Last: {who}  {stamp}",
+    "no_callsign": "(no callsign)",
+    "mute": "Mute",
+    "rx_tip": "Receive on this frequency",
+    "tx_tip": "Transmit here while PTT is held",
+    "xc_tip": "Cross-couple",
+    "remove_tip": "Remove from the stack",
     "tx_denied": "TX denied",
     "tx_denied_tip": "The server did not grant transmit on this frequency",
     "rx_denied": "RX denied",
@@ -79,15 +91,18 @@
     "microphone": "Microphone",
     "headset": "Headset",
     "system_default": "System default",
-    "applies_now": "Device changes take effect immediately."
+    "applies_now": "Device changes take effect immediately.",
+    "mic_volume": "Microphone",
+    "speaker_volume": "Speaker"
   },
   "ptt": {
     "hold": "Hold to talk",
+    "hold_tip": "Hold to transmit. You can also bind a key, a mouse side button, or a joystick button in Settings.",
     "transmitting": "Transmitting",
     "title": "Push-to-talk (PTT)",
     "unresolved": "This binding is not recognized on this system; please record it again",
     "delete": "Delete",
-    "none": "No bindings yet. Use the button below to record one.",
+    "none": "No bindings yet — PTT will not work",
     "capturing": "Press the key you want…",
     "record": "Record a binding",
     "wayland": "This system is running Wayland, which does not let ordinary programs listen for global keys, so keyboard PTT will not work. Use a joystick instead, or run under an X11 session.",

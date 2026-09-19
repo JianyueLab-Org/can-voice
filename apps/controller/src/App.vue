@@ -67,7 +67,7 @@ interface Snapshot {
   /** 服务端的其它通知：`[kind, freq_khz, reason]`，最近的在最后。 */
   notices: [string, number, string][];
   /** 每个频率上最近一次通话。键是频率（kHz）的十进制写法。 */
-  last_talk: Record<string, { speaker: number; at: number }>;
+  last_talk: Record<string, { speaker: number; cid?: string; at: number }>;
   /** 服务端给这条链路的发射上限。没连上、掉了线是 `null`。 */
   max_tx: number | null;
   /**
@@ -115,10 +115,14 @@ function problemText(p: Problem): string {
 }
 
 const freqInput = ref("");
+const callsignInput = ref("");
 const radios = ref<Radio[]>([]);
 const snap = ref<Snapshot | null>(null);
 const feed = ref<FeedView | null>(null);
 const pressed = ref(false);
+/** 屏幕按钮按着。灯要立刻亮，不能等 200ms 那一拍快照。 */
+const holding = ref(false);
+const talking = computed(() => holding.value || pressed.value);
 const showSettings = ref(false);
 
 let timer: number | undefined;
@@ -214,7 +218,9 @@ async function addFrequency() {
   }
   error.value = null;
   freqInput.value = "";
-  await invoke("add_frequency", { freqKhz: khz, callsign: null });
+  const callsign = callsignInput.value.trim();
+  callsignInput.value = "";
+  await invoke("add_frequency", { freqKhz: khz, callsign: callsign || null });
   await refresh();
 }
 
@@ -229,9 +235,19 @@ const locked = (khz: number) => feed.value?.duty.freq_khz === khz;
 /** 画灰与否照着台面的真相，不自己推：推出来的那份迟早和它对不上。 */
 const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
 
+function pttDown(e: PointerEvent) {
+  holding.value = true;
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  void invoke("set_transmitting", { on: true });
+}
+function pttUp() {
+  holding.value = false;
+  void invoke("set_transmitting", { on: false });
+}
+
 /** 这一行此刻正在发射：TX 开着，而且 PTT 按着。 */
 function isTransmitting(r: Radio): boolean {
-  return pressed.value && r.tx;
+  return talking.value && r.tx;
 }
 function lastTalk(khz: number) {
   return snap.value?.last_talk?.[String(khz)] ?? null;
@@ -291,13 +307,19 @@ async function act(name: string, args: Record<string, unknown>) {
 <template>
   <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
   <main
-    class="mx-auto flex h-screen max-w-3xl flex-col text-sm"
+    class="flex h-screen w-full flex-col text-sm"
     :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
   >
     <header class="flex flex-wrap items-center justify-between gap-3">
       <div class="min-w-0">
         <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
-        <p class="truncate text-xs opacity-70">{{ statusText }}</p>
+        <p class="flex items-center gap-2 truncate text-xs opacity-70">
+          <span
+            class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+            :style="{ background: connected ? '#28a745' : '#dc3545' }"
+          />
+          {{ statusText }}
+        </p>
       </div>
       <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
       <WindowToggles class="ml-auto" @settings="showPrefs = true" />
@@ -384,8 +406,14 @@ async function act(name: string, args: Record<string, unknown>) {
     <section v-if="!compact" class="flex items-center gap-2">
       <input
         v-model="freqInput"
-        placeholder="121.800"
+        :placeholder="t('freq.hint')"
         class="w-28 rounded border px-2 py-1"
+        @keyup.enter="addFrequency"
+      />
+      <input
+        v-model="callsignInput"
+        :placeholder="t('freq.callsign_hint')"
+        class="w-40 rounded border px-2 py-1 font-mono uppercase"
         @keyup.enter="addFrequency"
       />
       <button class="rounded border px-3 py-1" @click="addFrequency">
@@ -398,30 +426,33 @@ async function act(name: string, args: Record<string, unknown>) {
 
     <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
 
-    <section class="flex flex-1 flex-col gap-2 overflow-auto">
-      <RadioRow
-        v-for="r in radios"
-        :key="r.freq_khz"
-        :radio="r"
-        :receiving="isReceiving(r.freq_khz)"
-        :tx-denied="txDenied(r.freq_khz)"
-        :rx-denied="rxDenied(r.freq_khz)"
-        @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
-        @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
-        @mute="(on) => act('set_muted', { freqKhz: r.freq_khz, on })"
-        @select="act('set_selected', { freqKhz: r.freq_khz })"
-        :locked="locked(r.freq_khz)"
-        :transmitting="isTransmitting(r)"
-        :last-talk="lastTalk(r.freq_khz)"
-        :compact="compact"
-        :transmit-allowed="mayTransmit"
-        :over-tx-limit="overTxLimit(r.freq_khz)"
-        :max-tx="txBudget?.max_tx ?? null"
-        @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
-      />
-      <p v-if="!radios.length" class="py-6 text-center text-xs opacity-50">
-        {{ t("freq.empty") }}
-      </p>
+    <section class="flex min-h-0 flex-1 flex-col">
+      <div class="flex flex-1 flex-wrap content-start gap-2 overflow-auto">
+        <RadioRow
+          v-for="r in radios"
+          :key="r.freq_khz"
+          :radio="r"
+          :receiving="isReceiving(r.freq_khz)"
+          :tx-denied="txDenied(r.freq_khz)"
+          :rx-denied="rxDenied(r.freq_khz)"
+          @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
+          @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
+          @mute="(on) => act('set_muted', { freqKhz: r.freq_khz, on })"
+          @select="act('set_selected', { freqKhz: r.freq_khz })"
+          :locked="locked(r.freq_khz)"
+          :transmitting="isTransmitting(r)"
+          :last-talk="lastTalk(r.freq_khz)"
+          :roster="feed?.roster ?? {}"
+          :compact="compact"
+          :transmit-allowed="mayTransmit"
+          :over-tx-limit="overTxLimit(r.freq_khz)"
+          :max-tx="txBudget?.max_tx ?? null"
+          @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
+        />
+        <p v-if="!radios.length" class="w-full py-6 text-center text-xs opacity-50">
+          {{ t("freq.empty") }}
+        </p>
+      </div>
 
       <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
       <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
@@ -430,16 +461,31 @@ async function act(name: string, args: Record<string, unknown>) {
       </div>
     </section>
 
-    <footer class="flex items-center justify-between gap-3 border-t pt-3 text-xs">
+    <footer
+      v-if="!compact"
+      class="flex items-center justify-between gap-3 border-t pt-3 text-xs"
+    >
       <button
-        class="rounded border px-4 py-2"
-        :class="pressed ? 'bg-red-600 text-white' : ''"
-        @pointerdown="invoke('set_transmitting', { on: true })"
-        @pointerup="invoke('set_transmitting', { on: false })"
-        @pointerleave="invoke('set_transmitting', { on: false })"
+        class="flex items-center gap-2"
+        :title="t('ptt.hold_tip')"
+        @pointerdown="pttDown"
+        @pointerup="pttUp"
+        @pointercancel="pttUp"
       >
-        {{ pressed ? t("ptt.transmitting") : t("ptt.hold") }}
+        <span
+          class="inline-block h-3 w-3 rounded-full"
+          :style="{ background: talking ? '#c7861d' : '#8b90a4' }"
+        />
+        <span
+          class="text-xs"
+          :class="talking ? 'font-bold' : 'opacity-60'"
+          :style="talking ? { color: '#c7861d' } : {}"
+        >PTT</span>
       </button>
+      <span class="opacity-70">
+        <template v-if="connected && onDuty">{{ t("duty.staffing", { callsign: feed?.duty.callsign ?? "" }) }}</template>
+        <template v-else-if="connected">{{ t("duty.observer") }}</template>
+      </span>
       <span v-if="snap?.health && !compact" class="opacity-60">
         {{
           t("health.summary", {

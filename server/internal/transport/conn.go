@@ -244,6 +244,18 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	}()
 
 	cw := &controlWriter{st: st}
+	sess.SetNotifyTalker(func(speaker router.SessionID, cid string, freq uint32) {
+		out, err := control.Encode(&control.Notice{
+			Kind:    control.KindTalker,
+			Freq:    freq,
+			Session: uint32(speaker),
+			CID:     cid,
+		})
+		if err != nil {
+			return
+		}
+		_ = cw.write(out)
+	})
 	go readDatagrams(ctx, conn, r, sess.ID, cw)
 	if code, reason, ok := closeAfterControl(readControl(st, cw, r, sess)); ok {
 		// 关在这里而不是靠外层那条 defer：那条发的是 CloseNormal，

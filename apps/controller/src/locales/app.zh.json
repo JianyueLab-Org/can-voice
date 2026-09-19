@@ -25,6 +25,8 @@
   "freq": {
     "out_of_band": "频率要在 118.000 – 136.975 之间",
     "add": "添加频率",
+    "hint": "121.800",
+    "callsign_hint": "呼号（可空）",
     "empty": "还没有频率。在上面填一个，例如 121.800"
   },
   "notice": {
@@ -41,7 +43,9 @@
     "off": "你此刻不在任何席位上（数据源里没有你），发射已关闭，但还听得见。在 EuroScope 上线之后，这里会在一分钟内跟上。",
     "dropped_tx": "台面上原来开着的发射已经全部关掉。",
     "unknown": "还没查到数据源，席位状态未知——下一轮（一分钟内）会再试。",
-    "on": "在席位 {callsign}"
+    "on": "在席位 {callsign}",
+    "observer": "未上席位 · 只收不发",
+    "staffing": "值守 {callsign}"
   },
   "panel": {
     "open": "音频与 PTT",
@@ -67,6 +71,14 @@
     "unmute_tip": "已静音，点一下恢复",
     "mute_tip": "静音这个频率（仍然收包、仍然亮灯）",
     "last_talk": "最后一次通话",
+    "last_rx_none": "最后通话: --",
+    "last_rx": "最后通话: {who}  {stamp}",
+    "no_callsign": "（无呼号）",
+    "mute": "静音",
+    "rx_tip": "收这个频率",
+    "tx_tip": "PTT 按下时对这个频率发话",
+    "xc_tip": "交叉耦合",
+    "remove_tip": "从台面上拿掉",
     "tx_denied": "发射被拒",
     "tx_denied_tip": "服务端没有给这个频率的发射权",
     "rx_denied": "接收被拒",
@@ -79,15 +91,18 @@
     "microphone": "麦克风",
     "headset": "耳机",
     "system_default": "跟随系统默认",
-    "applies_now": "换设备立刻生效。"
+    "applies_now": "换设备立刻生效。",
+    "mic_volume": "麦克风",
+    "speaker_volume": "喇叭"
   },
   "ptt": {
-    "hold": "按住发话",
+    "hold": "按住通话",
+    "hold_tip": "按住这里说话。也可以在设置里绑按键、鼠标侧键或摇杆按钮",
     "transmitting": "发话中",
     "title": "按键发话（PTT）",
     "unresolved": "这个绑定在本系统上认不出来，请重新录一次",
     "delete": "删除",
-    "none": "还没有绑定。按下面的按钮录一个。",
+    "none": "还没有绑定，PTT 用不了",
     "capturing": "按一下你要的键…",
     "record": "录制一个绑定",
     "wayland": "本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。请改用手柄，或者在 X11 会话下使用。",

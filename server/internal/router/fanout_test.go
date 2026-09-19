@@ -78,6 +78,39 @@ func TestFanoutDeliversToListenersButNotBackToTheSender(t *testing.T) {
 	}
 }
 
+func TestFanoutAnnouncesATalkerOnce(t *testing.T) {
+	r := New()
+	var notes []struct {
+		speaker SessionID
+		cid     string
+		freq    uint32
+	}
+	speaker := newRecorder(t, r, "1000")
+	listener := newRecorder(t, r, "1001")
+	listener.sess.SetNotifyTalker(func(s SessionID, cid string, freq uint32) {
+		notes = append(notes, struct {
+			speaker SessionID
+			cid     string
+			freq    uint32
+		}{s, cid, freq})
+	})
+	r.Subscribe(speaker.sess.ID, control.Sub{TX: []uint32{121800}})
+	r.Subscribe(listener.sess.ID, control.Sub{RX: []uint32{121800}})
+
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 1, 0xAA)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if _, err := r.Fanout(speaker.sess.ID, packet(121800, 2, 0xBB)); err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("talker notices = %d, want 1", len(notes))
+	}
+	if notes[0].speaker != speaker.sess.ID || notes[0].cid != "1000" || notes[0].freq != 121800 {
+		t.Fatalf("notice = %+v, want speaker %d cid 1000 freq 121800", notes[0], speaker.sess.ID)
+	}
+}
+
 func TestFanoutStampsSpeakerAndLeavesOpusUntouched(t *testing.T) {
 	r := New()
 	speaker := newRecorder(t, r, "1000")

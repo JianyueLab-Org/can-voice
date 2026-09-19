@@ -18,9 +18,11 @@
 
 pub mod appearance;
 pub mod endpoints;
+pub mod volume;
 
 pub use appearance::{Appearance, Language, Theme};
 pub use endpoints::Endpoints;
+pub use volume::VolumePercent;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
