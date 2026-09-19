@@ -74,8 +74,7 @@ async function push() {
 /**
  * 「按一下你要的键」。
  *
- * 先把当前这组推下去，再开始录。捕获自己会把键盘监听拉起来：
- * 空栈按「只起已绑定的来源」是不会起 rdev 的。
+ * 先把当前这组推下去，再开始录。空栈也要听得到正在绑的那个键。
  */
 async function capture() {
   if (capturing.value) return;
@@ -98,6 +97,7 @@ async function capture() {
     if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      void invoke("cancel_ptt_capture");
     }
   }, 150);
 }

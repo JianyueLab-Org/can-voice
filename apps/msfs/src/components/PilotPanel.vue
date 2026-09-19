@@ -103,7 +103,7 @@ async function push() {
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 }
 
-/** 捕获会把键盘监听拉起来：空栈按「只起已绑定的来源」是不会起 rdev 的。 */
+/** 空栈也要听得到正在绑的那个键。 */
 async function capture() {
   if (capturing.value) return;
   capturing.value = true;
@@ -121,6 +121,7 @@ async function capture() {
     } else if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      void invoke("cancel_ptt_capture");
     }
   }, 150);
 }

@@ -539,6 +539,15 @@ fn take_captured_binding(state: tauri::State<'_, App>) -> Option<can_voice_ptt::
     state.ptt.lock().ok().and_then(|s| s.as_ref().and_then(|w| w.take_captured()))
 }
 
+#[tauri::command]
+fn cancel_ptt_capture(state: tauri::State<'_, App>) {
+    if let Ok(s) = state.ptt.lock() {
+        if let Some(w) = s.as_ref() {
+            w.cancel_capture();
+        }
+    }
+}
+
 /// 把 PTT 的按下状态泵给语音层。
 ///
 /// 一帧一拍（20 毫秒）：比帧还快没有意义，慢了会让发话的头尾被切掉。
@@ -849,6 +858,7 @@ pub fn run() {
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,
+            cancel_ptt_capture,
             take_captured_binding,
             mouse_ptt_supported,
             audio_devices,

@@ -244,5 +244,9 @@ mod tests {
             w.rdev_started.load(Ordering::Relaxed),
             "capture has to hear keys that are not bound yet"
         );
+        assert!(
+            w.joystick_started.load(Ordering::Relaxed),
+            "capture has to hear a joystick button that is not bound yet"
+        );
     }
 }
