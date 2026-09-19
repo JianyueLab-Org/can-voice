@@ -35,6 +35,8 @@ pub mod notice_kind {
     // 没有哪一份可信。这个常量曾经存在、从没被发出过。
     /// 你发来的那一帧服务端解不开。
     pub const UNKNOWN_MESSAGE: &str = "unknown_message";
+    /// 某个会话开始对你说话。`session` 是包头里的 speaker，`cid` 是 CAN 号。
+    pub const TALKER: &str = "talker";
 }
 
 /// 把 JSON 的 `null` 当成缺省值读。
@@ -173,6 +175,12 @@ pub struct Notice {
     pub freq: u32,
     #[serde(default)]
     pub reason: String,
+    /// 发言者的会话 id，只在 `talker` 上有。
+    #[serde(default)]
+    pub session: u32,
+    /// 发言者的 CAN 号，只在 `talker` 上有。
+    #[serde(default)]
+    pub cid: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

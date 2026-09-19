@@ -235,6 +235,8 @@ async fn pump(
         }
     };
     let mut ptt = false;
+    let mut mic_gain = 1.0f32;
+    let mut speaker_gain = 1.0f32;
 
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -273,6 +275,10 @@ async fn pump(
                     if let Some(io) = audio {
                         io.set_devices(input.as_deref(), output.as_deref());
                     }
+                }
+                Some(Command::Master { mic, speaker }) => {
+                    mic_gain = mic;
+                    speaker_gain = speaker;
                 }
                 Some(Command::Shutdown) | None => {
                     quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
@@ -345,8 +351,9 @@ async fn pump(
                 }
 
                 // 接收：混音器每一拍都出恰好一帧，直接送去播放。
-                let (pcm, rx_events) = mixer.tick();
+                let (mut pcm, rx_events) = mixer.tick();
                 if let Some(io) = audio {
+                    scale_pcm(&mut pcm, speaker_gain);
                     io.play(&pcm);
                 }
                 for e in rx_events {
@@ -356,8 +363,9 @@ async fn pump(
                 // 发送：先把采集到的喂进去，再看这一拍有没有一帧要发。
                 if let Some(t) = tx.as_mut() {
                     if let Some(io) = audio {
-                        let captured = io.take_capture();
+                        let mut captured = io.take_capture();
                         if !captured.is_empty() {
+                            scale_pcm(&mut captured, mic_gain);
                             t.push(&captured);
                         }
                     }
@@ -392,6 +400,17 @@ async fn pump(
                 }
             },
         }
+    }
+}
+
+fn scale_pcm(samples: &mut [i16], gain: f32) {
+    if (gain - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    for s in samples {
+        *s = (*s as f32 * gain)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }
 
@@ -463,6 +482,12 @@ fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice)
         let _ = events.send(Event::TxDenied {
             freq_khz: n.freq,
             reason: n.reason,
+        });
+    } else if n.kind == notice_kind::TALKER {
+        let _ = events.send(Event::Talker {
+            session: n.session,
+            cid: n.cid,
+            freq_khz: n.freq,
         });
     } else {
         let _ = events.send(Event::Notice {

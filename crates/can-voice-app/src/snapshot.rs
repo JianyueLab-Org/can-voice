@@ -60,6 +60,9 @@ pub struct Snapshot {
     pub health: Option<Health>,
     /// 服务端的其它通知，最近的在最后。
     pub notices: Vec<(String, u32, String)>,
+    /// 会话 id → CAN 号。来自 NOTICE talker，每个发言者只来一次。
+    #[serde(default)]
+    pub speakers: BTreeMap<u32, String>,
     /// 每个频率上最近一次通话。
     ///
     /// **绿点只说"此刻有没有人在讲"。** 管制员真正要判断的是"这个频率还活着
@@ -78,14 +81,13 @@ pub struct Snapshot {
 }
 
 /// 某个频率上最近一次通话。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LastTalk {
     /// 说话的那个人的会话 id。
-    ///
-    /// **这不是 CAN 号，也换不出呼号来**：协议里 `speaker` 是服务端给这条会话编
-    /// 的号，客户端手上没有它到 CAN 号的映射，而那需要控制面上多一条消息。
-    /// 呼号那一半因此还欠着（issue #46）。
     pub speaker: u32,
+    /// CAN 号。空串表示 talker 通知还没到。界面用花名册翻成呼号。
+    #[serde(default)]
+    pub cid: String,
     /// Unix 秒。界面自己按本地时区格式化——这一层不知道用户在哪个时区。
     pub at: u64,
 }
@@ -101,6 +103,7 @@ impl Default for Snapshot {
             denied_xc: BTreeSet::new(),
             health: None,
             notices: Vec::new(),
+            speakers: BTreeMap::new(),
             last_talk: BTreeMap::new(),
             max_tx: None,
             tx_budget: None,
@@ -143,6 +146,18 @@ impl Snapshot {
                     .or_default()
                     .insert(*speaker);
             }
+            Event::Talker {
+                session,
+                cid,
+                freq_khz: _,
+            } => {
+                self.speakers.insert(*session, cid.clone());
+                for t in self.last_talk.values_mut() {
+                    if t.speaker == *session {
+                        t.cid = cid.clone();
+                    }
+                }
+            }
             Event::RxEnd {
                 freq_khz, speaker, ..
             } => {
@@ -155,6 +170,7 @@ impl Snapshot {
                     *freq_khz,
                     LastTalk {
                         speaker: *speaker,
+                        cid: self.speakers.get(speaker).cloned().unwrap_or_default(),
                         at: now_unix,
                     },
                 );
@@ -217,6 +233,7 @@ impl Snapshot {
                 self.denied_xc.clear();
                 self.ended = None;
                 self.receiving.clear();
+                self.speakers.clear();
             }
             LinkState::Connecting => {}
             LinkState::Reconnecting => {
@@ -279,11 +296,44 @@ mod tests {
             1_700_000_004,
         );
 
-        let last = s.last_talk.get(&121_800).copied().expect("recorded");
+        let last = s.last_talk.get(&121_800).cloned().expect("recorded");
         assert_eq!(last.speaker, 7);
         // 记的是**说完**的那一刻：开始说的时间在一段长通话里越来越不像"最近"。
         assert_eq!(last.at, 1_700_000_004);
         assert!(!s.is_receiving(121_800));
+        assert!(last.cid.is_empty());
+    }
+
+    /// talker 通知把会话号换成 CAN 号。后到也要补上已经记下的最后通话。
+    #[test]
+    fn a_talker_notice_fills_in_the_cid() {
+        let mut s = Snapshot::default();
+        s.apply_at(
+            &Event::RxStart {
+                freq_khz: 121_800,
+                speaker: 7,
+            },
+            1,
+        );
+        s.apply_at(
+            &Event::RxEnd {
+                freq_khz: 121_800,
+                speaker: 7,
+                frames: 10,
+                secs: 0.2,
+            },
+            2,
+        );
+        s.apply_at(
+            &Event::Talker {
+                session: 7,
+                cid: "1000".into(),
+                freq_khz: 121_800,
+            },
+            3,
+        );
+        let last = s.last_talk.get(&121_800).cloned().expect("recorded");
+        assert_eq!(last.cid, "1000");
     }
 
     #[test]

@@ -93,12 +93,19 @@ type Notice struct {
 	Kind   string `json:"kind"`
 	Freq   uint32 `json:"freq,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Session / CID 只在 KindTalker 上有：数据面包头的 speaker 是会话号，
+	// 电台行要显示的是 CAN 号（再经 datafeed 翻成呼号）。旧客户端不认识这两
+	// 个键，serde / encoding/json 都会忽略。
+	Session uint32 `json:"session,omitempty"`
+	CID     string `json:"cid,omitempty"`
 }
 
 // Notice 的 Kind 取值。
 const (
 	KindTxDenied         = "tx_denied"
 	KindRangeUnavailable = "range_unavailable"
+	// KindTalker：某个会话开始对这个听众说话。每个听众对每个发言者只发一次。
+	KindTalker = "talker"
 	// **没有 sub_rejected，而且不该有。** 被拒的订阅走 SUBACK 的 Rejected /
 	// RejectedXC 两张单子，那是 SUB 的同步答复，客户端按差集分派（见 Rust 侧的
 	// on_ack）。再发一条 NOTICE 是把同一件事在同一条流上说两遍，而两份报告一旦

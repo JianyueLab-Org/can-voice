@@ -159,6 +159,8 @@ export interface Settings {
   real_name: string;
   input_device: string | null;
   output_device: string | null;
+  mic_volume: number;
+  speaker_volume: number;
   inject: boolean;
   /** 收到管制消息时播放提示音。 */
   message_sound: boolean;
@@ -225,6 +227,8 @@ export interface VoiceSnapshot {
   link: string;
   ended: unknown;
   notices: [string, number, string][];
+  /** 每个频率上正在讲话的人。键是 kHz 的十进制写法。 */
+  receiving?: Record<string, number[]>;
 }
 
 /** 语音链路对人怎么说。在模板里调：切了语言要跟着变。 */

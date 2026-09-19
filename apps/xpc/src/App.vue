@@ -37,6 +37,23 @@ const error = ref<unknown>(null);
 const busy = ref(false);
 const view = ref<View | null>(null);
 const pressed = ref(false);
+/** 屏幕按钮按着。灯要立刻亮，不能等那一拍快照。 */
+const holding = ref(false);
+const talking = computed(() => holding.value || pressed.value);
+/** 当前语音频率，kHz。观察员看手输/跟随，飞行员看 COM1。 */
+const voiceKhz = computed(() => {
+  const v = view.value;
+  if (v?.observer?.frequency != null) return v.observer.frequency;
+  const sim = v?.sim;
+  if (!sim?.com1_power || sim.com1 == null) return null;
+  const khz = Math.round(sim.com1 * 1000);
+  return khz >= 118000 && khz <= 136975 ? khz : null;
+});
+const receiving = computed(() => {
+  const khz = voiceKhz.value;
+  if (khz == null) return false;
+  return (view.value?.voice?.receiving?.[String(khz)]?.length ?? 0) > 0;
+});
 const mouseSupported = ref(true);
 const recipient = ref("");
 const message = ref("");
@@ -50,6 +67,16 @@ const online = computed(() => view.value?.link != null || observing.value);
 
 /** 频率框里显示的样子：存的是 kHz，框里写 `121.800`，没有就空着。 */
 const boxText = (khz: number | null) => (khz === null ? "" : khzText(khz));
+
+function pttDown(e: PointerEvent) {
+  holding.value = true;
+  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  void invoke("set_transmitting", { on: true });
+}
+function pttUp() {
+  holding.value = false;
+  void invoke("set_transmitting", { on: false });
+}
 
 async function refresh() {
   view.value = await invoke<View>("view");
@@ -354,14 +381,23 @@ const send = () =>
     </section>
 
     <footer class="flex items-center gap-2 border-t" :class="compact ? 'pt-2' : 'pt-3'">
+      <span
+        class="rounded border px-2 py-1 font-mono text-xs"
+        :class="talking ? 'bg-red-600 text-white' : 'opacity-50'"
+      >TX</span>
+      <span
+        class="rounded border px-2 py-1 font-mono text-xs"
+        :class="receiving ? 'bg-green-500 text-white' : 'opacity-50'"
+      >RX</span>
       <button
         class="rounded border px-4 py-2 text-xs"
-        :class="pressed ? 'bg-red-600 text-white' : ''"
-        @pointerdown="invoke('set_transmitting', { on: true })"
-        @pointerup="invoke('set_transmitting', { on: false })"
-        @pointerleave="invoke('set_transmitting', { on: false })"
+        :class="talking ? 'bg-red-600 text-white' : ''"
+        :title="t('chat.push_to_talk_tip')"
+        @pointerdown="pttDown"
+        @pointerup="pttUp"
+        @pointercancel="pttUp"
       >
-        {{ pressed ? t("chat.transmitting") : t("chat.push_to_talk") }}
+        {{ t("chat.push_to_talk") }}
       </button>
       <input
         v-if="!compact"

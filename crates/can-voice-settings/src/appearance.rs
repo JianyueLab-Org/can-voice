@@ -13,10 +13,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
-    /// 跟着系统走。默认。
-    #[default]
+    /// 跟着系统走。
     System,
     Light,
+    /// 原来 voice 只有深色。第一次启动、设置文件里没有这一项，都是它。
+    #[default]
     Dark,
 }
 
@@ -110,7 +111,7 @@ mod tests {
     fn an_old_settings_file_with_no_appearance_at_all_reads_as_the_default() {
         let got: Appearance = serde_json::from_str("{}").unwrap();
         assert_eq!(got, Appearance::default());
-        assert_eq!(got.theme, Theme::System);
+        assert_eq!(got.theme, Theme::Dark);
         assert!(!got.always_on_top);
         assert!(!got.compact);
         assert_eq!(got.language, Language::System);

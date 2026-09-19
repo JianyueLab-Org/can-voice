@@ -73,6 +73,9 @@ type Session struct {
 	// router 因此不依赖 QUIC，可以纯逻辑测试。
 	send func([]byte)
 
+	// notifyTalker 见 SessionOpts.NotifyTalker。
+	notifyTalker func(speaker SessionID, cid string, freq uint32)
+
 	// closeConn 断开这条会话的底层连接。同一个 CID 再次登录时用它顶掉旧会话。
 	// 和 send 一样由传输层注入，router 因此仍然不认识 QUIC。
 	//
@@ -88,6 +91,11 @@ func (s *Session) Send(b []byte) {
 	if s.send != nil {
 		s.send(b)
 	}
+}
+
+// SetNotifyTalker 装上 talker 通知。握手时还没有控制流写口，会话打开之后才接。
+func (s *Session) SetNotifyTalker(f func(speaker SessionID, cid string, freq uint32)) {
+	s.notifyTalker = f
 }
 
 var nextID atomic.Uint32

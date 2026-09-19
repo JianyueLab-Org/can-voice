@@ -33,6 +33,8 @@ const inject = ref(true);
 const chime = ref(true);
 const chimeAll = ref(false);
 const chimeVolume = ref(100);
+const mic = ref(100);
+const speaker = ref(100);
 const range = ref(200);
 const cslDir = ref("");
 const bindings = ref<BindingView[]>([]);
@@ -55,6 +57,8 @@ onMounted(async () => {
   chime.value = s.message_sound;
   chimeAll.value = s.message_sound_all;
   chimeVolume.value = s.message_sound_volume;
+  mic.value = s.mic_volume ?? 100;
+  speaker.value = s.speaker_volume ?? 100;
   range.value = s.traffic_range_nm;
   cslDir.value = s.csl_dir;
   plan.value.aircraft = s.aircraft;
@@ -70,6 +74,9 @@ async function file() {
 
 const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
+
+const applyVolume = () =>
+  invoke("set_master_volume", { mic: mic.value, speaker: speaker.value });
 
 const applyInject = () => invoke("set_injection", { on: inject.value });
 
@@ -219,6 +226,16 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">{{ t("local.devices_note") }}</p>
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">{{ t("local.mic_volume") }}</span>
+        <input type="range" min="0" max="200" step="1" v-model.number="mic" class="flex-1" @change="applyVolume" />
+        <span class="w-10 text-right font-mono">{{ mic }}%</span>
+      </label>
+      <label class="flex items-center gap-2">
+        <span class="w-16 shrink-0 opacity-70">{{ t("local.speaker_volume") }}</span>
+        <input type="range" min="0" max="200" step="1" v-model.number="speaker" class="flex-1" @change="applyVolume" />
+        <span class="w-10 text-right font-mono">{{ speaker }}%</span>
+      </label>
 
       <label class="flex items-center gap-2">
         <input v-model="chime" type="checkbox" @change="applyChime" />

@@ -124,7 +124,8 @@ impl RadioStack {
         Self::default()
     }
 
-    /// 加一个频率。已存在则什么也不做。新加的频率默认接收。
+    /// 加一个频率。已存在则什么也不做。新加的三个开关都关——和原来 voice 一样，
+    /// 加进来不等于开始收。
     pub fn add(&mut self, freq_khz: u32) {
         self.add_named(freq_khz, "");
     }
@@ -143,7 +144,7 @@ impl RadioStack {
         let selected = self.radios.is_empty();
         self.radios.push(Radio {
             freq_khz,
-            rx: true,
+            rx: false,
             tx: false,
             xc: false,
             gain: 1.0,
@@ -151,6 +152,7 @@ impl RadioStack {
             muted: false,
             callsign: callsign.to_string(),
         });
+        self.radios.sort_by_key(|r| r.freq_khz);
     }
 
     /// 把"正在管的那个频率"标出来。`None` = 此刻不在管任何席位。
@@ -397,6 +399,7 @@ mod tests {
         let mut s = RadioStack::new();
         for f in freqs {
             s.add(*f);
+            s.set_rx(*f, true);
         }
         s
     }
@@ -559,11 +562,21 @@ mod tests {
     }
 
     #[test]
-    fn a_new_radio_starts_receiving() {
-        let s = stack_with(&[118_000]);
+    fn a_new_radio_starts_with_every_switch_off() {
+        let mut s = RadioStack::new();
+        s.add(118_000);
         let r = radio(&s, 118_000);
-        assert!(r.rx, "a freshly added radio should receive");
-        assert!(!r.tx && !r.xc);
+        assert!(!r.rx && !r.tx && !r.xc);
+    }
+
+    #[test]
+    fn radios_are_kept_in_frequency_order() {
+        let mut s = RadioStack::new();
+        s.add(136_000);
+        s.add(118_000);
+        s.add(121_800);
+        let freqs: Vec<u32> = s.radios().iter().map(|r| r.freq_khz).collect();
+        assert_eq!(freqs, vec![118_000, 121_800, 136_000]);
     }
 
     #[test]

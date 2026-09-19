@@ -18,12 +18,16 @@ interface Settings {
   cid: string;
   input_device: string | null;
   output_device: string | null;
+  mic_volume: number;
+  speaker_volume: number;
 }
 
 const inputs = ref<string[]>([]);
 const outputs = ref<string[]>([]);
 const input = ref<string>("");
 const output = ref<string>("");
+const mic = ref(100);
+const speaker = ref(100);
 const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
 const mouseOk = ref(true);
@@ -38,6 +42,8 @@ async function load() {
   const s = await invoke<Settings>("settings");
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
+  mic.value = s.mic_volume ?? 100;
+  speaker.value = s.speaker_volume ?? 100;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 }
 
@@ -54,6 +60,10 @@ async function applyDevices() {
     input: input.value || null,
     output: output.value || null,
   });
+}
+
+async function applyVolume() {
+  await invoke("set_master_volume", { mic: mic.value, speaker: speaker.value });
 }
 
 async function push() {
@@ -117,6 +127,32 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">{{ t("audio.applies_now") }}</p>
+      <label class="flex items-center gap-2">
+        {{ t("audio.mic_volume") }}
+        <input
+          type="range"
+          min="0"
+          max="200"
+          step="1"
+          v-model.number="mic"
+          class="flex-1"
+          @change="applyVolume"
+        />
+        <span class="w-10 text-right font-mono">{{ mic }}%</span>
+      </label>
+      <label class="flex items-center gap-2">
+        {{ t("audio.speaker_volume") }}
+        <input
+          type="range"
+          min="0"
+          max="200"
+          step="1"
+          v-model.number="speaker"
+          class="flex-1"
+          @change="applyVolume"
+        />
+        <span class="w-10 text-right font-mono">{{ speaker }}%</span>
+      </label>
     </div>
 
     <div class="flex flex-col gap-2">

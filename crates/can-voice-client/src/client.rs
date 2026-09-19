@@ -91,6 +91,15 @@ pub enum Event {
     Refused { reason: RefusedReason },
     /// 某个频率上有人开始讲话。
     RxStart { freq_khz: u32, speaker: u32 },
+    /// 发言者的会话号对应哪个 CAN 号。每个发言者只来一次。
+    ///
+    /// 数据面包头里的 `speaker` 是会话 id，电台行要显示的是呼号：先拿到 CID，
+    /// 再去 datafeed 花名册翻。
+    Talker {
+        session: u32,
+        cid: String,
+        freq_khz: u32,
+    },
     /// 某个频率上有人讲完了。
     ///
     /// 带上帧数和时长，是因为日志约定是**每次通话一行**而不是两行 ——
@@ -174,6 +183,11 @@ pub(crate) enum Command {
     Devices {
         input: Option<String>,
         output: Option<String>,
+    },
+    /// 麦克风 / 喇叭总音量。1.0 是原声，和原来 voice 的 100% 同一量纲。
+    Master {
+        mic: f32,
+        speaker: f32,
     },
     Shutdown,
 }
@@ -259,6 +273,11 @@ impl VoiceClient {
     /// 是 `!Send`。设备没变时是空操作：重建会让声音断一下。
     pub fn set_audio_devices(&self, input: Option<String>, output: Option<String>) {
         let _ = self.commands.send(Command::Devices { input, output });
+    }
+
+    /// 麦克风 / 喇叭总音量。`1.0` 是原声。
+    pub fn set_master_volume(&self, mic: f32, speaker: f32) {
+        let _ = self.commands.send(Command::Master { mic, speaker });
     }
 
     /// 订阅事件流。

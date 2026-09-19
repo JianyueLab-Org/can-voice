@@ -145,6 +145,9 @@ func (r *Router) Fanout(from SessionID, packet []byte) (int, error) {
 			// QUIC 的发送队列），共用一份缓冲就是 use-after-free 那一类。
 			l.Send(append(out, opus...))
 			n++
+			if r.noteTalker(l.ID, sender.ID) && l.notifyTalker != nil {
+				l.notifyTalker(sender.ID, sender.CID, freq)
+			}
 		}
 	}
 	return n, nil

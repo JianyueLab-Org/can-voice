@@ -29,6 +29,9 @@ type Router struct {
 	byCID map[string]SessionID
 	// locator 是位置来源，扇出时查它。为 nil 等于永久降级：全部放行。
 	locator Locator
+	// announced：听众 → 已经向他介绍过的发言者。每个听众对每个发言者只发一次
+	// talker 通知（#46）。键是会话号，断线就清。
+	announced map[SessionID]map[SessionID]struct{}
 	// xc 是频率到与之交叉耦合的频率的派生索引，值是引用计数。
 	//
 	// 计数而不是布尔：几个管制员可能各自声明同一对，其中一个撤销时这一对
@@ -39,10 +42,11 @@ type Router struct {
 // New 建一个空的 Router。
 func New() *Router {
 	return &Router{
-		sessions: map[SessionID]*Session{},
-		rx:       map[uint32]map[SessionID]struct{}{},
-		byCID:    map[string]SessionID{},
-		xc:       map[uint32]map[uint32]int{},
+		sessions:  map[SessionID]*Session{},
+		rx:        map[uint32]map[SessionID]struct{}{},
+		byCID:     map[string]SessionID{},
+		xc:        map[uint32]map[uint32]int{},
+		announced: map[SessionID]map[SessionID]struct{}{},
 	}
 }
 
@@ -70,6 +74,9 @@ type SessionOpts struct {
 	MaxRX int
 	// Send 把一个数据面包发给这个会话。
 	Send func([]byte)
+	// NotifyTalker 告诉这个听众：会话 speaker 的 CAN 号是 cid。
+	// 每个发言者只调一次。可以为 nil（纯逻辑测试里就是）。
+	NotifyTalker func(speaker SessionID, cid string, freq uint32)
 	// Close 断开底层连接。可以为 nil（纯逻辑测试里就是）。
 	Close func()
 }
@@ -97,14 +104,15 @@ func evictionKey(cid, station string) string {
 // 就看到它，那时 subs.Load() 必须已经可用。
 func (r *Router) Add(o SessionOpts) *Session {
 	s := &Session{
-		ID:        newSessionID(),
-		CID:       o.CID,
-		Follow:    o.Follow,
-		Station:   o.Station,
-		MaxTX:     o.MaxTX,
-		MaxRX:     o.MaxRX,
-		send:      o.Send,
-		closeConn: o.Close,
+		ID:           newSessionID(),
+		CID:          o.CID,
+		Follow:       o.Follow,
+		Station:      o.Station,
+		MaxTX:        o.MaxTX,
+		MaxRX:        o.MaxRX,
+		send:         o.Send,
+		notifyTalker: o.NotifyTalker,
+		closeConn:    o.Close,
 	}
 	s.subs.Store(emptySubs())
 
@@ -169,6 +177,26 @@ func (r *Router) removeLocked(id SessionID) {
 		delete(r.byCID, evictionKey(s.CID, s.Station))
 	}
 	delete(r.sessions, id)
+	delete(r.announced, id)
+	for _, m := range r.announced {
+		delete(m, id)
+	}
+}
+
+// noteTalker 记下听众 L 已经知道发言者 S。第一次返回 true。
+func (r *Router) noteTalker(listener, speaker SessionID) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m := r.announced[listener]
+	if m == nil {
+		m = map[SessionID]struct{}{}
+		r.announced[listener] = m
+	}
+	if _, ok := m[speaker]; ok {
+		return false
+	}
+	m[speaker] = struct{}{}
+	return true
 }
 
 // Subscribe 用一次**全量**声明整体替换该会话的订阅集合。
