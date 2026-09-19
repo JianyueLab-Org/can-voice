@@ -301,7 +301,9 @@ RX 灯在这条会话剩下的时间里一直亮着。尾帧买到的是**及时
 
 `.env` 里只有两项必填，别的都有默认值。镜像由 CI 构建并推到 GHCR
 （`ghcr.io/jianyuelab-org/can-voice`，`latest` 加一个 `sha-<commit>`，
-amd64 + arm64）。
+amd64 + arm64）。回滚：在 `.env` 里把 `CAN_VOICE_IMAGE`（机队是
+`CAN_VOICE_ATIS_IMAGE`）钉到某个 `sha-<commit>`，再 `docker compose up -d`。
+空着就是 `:latest`。
 
 > 镜像里**没有 shell**（distroless static），看日志用 `docker compose logs`，
 > 不要指望 `docker exec` 进去。
