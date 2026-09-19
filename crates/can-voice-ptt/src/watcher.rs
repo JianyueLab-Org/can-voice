@@ -270,6 +270,9 @@ mod tests {
         let w = PttWatcher::new(vec![]);
         w.begin_capture();
         w.handle_ui_key("KeyV", true);
-        assert_eq!(w.take_captured(), Some(Binding::from_event_code("KeyV").unwrap()));
+        assert_eq!(
+            w.take_captured(),
+            Some(Binding::from_event_code("KeyV").unwrap())
+        );
     }
 }
