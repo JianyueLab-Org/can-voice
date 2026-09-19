@@ -548,6 +548,16 @@ fn cancel_ptt_capture(state: tauri::State<'_, App>) {
     }
 }
 
+/// 窗口内的按键。绑定时不走全局钩子：macOS 没辅助功能时 rdev 会静默丢事件。
+#[tauri::command]
+fn ptt_ui_key(state: tauri::State<'_, App>, code: String, pressed: bool) {
+    if let Ok(s) = state.ptt.lock() {
+        if let Some(w) = s.as_ref() {
+            w.handle_ui_key(&code, pressed);
+        }
+    }
+}
+
 /// 把 PTT 的按下状态泵给语音层。
 ///
 /// 一帧一拍（20 毫秒）：比帧还快没有意义，慢了会让发话的头尾被切掉。
@@ -859,6 +869,7 @@ pub fn run() {
             ptt_pressed,
             begin_ptt_capture,
             cancel_ptt_capture,
+            ptt_ui_key,
             take_captured_binding,
             mouse_ptt_supported,
             audio_devices,

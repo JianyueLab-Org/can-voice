@@ -1094,6 +1094,15 @@ fn cancel_ptt_capture(app: tauri::State<'_, App>) {
     }
 }
 
+#[tauri::command]
+fn ptt_ui_key(app: tauri::State<'_, App>, code: String, pressed: bool) {
+    if let Ok(s) = app.ptt.lock() {
+        if let Some(w) = s.as_ref() {
+            w.handle_ui_key(&code, pressed);
+        }
+    }
+}
+
 /// 本系统能不能用鼠标侧键做 PTT。**macOS 上不能**，界面要把这件事说在前面。
 #[tauri::command]
 fn mouse_ptt_supported() -> bool {
@@ -1689,6 +1698,7 @@ pub fn run() {
             ptt_pressed,
             begin_ptt_capture,
             cancel_ptt_capture,
+            ptt_ui_key,
             take_captured_binding,
             mouse_ptt_supported,
         ])

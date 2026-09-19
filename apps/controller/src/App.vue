@@ -9,6 +9,7 @@ import UpdateBanner from "./components/UpdateBanner.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import OnlineList from "./components/OnlineList.vue";
 import { errorText, t } from "./i18n";
+import { attachPttKeys } from "./pttKeys";
 
 type LinkState = "Connecting" | "Online" | "Reconnecting" | "Offline" | "Evicted";
 type Ended = "Offline" | "Evicted" | { Refused: string | { Other: string } };
@@ -135,14 +136,19 @@ async function refresh() {
   feed.value = await invoke<FeedView>("feed");
 }
 
+let detachPtt: (() => void) | undefined;
 onMounted(async () => {
   void loadAppearance();
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
   cid.value = (await invoke<{ cid: string }>("settings")).cid;
   await refresh();
   timer = window.setInterval(refresh, 200);
+  detachPtt = attachPttKeys();
 });
-onUnmounted(() => window.clearInterval(timer));
+onUnmounted(() => {
+  window.clearInterval(timer);
+  detachPtt?.();
+});
 
 const connected = computed(() => snap.value?.link === "Online");
 

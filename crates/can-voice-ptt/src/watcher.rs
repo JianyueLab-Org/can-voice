@@ -96,6 +96,21 @@ impl PttWatcher {
         self.router.lock().ok().and_then(|mut r| r.take_captured())
     }
 
+    /// 窗口内的按键。绑定时不需要全局钩子；没辅助功能时 rdev 会静默丢事件。
+    pub fn handle_ui_key(&self, code: &str, pressed: bool) {
+        let Some(binding) = Binding::from_event_code(code) else {
+            return;
+        };
+        if let Ok(mut r) = self.router.lock() {
+            if pressed {
+                r.press(binding);
+            } else {
+                r.release(&binding);
+            }
+            self.transmitting.store(r.transmitting(), Ordering::Relaxed);
+        }
+    }
+
     fn publish(&self) {
         if let Ok(r) = self.router.lock() {
             self.transmitting.store(r.transmitting(), Ordering::Relaxed);
@@ -248,5 +263,13 @@ mod tests {
             w.joystick_started.load(Ordering::Relaxed),
             "capture has to hear a joystick button that is not bound yet"
         );
+    }
+
+    #[test]
+    fn a_window_key_is_enough_to_bind_without_rdev_events() {
+        let w = PttWatcher::new(vec![]);
+        w.begin_capture();
+        w.handle_ui_key("KeyV", true);
+        assert_eq!(w.take_captured(), Some(Binding::from_event_code("KeyV").unwrap()));
     }
 }
