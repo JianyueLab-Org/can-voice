@@ -32,6 +32,7 @@ pub struct PttWatcher {
     transmitting: Arc<AtomicBool>,
     stop_joystick: Arc<AtomicBool>,
     rdev_started: Arc<AtomicBool>,
+    joystick_started: Arc<AtomicBool>,
 }
 
 impl PttWatcher {
@@ -42,6 +43,7 @@ impl PttWatcher {
             transmitting: Arc::new(AtomicBool::new(false)),
             stop_joystick: Arc::new(AtomicBool::new(false)),
             rdev_started: Arc::new(AtomicBool::new(false)),
+            joystick_started: Arc::new(AtomicBool::new(false)),
         };
         w.ensure_sources(&bindings);
         w
@@ -71,11 +73,16 @@ impl PttWatcher {
     }
 
     /// 开始"按一下你要的键"。捕获期间事件不驱动 PTT。
+    ///
+    /// **要起监听**：录的时候还没有绑定，按「只起已绑定的来源」rdev 不会起来，
+    /// 第一次绑键就永远录不到。
     pub fn begin_capture(&self) {
         if let Ok(mut r) = self.router.lock() {
             r.begin_capture();
         }
         self.publish();
+        self.ensure_rdev();
+        self.ensure_joystick();
     }
 
     pub fn cancel_capture(&self) {
@@ -138,6 +145,9 @@ impl PttWatcher {
 
     fn ensure_joystick(&self) {
         if self.stop_joystick.load(Ordering::Relaxed) {
+            return;
+        }
+        if self.joystick_started.swap(true, Ordering::SeqCst) {
             return;
         }
         let router = self.router.clone();
@@ -213,5 +223,26 @@ fn translate(e: &rdev::EventType) -> Option<(Binding, bool)> {
             MouseButton::from_rdev(*b).map(|button| (Binding::Mouse { button }, false))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 录按键时还没有绑定，按「只起已绑定的来源」rdev 不会起来，
+    /// 于是第一次绑键永远录不到。捕获必须自己把监听拉起来。
+    #[test]
+    fn capturing_starts_the_keyboard_listener_even_with_no_bindings() {
+        let w = PttWatcher::new(vec![]);
+        assert!(
+            !w.rdev_started.load(Ordering::Relaxed),
+            "an empty stack must not start rdev"
+        );
+        w.begin_capture();
+        assert!(
+            w.rdev_started.load(Ordering::Relaxed),
+            "capture has to hear keys that are not bound yet"
+        );
     }
 }

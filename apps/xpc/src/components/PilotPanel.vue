@@ -113,7 +113,7 @@ async function push() {
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
 }
 
-/** 监听器是**懒起**的：没推过绑定就没有东西在听，录制会永远录不到。 */
+/** 捕获会把键盘监听拉起来：空栈按「只起已绑定的来源」是不会起 rdev 的。 */
 async function capture() {
   if (capturing.value) return;
   capturing.value = true;

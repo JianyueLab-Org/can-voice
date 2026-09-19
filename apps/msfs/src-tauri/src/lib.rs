@@ -1037,6 +1037,7 @@ fn ptt_pressed(app: tauri::State<'_, App>) -> bool {
 /// "按一下你要的键"。捕获期间事件**不驱动 PTT**——正在录的那一下不能被播出去。
 #[tauri::command]
 fn begin_ptt_capture(app: tauri::State<'_, App>) {
+    app.install_ptt(app.settings_snapshot().ptt);
     if let Ok(s) = app.ptt.lock() {
         if let Some(w) = s.as_ref() {
             w.begin_capture();
