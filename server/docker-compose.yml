@@ -15,7 +15,8 @@
 
 services:
   can-voice:
-    image: ghcr.io/jianyuelab-org/can-voice:latest
+    # 回滚：.env 里 CAN_VOICE_IMAGE=…:sha-<commit>。空着就是 :latest。
+    image: ${CAN_VOICE_IMAGE:-ghcr.io/jianyuelab-org/can-voice:latest}
     # **必须写。** 一个同时声明了 image 和 build 的服务，在本地没有镜像时会
     # **安静地从源码构建**，于是部署上去的东西和 CI 产出的不是同一个。这里没有
     # build，但把策略写明白，免得哪天有人加上。
@@ -49,7 +50,8 @@ services:
   # 服务端通播机队。**没有它，全网通播是哑的**——桌面那支 atis-for-can 只挂
   # FSD 席位、发文字，声音不归它管。
   can-voice-atis:
-    image: ghcr.io/jianyuelab-org/can-voice-atis:latest
+    # 回滚：.env 里 CAN_VOICE_ATIS_IMAGE=…:sha-<commit>。空着就是 :latest。
+    image: ${CAN_VOICE_ATIS_IMAGE:-ghcr.io/jianyuelab-org/can-voice-atis:latest}
     pull_policy: always
     container_name: can-voice-atis
     restart: always
