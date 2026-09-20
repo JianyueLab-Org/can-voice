@@ -93,7 +93,11 @@
     "system_default": "System default",
     "applies_now": "Device changes take effect immediately.",
     "mic_volume": "Microphone",
-    "speaker_volume": "Speaker"
+    "speaker_volume": "Speaker",
+    "test_speaker": "Test speaker",
+    "test_mic": "Test microphone",
+    "testing": "Playing…",
+    "testing_mic": "Speak into the microphone…"
   },
   "ptt": {
     "hold": "Hold to talk",

@@ -28,19 +28,19 @@
 //! 候选表）到处都能测，测试也都在。非 Windows 上
 //! [`can_voice_sim::msfs::available`] 返回 false，界面会直说。
 
-use tauri::Manager;
 use can_voice_app::Bridge;
-use can_voice_i18n::Message;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
 use can_voice_fsd::pilot_client::{self, PilotConfig, PilotEvent, PilotHandle};
-use can_voice_sim::msfs::{SimConnectSource, SimConnectTraffic, SimVarSource, TrafficSink};
+use can_voice_i18n::Message;
 use can_voice_sim::chat::{ChatLog, ChatMessage};
 use can_voice_sim::controllers::{ControllerEntry, ControllerTable};
+use can_voice_sim::msfs::{SimConnectSource, SimConnectTraffic, SimVarSource, TrafficSink};
 use can_voice_sim::traffic::{Entry, TrafficTable};
 use can_voice_sim::Snapshot;
 use can_voice_token::TokenSource;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Manager;
 
 /// SimConnect 是一问一答，自己拿一个线程去轮。
 ///
@@ -467,7 +467,6 @@ impl Default for App {
     }
 }
 
-
 /// 界面读的一份快照。
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct View {
@@ -807,6 +806,33 @@ fn set_audio_devices(app: tauri::State<'_, App>, input: Option<String>, output: 
 }
 
 #[tauri::command]
+async fn test_speaker(app: tauri::State<'_, App>) -> Result<(), String> {
+    let s = app.settings_snapshot();
+    let output = s.output_device.clone();
+    let gain = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::speaker_test(output.as_deref(), gain).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn test_mic(app: tauri::State<'_, App>) -> Result<(), String> {
+    let s = app.settings_snapshot();
+    let input = s.input_device.clone();
+    let output = s.output_device.clone();
+    let mic = s.mic_volume.get() as f32 / 100.0;
+    let spk = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::mic_test(input.as_deref(), output.as_deref(), mic, spk)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn set_message_sound(app: tauri::State<'_, App>, on: bool) {
     app.chime
         .enabled
@@ -839,7 +865,6 @@ fn set_message_sound_volume(app: tauri::State<'_, App>, percent: u32) -> u32 {
 fn preview_chime(app: tauri::State<'_, App>) {
     app.chime.preview();
 }
-
 
 /// 一个绑定加上它给界面看的短标识。`token()` 只有 Rust 侧一份。
 #[derive(Debug, serde::Serialize)]
@@ -1475,7 +1500,8 @@ fn spawn_ai_injection(
 async fn check_update(
     app: tauri::State<'_, App>,
 ) -> Result<Option<can_voice_update::Latest>, String> {
-    let (skipped, busy) = { let s = match app.settings.lock() {
+    let (skipped, busy) = {
+        let s = match app.settings.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
         };
@@ -1484,7 +1510,14 @@ async fn check_update(
         (s.skipped_update, busy)
     };
     let origin = app.settings_snapshot().endpoints.api_origin();
-    let Some(latest) = can_voice_update::check(&app.http, &origin, "msfs-for-can", env!("CARGO_PKG_VERSION")).await else {
+    let Some(latest) = can_voice_update::check(
+        &app.http,
+        &origin,
+        "msfs-for-can",
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
+    else {
         return Ok(None);
     };
     let skipped = (!skipped.is_empty()).then_some(skipped);
@@ -1554,7 +1587,11 @@ const COMPACT_SIZE: (f64, f64) = (460.0, 340.0);
 ///
 /// `shrink` 为真时顺手把窗口缩到 [`COMPACT_SIZE`]：只在精简**刚打开**的那一刻、
 /// 和启动时照着存下来的状态还原时才这么做——不然每改一次主题窗口都跳一下。
-fn apply_window(window: &tauri::WebviewWindow, appearance: &can_voice_settings::Appearance, shrink: bool) {
+fn apply_window(
+    window: &tauri::WebviewWindow,
+    appearance: &can_voice_settings::Appearance,
+    shrink: bool,
+) {
     if let Err(e) = window.set_always_on_top(appearance.always_on_top) {
         tracing::warn!(error = %e, "could not change always-on-top");
     }
@@ -1681,6 +1718,8 @@ pub fn run() {
             set_injection,
             set_packages_dir,
             set_audio_devices,
+            test_speaker,
+            test_mic,
             set_message_sound,
             set_message_sound_all,
             set_message_sound_volume,

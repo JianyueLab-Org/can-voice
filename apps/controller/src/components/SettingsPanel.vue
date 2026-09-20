@@ -32,6 +32,8 @@ const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
 const mouseOk = ref(true);
 const keyboardOk = ref(true);
+const testing = ref<"speaker" | "mic" | null>(null);
+const testErr = ref("");
 
 let captureTimer: number | undefined;
 
@@ -45,14 +47,41 @@ async function load() {
   mic.value = s.mic_volume ?? 100;
   speaker.value = s.speaker_volume ?? 100;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
+  await dropGoneDevices();
 }
 
+async function refreshDevices() {
+  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
+  inputs.value = devices.input;
+  outputs.value = devices.output;
+  await dropGoneDevices();
+}
+
+/** 下拉框里已经没有的设备当成拔掉了，改回系统默认。 */
+async function dropGoneDevices() {
+  let changed = false;
+  if (input.value && !inputs.value.includes(input.value)) {
+    input.value = "";
+    changed = true;
+  }
+  if (output.value && !outputs.value.includes(output.value)) {
+    output.value = "";
+    changed = true;
+  }
+  if (changed) await applyDevices();
+}
+
+let deviceTimer: number | undefined;
 onMounted(async () => {
   mouseOk.value = await invoke<boolean>("mouse_ptt_supported");
   keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported");
   await load();
+  deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
 });
-onUnmounted(() => window.clearInterval(captureTimer));
+onUnmounted(() => {
+  window.clearInterval(captureTimer);
+  window.clearInterval(deviceTimer);
+});
 
 async function applyDevices() {
   // 空串是"跟系统默认"，传 null 过去。
@@ -64,6 +93,32 @@ async function applyDevices() {
 
 async function applyVolume() {
   await invoke("set_master_volume", { mic: mic.value, speaker: speaker.value });
+}
+
+async function testSpeaker() {
+  if (testing.value) return;
+  testing.value = "speaker";
+  testErr.value = "";
+  try {
+    await invoke("test_speaker");
+  } catch (e) {
+    testErr.value = String(e);
+  } finally {
+    testing.value = null;
+  }
+}
+
+async function testMic() {
+  if (testing.value) return;
+  testing.value = "mic";
+  testErr.value = "";
+  try {
+    await invoke("test_mic");
+  } catch (e) {
+    testErr.value = String(e);
+  } finally {
+    testing.value = null;
+  }
 }
 
 async function push() {
@@ -128,6 +183,15 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">{{ t("audio.applies_now") }}</p>
+      <div class="flex items-center gap-2">
+        <button class="rounded border px-3 py-1" :disabled="!!testing" @click="testSpeaker">
+          {{ testing === "speaker" ? t("audio.testing") : t("audio.test_speaker") }}
+        </button>
+        <button class="rounded border px-3 py-1" :disabled="!!testing" @click="testMic">
+          {{ testing === "mic" ? t("audio.testing_mic") : t("audio.test_mic") }}
+        </button>
+      </div>
+      <p v-if="testErr" class="text-red-600">{{ testErr }}</p>
       <label class="flex items-center gap-2">
         {{ t("audio.mic_volume") }}
         <input

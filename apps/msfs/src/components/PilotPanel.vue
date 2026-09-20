@@ -38,8 +38,11 @@ const bindings = ref<BindingView[]>([]);
 const capturing = ref(false);
 const keyboardOk = ref(true);
 const mouseOk = ref(true);
+const testing = ref<"speaker" | "mic" | null>(null);
+const testErr = ref("");
 
 let captureTimer: number | undefined;
+let deviceTimer: number | undefined;
 
 onMounted(async () => {
   keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported");
@@ -59,8 +62,13 @@ onMounted(async () => {
   packagesDir.value = s.packages_dir;
   plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
+  await dropGoneDevices();
+  deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
 });
-onUnmounted(() => window.clearInterval(captureTimer));
+onUnmounted(() => {
+  window.clearInterval(captureTimer);
+  window.clearInterval(deviceTimer);
+});
 
 async function file() {
   filed.value = (await invoke<boolean>("file_flight_plan", { plan: plan.value }))
@@ -70,6 +78,52 @@ async function file() {
 
 const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
+
+async function refreshDevices() {
+  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
+  inputs.value = devices.input;
+  outputs.value = devices.output;
+  await dropGoneDevices();
+}
+
+async function dropGoneDevices() {
+  let changed = false;
+  if (input.value && !inputs.value.includes(input.value)) {
+    input.value = "";
+    changed = true;
+  }
+  if (output.value && !outputs.value.includes(output.value)) {
+    output.value = "";
+    changed = true;
+  }
+  if (changed) await applyDevices();
+}
+
+async function testSpeaker() {
+  if (testing.value) return;
+  testing.value = "speaker";
+  testErr.value = "";
+  try {
+    await invoke("test_speaker");
+  } catch (e) {
+    testErr.value = String(e);
+  } finally {
+    testing.value = null;
+  }
+}
+
+async function testMic() {
+  if (testing.value) return;
+  testing.value = "mic";
+  testErr.value = "";
+  try {
+    await invoke("test_mic");
+  } catch (e) {
+    testErr.value = String(e);
+  } finally {
+    testing.value = null;
+  }
+}
 
 const applyVolume = () =>
   invoke("set_master_volume", { mic: mic.value, speaker: speaker.value });
@@ -218,6 +272,15 @@ async function remove(i: number) {
         </select>
       </label>
       <p class="opacity-60">{{ t("local.devices_note") }}</p>
+      <div class="flex items-center gap-2">
+        <button class="rounded border px-3 py-1" :disabled="!!testing" @click="testSpeaker">
+          {{ testing === "speaker" ? t("local.testing") : t("local.test_speaker") }}
+        </button>
+        <button class="rounded border px-3 py-1" :disabled="!!testing" @click="testMic">
+          {{ testing === "mic" ? t("local.testing_mic") : t("local.test_mic") }}
+        </button>
+      </div>
+      <p v-if="testErr" class="text-red-600">{{ testErr }}</p>
       <label class="flex items-center gap-2">
         <span class="w-16 shrink-0 opacity-70">{{ t("local.mic_volume") }}</span>
         <input type="range" min="0" max="200" step="1" v-model.number="mic" class="flex-1" @change="applyVolume" />
