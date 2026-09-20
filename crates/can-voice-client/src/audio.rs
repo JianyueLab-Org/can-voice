@@ -662,6 +662,7 @@ pub fn mic_test(
 }
 
 /// 点名的设备还在不在。不在就用 `default`。
+#[cfg(test)]
 fn fallback_name(want: Option<&str>, names: &[&str], default: Option<&str>) -> Option<String> {
     match want {
         None => default.map(str::to_string),

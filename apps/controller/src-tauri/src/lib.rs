@@ -14,7 +14,6 @@
 //! `audio-for-can` 听起来像飞行员端，它不是。这四个产品名是 can-api 的固定白名单，
 //! 历史错位，**沿用**。
 
-use tauri::Manager;
 use can_voice_app::{Bridge, Snapshot};
 use can_voice_client::stack::{Radio, RadioStack};
 use can_voice_client::Config;
@@ -24,6 +23,7 @@ use can_voice_token::TokenSource;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
+use tauri::Manager;
 
 /// 多久去问一次 datafeed。和旧版一样 60 秒。
 ///
@@ -203,7 +203,6 @@ fn locked<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         Err(p) => p.into_inner(),
     }
 }
-
 
 // ——— 数据源 ———
 //
@@ -536,7 +535,11 @@ fn begin_ptt_capture(state: tauri::State<'_, App>) {
 
 #[tauri::command]
 fn take_captured_binding(state: tauri::State<'_, App>) -> Option<can_voice_ptt::Binding> {
-    state.ptt.lock().ok().and_then(|s| s.as_ref().and_then(|w| w.take_captured()))
+    state
+        .ptt
+        .lock()
+        .ok()
+        .and_then(|s| s.as_ref().and_then(|w| w.take_captured()))
 }
 
 #[tauri::command]
@@ -561,7 +564,10 @@ fn ptt_ui_key(state: tauri::State<'_, App>, code: String, pressed: bool) {
 /// 把 PTT 的按下状态泵给语音层。
 ///
 /// 一帧一拍（20 毫秒）：比帧还快没有意义，慢了会让发话的头尾被切掉。
-fn spawn_ptt_pump(bridge: std::sync::Arc<Bridge>, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn spawn_ptt_pump(
+    bridge: std::sync::Arc<Bridge>,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     tauri::async_runtime::spawn(async move {
         use std::sync::atomic::Ordering;
         let mut last = false;
@@ -587,12 +593,10 @@ fn settings(state: tauri::State<'_, App>) -> Settings {
 ///
 /// **立刻生效**，不必重连：核心库在音频线程上重建两条流。
 #[tauri::command]
-fn set_audio_devices(
-    state: tauri::State<'_, App>,
-    input: Option<String>,
-    output: Option<String>,
-) {
-    state.bridge.set_audio_devices(input.clone(), output.clone());
+fn set_audio_devices(state: tauri::State<'_, App>, input: Option<String>, output: Option<String>) {
+    state
+        .bridge
+        .set_audio_devices(input.clone(), output.clone());
     state.update_settings(|s| {
         s.input_device = input;
         s.output_device = output;
@@ -689,13 +693,18 @@ fn audio_devices() -> serde_json::Value {
 async fn check_update(
     app: tauri::State<'_, App>,
 ) -> Result<Option<can_voice_update::Latest>, String> {
-    let (skipped, busy) = { let s = match app.settings.lock() {
+    let (skipped, busy) = {
+        let s = match app.settings.lock() {
             Ok(s) => s.clone(),
             Err(p) => p.into_inner().clone(),
         };
         // 连着的时候就是"正在工作"：PTT 是全局热键，弹窗抢了焦点就按不出去了。
-        let busy = matches!(app.bridge.snapshot().link, can_voice_client::LinkState::Online);
-        (s.skipped_update, busy) };
+        let busy = matches!(
+            app.bridge.snapshot().link,
+            can_voice_client::LinkState::Online
+        );
+        (s.skipped_update, busy)
+    };
     let origin = app.settings().endpoints.api_origin();
     let Some(latest) = can_voice_update::check(
         &app.http,
@@ -703,7 +712,8 @@ async fn check_update(
         "audio-for-can",
         env!("CARGO_PKG_VERSION"),
     )
-    .await else {
+    .await
+    else {
         return Ok(None);
     };
     let skipped = (!skipped.is_empty()).then_some(skipped);
@@ -774,7 +784,11 @@ const COMPACT_SIZE: (f64, f64) = (460.0, 320.0);
 ///
 /// `shrink` 为真时顺手把窗口缩到 [`COMPACT_SIZE`]：只在精简**刚打开**的那一刻、
 /// 和启动时照着存下来的状态还原时才这么做——不然每改一次主题窗口都跳一下。
-fn apply_window(window: &tauri::WebviewWindow, appearance: &can_voice_settings::Appearance, shrink: bool) {
+fn apply_window(
+    window: &tauri::WebviewWindow,
+    appearance: &can_voice_settings::Appearance,
+    shrink: bool,
+) {
     if let Err(e) = window.set_always_on_top(appearance.always_on_top) {
         tracing::warn!(error = %e, "could not change always-on-top");
     }
