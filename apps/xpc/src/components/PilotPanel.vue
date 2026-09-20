@@ -25,8 +25,14 @@ const plan = ref<FlightPlan>(emptyFlightPlan());
  * 存成句子的话，切了语言那一行还停在旧语言上。
  */
 const filed = ref<"filed" | "offline" | null>(null);
-const inputs = ref<string[]>([]);
-const outputs = ref<string[]>([]);
+interface DeviceInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+const inputs = ref<DeviceInfo[]>([]);
+const outputs = ref<DeviceInfo[]>([]);
 const input = ref("");
 const output = ref("");
 const inject = ref(true);
@@ -50,9 +56,9 @@ let deviceTimer: number | undefined;
 onMounted(async () => {
   keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported");
   mouseOk.value = await invoke<boolean>("mouse_ptt_supported");
-  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
-  inputs.value = devices.input;
-  outputs.value = devices.output;
+  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+  inputs.value = devices.input ?? [];
+  outputs.value = devices.output ?? [];
   const s = await invoke<Settings>("settings");
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
@@ -84,19 +90,19 @@ const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
 
 async function refreshDevices() {
-  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
-  inputs.value = devices.input;
-  outputs.value = devices.output;
+  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+  inputs.value = devices.input ?? [];
+  outputs.value = devices.output ?? [];
   await dropGoneDevices();
 }
 
 async function dropGoneDevices() {
   let changed = false;
-  if (input.value && !inputs.value.includes(input.value)) {
+  if (input.value && !inputs.value.some((d) => d.id === input.value)) {
     input.value = "";
     changed = true;
   }
-  if (output.value && !outputs.value.includes(output.value)) {
+  if (output.value && !outputs.value.some((d) => d.id === output.value)) {
     output.value = "";
     changed = true;
   }
@@ -271,14 +277,14 @@ async function remove(i: number) {
         <span class="w-16 opacity-70">{{ t("local.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
           <option value="">{{ t("local.system_default") }}</option>
-          <option v-for="d in inputs" :key="d" :value="d">{{ d }}</option>
+          <option v-for="d in inputs" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
       </label>
       <label class="flex items-center gap-2">
         <span class="w-16 opacity-70">{{ t("local.headset") }}</span>
         <select v-model="output" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
           <option value="">{{ t("local.system_default") }}</option>
-          <option v-for="d in outputs" :key="d" :value="d">{{ d }}</option>
+          <option v-for="d in outputs" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
       </label>
       <p class="opacity-60">{{ t("local.devices_note") }}</p>
