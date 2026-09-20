@@ -251,15 +251,15 @@ mod tests {
     #[test]
     fn a_missing_named_device_falls_back_to_the_default() {
         assert_eq!(
-            fallback_name(Some("AirPods"), &["Built-in"], Some("Built-in")),
+            fallback_name(Some("AirPods"), &["Built-in"], Some("Built-in")).as_deref(),
             Some("Built-in")
         );
         assert_eq!(
-            fallback_name(Some("AirPods"), &["AirPods", "Built-in"], Some("Built-in")),
+            fallback_name(Some("AirPods"), &["AirPods", "Built-in"], Some("Built-in")).as_deref(),
             Some("AirPods")
         );
         assert_eq!(
-            fallback_name(None, &["AirPods"], Some("Built-in")),
+            fallback_name(None, &["AirPods"], Some("Built-in")).as_deref(),
             Some("Built-in")
         );
         assert_eq!(fallback_name(Some("gone"), &[], None), None);
