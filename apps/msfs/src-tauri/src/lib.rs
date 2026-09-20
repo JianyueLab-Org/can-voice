@@ -807,6 +807,33 @@ fn set_audio_devices(app: tauri::State<'_, App>, input: Option<String>, output: 
 }
 
 #[tauri::command]
+async fn test_speaker(app: tauri::State<'_, App>) -> Result<(), String> {
+    let s = app.settings_snapshot();
+    let output = s.output_device.clone();
+    let gain = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::speaker_test(output.as_deref(), gain).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn test_mic(app: tauri::State<'_, App>) -> Result<(), String> {
+    let s = app.settings_snapshot();
+    let input = s.input_device.clone();
+    let output = s.output_device.clone();
+    let mic = s.mic_volume.get() as f32 / 100.0;
+    let spk = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::mic_test(input.as_deref(), output.as_deref(), mic, spk)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 fn set_message_sound(app: tauri::State<'_, App>, on: bool) {
     app.chime
         .enabled
@@ -1681,6 +1708,8 @@ pub fn run() {
             set_injection,
             set_packages_dir,
             set_audio_devices,
+            test_speaker,
+            test_mic,
             set_message_sound,
             set_message_sound_all,
             set_message_sound_volume,

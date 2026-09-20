@@ -246,6 +246,33 @@ mod tests {
         let _ = output_devices();
     }
 
+    /// 点名的设备不在了，用系统默认。一直钉着旧名字的表现是拔掉耳机之后
+    /// 整场会话又聋又哑，插上别的设备也不恢复。
+    #[test]
+    fn a_missing_named_device_falls_back_to_the_default() {
+        assert_eq!(
+            fallback_name(Some("AirPods"), &["Built-in"], Some("Built-in")),
+            Some("Built-in")
+        );
+        assert_eq!(
+            fallback_name(Some("AirPods"), &["AirPods", "Built-in"], Some("Built-in")),
+            Some("AirPods")
+        );
+        assert_eq!(
+            fallback_name(None, &["AirPods"], Some("Built-in")),
+            Some("Built-in")
+        );
+        assert_eq!(fallback_name(Some("gone"), &[], None), None);
+    }
+
+    #[test]
+    fn a_speaker_test_tone_is_audible_and_the_right_length() {
+        let pcm = test_tone(100);
+        assert_eq!(pcm.len(), 48_000 / 10);
+        let peak = pcm.iter().map(|s| s.abs()).max().unwrap_or(0);
+        assert!(peak > 1000, "tone was effectively silent: peak {peak}");
+    }
+
     // ——— 声道映射 ———
 
     #[test]
@@ -386,8 +413,8 @@ pub struct AudioIo {
 impl AudioIo {
     /// 打开输入与输出。`None` 表示用系统默认设备。
     ///
-    /// **第一次建不起来仍然是错误**：那一刻上层要据此说"声卡打不开"。
-    /// 建起来之后这条线程就不再放手——设备掉了会退避重连，换设备会重建。
+    /// 第一次建不起来也把 `AudioIo` 交出去：线程留下重试。否则连上之后才插
+    /// 耳机，整场会话又聋又哑，只能重连。
     pub fn start(input: Option<&str>, output: Option<&str>) -> Result<Self, Error> {
         let playback: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let capture: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
@@ -435,11 +462,8 @@ impl AudioIo {
                         Ok(v) => v,
                         Err(e) => {
                             run.store(false, Ordering::Relaxed);
-                            // **第一次失败就报给调用方**，语义和从前一样：
-                            // 上层要在那一刻说"声卡打不开，听不见也发不出"。
                             if let Some(tx) = first.take() {
-                                let _ = tx.send(Err(e));
-                                return;
+                                let _ = tx.send(Ok(()));
                             }
                             tracing::warn!(error = %e, "could not reopen the audio devices; will retry");
                             std::thread::park_timeout(retry_delay(attempt));
@@ -566,6 +590,83 @@ impl AudioIo {
             ring.drain(..).collect()
         };
         resample_to_48k(&raw, self.input_rate())
+    }
+}
+
+/// 喇叭试音：440 Hz，约 `ms` 毫秒，48 kHz 单声道。
+pub fn test_tone(ms: u32) -> Vec<i16> {
+    let n = SAMPLE_RATE as usize * ms as usize / 1000;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / SAMPLE_RATE as f32;
+            (0.25 * (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 32767.0) as i16
+        })
+        .collect()
+}
+
+fn scale_pcm(samples: &mut [i16], gain: f32) {
+    if (gain - 1.0).abs() < f32::EPSILON {
+        return;
+    }
+    for s in samples {
+        *s = (*s as f32 * gain)
+            .round()
+            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+    }
+}
+
+fn wait_running(io: &AudioIo, ms: u64) -> bool {
+    let steps = (ms / 50).max(1);
+    for _ in 0..steps {
+        if io.running() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    io.running()
+}
+
+/// 喇叭试音。走和通话同一条开流路径。
+pub fn speaker_test(output: Option<&str>, gain: f32) -> Result<(), Error> {
+    let io = AudioIo::start(None, output)?;
+    if !wait_running(&io, 2000) {
+        return Err(Error::NoDevice("output"));
+    }
+    let mut pcm = test_tone(600);
+    scale_pcm(&mut pcm, gain.clamp(0.0, 2.0));
+    io.play(&pcm);
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    Ok(())
+}
+
+/// 麦克风试音：录约 1.5 秒再放出来。
+pub fn mic_test(
+    input: Option<&str>,
+    output: Option<&str>,
+    mic_gain: f32,
+    speaker_gain: f32,
+) -> Result<(), Error> {
+    let io = AudioIo::start(input, output)?;
+    if !wait_running(&io, 2000) {
+        return Err(Error::NoDevice("input"));
+    }
+    let _ = io.take_capture();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let mut pcm = io.take_capture();
+    scale_pcm(&mut pcm, mic_gain.clamp(0.0, 2.0));
+    scale_pcm(&mut pcm, speaker_gain.clamp(0.0, 2.0));
+    let ms = (pcm.len() as u64).saturating_mul(1000) / u64::from(SAMPLE_RATE);
+    io.play(&pcm);
+    std::thread::sleep(std::time::Duration::from_millis(ms.max(200)));
+    Ok(())
+}
+
+/// 点名的设备还在不在。不在就用 `default`。
+fn fallback_name(want: Option<&str>, names: &[&str], default: Option<&str>) -> Option<String> {
+    match want {
+        None => default.map(str::to_string),
+        Some(n) if names.iter().any(|a| *a == n) => Some(n.to_string()),
+        Some(_) => default.map(str::to_string),
     }
 }
 
@@ -697,22 +798,33 @@ fn take_input(buf: &[i16], channels: u16, ring: &Arc<Mutex<VecDeque<i16>>>, rate
 
 fn pick(host: &cpal::Host, name: Option<&str>, input: bool) -> Option<cpal::Device> {
     use cpal::traits::{DeviceTrait, HostTrait};
-    match name {
-        None => {
-            if input {
-                host.default_input_device()
-            } else {
-                host.default_output_device()
-            }
+    let default = || {
+        if input {
+            host.default_input_device()
+        } else {
+            host.default_output_device()
         }
+    };
+    match name {
+        None => default(),
         Some(want) => {
             let list = if input {
                 host.input_devices()
             } else {
                 host.output_devices()
             };
-            list.ok()?
-                .find(|d| d.name().map(|n| n == want).unwrap_or(false))
+            if let Some(d) = list
+                .ok()
+                .and_then(|mut it| it.find(|d| d.name().map(|n| n == want).unwrap_or(false)))
+            {
+                return Some(d);
+            }
+            tracing::warn!(
+                want,
+                input,
+                "audio device is gone; falling back to the system default"
+            );
+            default()
         }
     }
 }

@@ -93,7 +93,11 @@
     "system_default": "跟随系统默认",
     "applies_now": "换设备立刻生效。",
     "mic_volume": "麦克风",
-    "speaker_volume": "喇叭"
+    "speaker_volume": "喇叭",
+    "test_speaker": "试听喇叭",
+    "test_mic": "试听麦克风",
+    "testing": "正在出声…",
+    "testing_mic": "请对着麦克风说话…"
   },
   "ptt": {
     "hold": "按住通话",

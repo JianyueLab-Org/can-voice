@@ -599,6 +599,33 @@ fn set_audio_devices(
     });
 }
 
+#[tauri::command]
+async fn test_speaker(state: tauri::State<'_, App>) -> Result<(), String> {
+    let s = state.settings();
+    let output = s.output_device.clone();
+    let gain = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::speaker_test(output.as_deref(), gain).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn test_mic(state: tauri::State<'_, App>) -> Result<(), String> {
+    let s = state.settings();
+    let input = s.input_device.clone();
+    let output = s.output_device.clone();
+    let mic = s.mic_volume.get() as f32 / 100.0;
+    let spk = s.speaker_volume.get() as f32 / 100.0;
+    tauri::async_runtime::spawn_blocking(move || {
+        can_voice_client::audio::mic_test(input.as_deref(), output.as_deref(), mic, spk)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 一个绑定加上它给界面看的短标识。
 ///
 /// `token()` 在 Rust 侧，措辞和"认不出来"的判断都只有一份——前端照着 `kind`
@@ -875,6 +902,8 @@ pub fn run() {
             audio_devices,
             settings,
             set_audio_devices,
+            test_speaker,
+            test_mic,
             ptt_bindings,
             keyboard_ptt_supported,
         ])
