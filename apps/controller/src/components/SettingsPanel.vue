@@ -22,8 +22,15 @@ interface Settings {
   speaker_volume: number;
 }
 
-const inputs = ref<string[]>([]);
-const outputs = ref<string[]>([]);
+/** 后端 `DeviceInfo`。当成字符串会显示成 [object Object]，已选项也会被当成拔掉。 */
+interface DeviceInfo {
+  id: string;
+  name: string;
+  is_default: boolean;
+}
+
+const inputs = ref<DeviceInfo[]>([]);
+const outputs = ref<DeviceInfo[]>([]);
 const input = ref<string>("");
 const output = ref<string>("");
 const mic = ref(100);
@@ -38,9 +45,9 @@ const testErr = ref("");
 let captureTimer: number | undefined;
 
 async function load() {
-  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
-  inputs.value = devices.input;
-  outputs.value = devices.output;
+  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+  inputs.value = devices.input ?? [];
+  outputs.value = devices.output ?? [];
   const s = await invoke<Settings>("settings");
   input.value = s.input_device ?? "";
   output.value = s.output_device ?? "";
@@ -51,20 +58,20 @@ async function load() {
 }
 
 async function refreshDevices() {
-  const devices = await invoke<{ input: string[]; output: string[] }>("audio_devices");
-  inputs.value = devices.input;
-  outputs.value = devices.output;
+  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+  inputs.value = devices.input ?? [];
+  outputs.value = devices.output ?? [];
   await dropGoneDevices();
 }
 
 /** 下拉框里已经没有的设备当成拔掉了，改回系统默认。 */
 async function dropGoneDevices() {
   let changed = false;
-  if (input.value && !inputs.value.includes(input.value)) {
+  if (input.value && !inputs.value.some((d) => d.id === input.value)) {
     input.value = "";
     changed = true;
   }
-  if (output.value && !outputs.value.includes(output.value)) {
+  if (output.value && !outputs.value.some((d) => d.id === output.value)) {
     output.value = "";
     changed = true;
   }
@@ -172,14 +179,14 @@ async function remove(i: number) {
         <span class="w-16 opacity-70">{{ t("audio.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
           <option value="">{{ t("audio.system_default") }}</option>
-          <option v-for="d in inputs" :key="d" :value="d">{{ d }}</option>
+          <option v-for="d in inputs" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
       </label>
       <label class="flex items-center gap-2">
         <span class="w-16 opacity-70">{{ t("audio.headset") }}</span>
         <select v-model="output" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
           <option value="">{{ t("audio.system_default") }}</option>
-          <option v-for="d in outputs" :key="d" :value="d">{{ d }}</option>
+          <option v-for="d in outputs" :key="d.id" :value="d.id">{{ d.name }}</option>
         </select>
       </label>
       <p class="opacity-60">{{ t("audio.applies_now") }}</p>
