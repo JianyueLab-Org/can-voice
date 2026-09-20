@@ -666,7 +666,7 @@ pub fn mic_test(
 fn fallback_name(want: Option<&str>, names: &[&str], default: Option<&str>) -> Option<String> {
     match want {
         None => default.map(str::to_string),
-        Some(n) if names.iter().any(|a| *a == n) => Some(n.to_string()),
+        Some(n) if names.contains(&n) => Some(n.to_string()),
         Some(_) => default.map(str::to_string),
     }
 }
