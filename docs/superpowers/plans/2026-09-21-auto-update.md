@@ -2670,12 +2670,25 @@ synchronously before it spawns. Each app exposes `update_state`, and
 use for their main refresh. There is no timer left to tune.
 
 **Task 11 — the end-to-end test cannot run yet, and will look like it passed.**
-`releases/latest` excludes prereleases, and the version scheme reserves
-`YY = 0` for them, so every release from `v27.0.1` to `v27.0.8` is invisible to
-it: GitHub answers 404, the resolver caches nil, and the manifest route answers
-204 forever. The first release this path can see is `v27.1.0`.
+This was first written as a version problem and is now a signature problem;
+both halves are worth keeping, because the first one is the shape of mistake
+the second one repeats.
 
-From can-api's side that 404 is indistinguishable from GitHub being down —
-both become 204, deliberately, because failure has to be silent. The cost is
-that nothing announces the route is inert. Do not run Task 11 step 4 against a
-prerelease and record a pass.
+`releases/latest` excludes prereleases, and the version scheme reserves
+`YY = 0` for them, so every release from `v27.0.1` to `v27.0.8` was invisible
+to it: GitHub answered 404, the resolver cached nil, the route answered 204.
+**Fixed** — can-api now reads the `/releases` listing and picks the highest
+version out of it, skipping drafts, and deliberately not filtering on
+`prerelease`. can-voice is in closed beta and everyone running it is a tester.
+That decision must be revisited when can-voice ships generally, or a
+`v28.0.x` prerelease gets pushed to everyone beside a stable `v27.1.x`.
+
+The route still answers 204. The resolver now reaches `v27.0.8`, but its 21
+assets — five bundles for each of the four products, plus the X-Plane plugin
+zip — carry **no `.sig` at all**, because Task 11 step 1 has not run. A bundle
+with no signature is dropped, so `Builds` is empty.
+
+Both failures look identical from can-api: nil release and empty builds both
+become 204, deliberately, because failure has to be silent. The cost is that
+nothing announces the route is inert. Do not run Task 11 step 4 and record a
+pass until a release carries signatures.
