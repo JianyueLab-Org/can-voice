@@ -10,7 +10,7 @@ import ChatLog from "./components/ChatLog.vue";
 import ControllerList from "./components/ControllerList.vue";
 import PilotPanel from "./components/PilotPanel.vue";
 import type { View } from "./types";
-import { mhz, khzText, xpdrText, voiceText, linkText } from "./types";
+import { mhz, khzText, xpdrText, voiceText, linkText, noticeText } from "./types";
 import { errorText, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
 
@@ -221,6 +221,18 @@ const send = () =>
 
     <p v-if="error !== null" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
       {{ errorText(error) }}
+    </p>
+
+    <!-- 服务端说的话。不显示的话，"能连上、状态绿、说话没人听见"就是全部症状。
+         声卡掉了也走这一条（`audio_unavailable`），而界面上再没有第二处提它：
+         拔掉 USB 耳机的人此前一点提示都没有。 -->
+    <!-- 精简时也在：说的正是"此刻听不见、也发不出去"，而精简就是在飞。 -->
+    <p
+      v-for="(n, i) in view?.voice?.notices ?? []"
+      :key="`${n[0]}-${n[1]}-${i}`"
+      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+    >
+      {{ noticeText(n) }}
     </p>
 
     <section v-if="!online" class="grid grid-cols-5 gap-2">

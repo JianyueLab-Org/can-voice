@@ -29,17 +29,6 @@
     "callsign_hint": "呼号（可空）",
     "empty": "还没有频率。在上面填一个，例如 121.800"
   },
-  "notice": {
-    "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",
-    "range_unavailable": "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听",
-    "unknown_message": "服务端不认识客户端发的一帧（{reason}），可能需要更新客户端",
-    "rate_limited": "上行语音超过了服务端的速率上限，多出来的被丢掉了：这通常是客户端的 bug（PTT 卡住），重连一次；反复出现请回传日志。",
-    "other": "{kind}：{reason}",
-    "other_on": "{kind} · {frequency}：{reason}",
-    "xc_denied": "这些交叉耦合没有生效：{pairs}",
-    "tx_at_limit": "开着发射的频率已经到了服务端给的上限（{max} 个）：再开一个 TX 或 XC 会被拒。",
-    "tx_over_limit": "开着发射的频率有 {declared} 个，服务端这一次只给 {max} 个：多出来的会被拒，先关掉用不上的。"
-  },
   "duty": {
     "off": "你此刻不在任何席位上（数据源里没有你），发射已关闭，但还听得见。在 EuroScope 上线之后，这里会在一分钟内跟上。",
     "dropped_tx": "台面上原来开着的发射已经全部关掉。",
@@ -69,6 +58,9 @@
     "receiving": "正在接收",
     "no_transmit": "你此刻不在任何席位上，不能发射",
     "over_tx_limit_tip": "再开这一个，发射频率就超过服务端的上限（{max} 个），会被拒",
+    "xc_denied": "这些交叉耦合没有生效：{pairs}",
+    "tx_at_limit": "开着发射的频率已经到了服务端给的上限（{max} 个）：再开一个 TX 或 XC 会被拒。",
+    "tx_over_limit": "开着发射的频率有 {declared} 个，服务端这一次只给 {max} 个：多出来的会被拒，先关掉用不上的。",
     "unmute_tip": "已静音，点一下恢复",
     "mute_tip": "静音这个频率（仍然收包、仍然亮灯）",
     "last_talk": "最后一次通话",
