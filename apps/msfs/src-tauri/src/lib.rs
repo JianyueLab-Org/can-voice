@@ -139,6 +139,11 @@ const MAX_TRAFFIC: usize = 64;
 const MAX_RANGE_NM: f64 = 200.0;
 /// 对一次账的节奏。
 const INJECT_INTERVAL: Duration = Duration::from_millis(500);
+/// 注入之前最多等机库扫多久。扫一遍要几十秒，而扫不完的时候（目录在网络盘上、
+/// 权限不对）注入不能跟着一起卡死。
+const HANGAR_WAIT: Duration = Duration::from_secs(120);
+/// 等机库的时候多久看一眼。
+const HANGAR_POLL: Duration = Duration::from_millis(250);
 /// 多久去问一轮机型和配置。
 const ASK_INTERVAL: Duration = Duration::from_secs(2);
 /// 同一架飞机的配置多久重问一次。灯和襟翼一直在变。
@@ -336,6 +341,8 @@ pub struct App {
     /// 本机机库。**扫出来的是本机的表**，不进内置表——内置表只收第一方，
     /// 因为只有它们的标题在不同机器上是同一个字符串。
     hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
+    /// 机库还在扫。**两个读者**：界面靠它区分"还在扫"和"扫完了，没有"，
+    /// 注入那条线程靠它等——不等的话它合的是一张空表。
     hangar_loading: Arc<std::sync::atomic::AtomicBool>,
     /// 以观察员身份连着时是跟随的那个呼号；没连、或者正常上着网是 `None`。
     ///
@@ -659,6 +666,7 @@ async fn connect(
         app.traffic.clone(),
         app.inject.clone(),
         app.hangar.clone(),
+        app.hangar_loading.clone(),
     );
     *app.fsd.lock().expect("fsd") = Some(fsd);
     // 判"有没有点到我"要用正在连着的这个呼号，不是设置里存的那个。
@@ -1336,6 +1344,10 @@ fn hangar_roots(dir: &str) -> Vec<std::path::PathBuf> {
 /// **放后台**：社区包多的话上万个文件，扫一遍要几秒到几十秒，放在启动路径上会让
 /// 窗口迟迟打不开，而用户看到的是程序卡死。扫完（哪怕一个也没扫到）都要把
 /// `loading` 放下来：界面靠它区分"还在扫"和"扫完了，没有"。
+///
+/// **`loading` 有第二个读者**：[`spawn_ai_injection`] 在合覆盖表之前等它落下
+/// （见 [`wait_for_hangar`]）。漏放的话界面会一直转，注入那边也要白等满
+/// [`HANGAR_WAIT`] 才肯往下走。
 fn spawn_hangar_scan(
     hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
     loading: Arc<std::sync::atomic::AtomicBool>,
@@ -1369,6 +1381,44 @@ fn titles_path() -> std::path::PathBuf {
     base.join("msfs-for-can").join("titles.json")
 }
 
+/// 等后台那遍机库扫完，最多 [`HANGAR_WAIT`]。
+///
+/// 规则在 [`can_voice_sim::msfs_hangar::ScanWait`] 里，有测试；这里只负责睡和报。
+fn wait_for_hangar(loading: &std::sync::atomic::AtomicBool) {
+    let policy = can_voice_sim::msfs_hangar::ScanWait::new(HANGAR_WAIT);
+    let started = std::time::Instant::now();
+    let mut waited = false;
+    loop {
+        let elapsed = started.elapsed();
+        match policy.step(
+            loading.load(std::sync::atomic::Ordering::Relaxed),
+            elapsed,
+        ) {
+            can_voice_sim::msfs_hangar::WaitStep::Ready => {
+                // 没等过就什么也不说：健康的日志不该多出一行。
+                if waited {
+                    tracing::info!(
+                        seconds = elapsed.as_secs_f32(),
+                        "waited for the hangar scan before resolving model titles"
+                    );
+                }
+                return;
+            }
+            can_voice_sim::msfs_hangar::WaitStep::Wait => {
+                waited = true;
+                std::thread::sleep(HANGAR_POLL);
+            }
+            can_voice_sim::msfs_hangar::WaitStep::GiveUp => {
+                tracing::warn!(
+                    seconds = elapsed.as_secs_f32(),
+                    "the hangar scan has not finished; injecting with whatever the hangar holds"
+                );
+                return;
+            }
+        }
+    }
+}
+
 /// 把他机表对到模拟器的 AI 机上。
 ///
 /// **账在 [`can_voice_sim::inject`] 里、机模候选在
@@ -1386,12 +1436,18 @@ fn spawn_ai_injection(
     table: Arc<Mutex<TrafficTable>>,
     inject: Arc<std::sync::atomic::AtomicBool>,
     hangar: Arc<Mutex<can_voice_sim::msfs_hangar::Hangar>>,
+    hangar_loading: Arc<std::sync::atomic::AtomicBool>,
 ) {
     // 不在 Windows 上就没有 SimConnect，起个线程每 5 秒失败一次没有意义。
     if !can_voice_sim::msfs::available() {
         return;
     }
     std::thread::spawn(move || {
+        // **先等机库扫完。** 覆盖表在这里只合一次，而这条线程是用户连上网的
+        // 那一刻起的——启动后头几十秒里连上的人，合的是一张空表，于是本机装着
+        // 的那几十种机型一种也到不了注入那边，整个航段每一架飞机都落回内置表
+        // 兜底，直到他断开重连。晚几秒注入，好过整段用错机模。
+        wait_for_hangar(&hangar_loading);
         // 手写的 `titles.json` 在前，本机扫出来的在后：前者是用户明确说过的，
         // 后者是推断的。两者都排在内置表前面，而内置表仍然兜底。
         let mut overrides = can_voice_sim::msfs_models::load_overrides(&titles_path());
@@ -1404,14 +1460,29 @@ fn spawn_ai_injection(
         if !overrides.is_empty() {
             tracing::info!(types = overrides.len(), "loaded model title overrides");
         }
+        // **开不开得了只报第一次。** 这一圈每 5 秒转一次，圈圈都报会把日志刷满；
+        // 而原来一律 debug，等于默认级别下一个字都没有——"没有他机"报上来的
+        // 日志里于是连一条线索都找不到。账在 [`can_voice_sim::inject::LinkRetry`]。
+        let mut retry = can_voice_sim::inject::LinkRetry::new();
         loop {
             let mut sink = SimConnectTraffic::default();
             if let Err(e) = sink.open() {
-                tracing::debug!(error = %e, "traffic link");
+                if retry.failed() {
+                    tracing::warn!(error = %e,
+                        "could not open the traffic link; the simulator is probably not running. \
+                         retrying every 5s, and staying quiet until it opens");
+                } else {
+                    tracing::debug!(error = %e, "traffic link");
+                }
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
+            let attempts = retry.opened();
             tracing::info!("traffic link open");
+            // 之前失败过才多说这一句：健康的日志和从前一模一样。
+            if attempts > 1 {
+                tracing::info!(attempts, "the traffic link opened after earlier failures");
+            }
             let mut injector = can_voice_sim::inject::Injector::new();
             loop {
                 // 先收回音：建成的登记 id，失败的记一笔好换下一个机模。

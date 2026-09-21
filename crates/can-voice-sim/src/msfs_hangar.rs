@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// 一个涂装。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -305,6 +306,46 @@ pub fn scan(roots: &[PathBuf]) -> Hangar {
     collect(liveries, files)
 }
 
+/// 等这一遍扫完该怎么等。
+///
+/// 扫是后台的，而要用扫出来那张表的人（注入那条线程）是在用户连上网的那一刻
+/// 起来的——两者差着几十秒。**等一等再用**：晚几秒注入，好过整个航段都用错
+/// 机模。但等要有上限：目录在网络盘上、权限不对的时候扫可能根本回不来，
+/// 注入不能跟着一起卡死。
+///
+/// 它自己不睡也不看表，只按"还在扫吗"和"已经等了多久"给一个决定，所以测得到。
+#[derive(Debug, Clone, Copy)]
+pub struct ScanWait {
+    limit: Duration,
+}
+
+/// 等的这一拍该做什么。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitStep {
+    /// 扫完了（或者压根没在扫），可以用了。
+    Ready,
+    /// 还在扫，再等一拍。
+    Wait,
+    /// 等够了还没扫完，别等了，拿手上这张表先用。
+    GiveUp,
+}
+
+impl ScanWait {
+    pub const fn new(limit: Duration) -> Self {
+        Self { limit }
+    }
+
+    pub fn step(&self, loading: bool, waited: Duration) -> WaitStep {
+        if !loading {
+            WaitStep::Ready
+        } else if waited >= self.limit {
+            WaitStep::GiveUp
+        } else {
+            WaitStep::Wait
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +526,30 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
         dir
+    }
+
+    /// 扫完了就不等——这是最常见的一路：连得晚的人一拍都不该被拖。
+    #[test]
+    fn a_finished_scan_is_not_waited_for() {
+        let w = ScanWait::new(Duration::from_secs(120));
+        assert_eq!(w.step(false, Duration::ZERO), WaitStep::Ready);
+        assert_eq!(w.step(false, Duration::from_secs(600)), WaitStep::Ready);
+    }
+
+    /// 还在扫就等着。测过的那三次扫是 33 / 43 / 53 秒，都在上限之内。
+    #[test]
+    fn a_running_scan_is_waited_for() {
+        let w = ScanWait::new(Duration::from_secs(120));
+        assert_eq!(w.step(true, Duration::ZERO), WaitStep::Wait);
+        assert_eq!(w.step(true, Duration::from_secs(53)), WaitStep::Wait);
+    }
+
+    /// **等要有上限。** 扫卡住的时候注入不能跟着卡死，否则一架都出不来。
+    #[test]
+    fn a_scan_that_never_finishes_is_given_up_on() {
+        let w = ScanWait::new(Duration::from_secs(120));
+        assert_eq!(w.step(true, Duration::from_secs(119)), WaitStep::Wait);
+        assert_eq!(w.step(true, Duration::from_secs(120)), WaitStep::GiveUp);
+        assert_eq!(w.step(true, Duration::from_secs(121)), WaitStep::GiveUp);
     }
 }
