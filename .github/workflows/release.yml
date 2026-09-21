@@ -125,11 +125,23 @@ jobs:
 
       # tauri build 自己会调 beforeBuildCommand（也就是 bun run build），
       # 所以前端不用单独再跑一遍。
+      #
+      # 签名密钥从 secrets 进来，没配就是空串。现在四个 tauri.conf.json 都没开
+      # `createUpdaterArtifacts`，打包器根本不读这两个值，所以空着也不影响这一版；
+      # 等开了它，没有密钥 `tauri build` 会直接红——这是要的行为，比悄悄发一批
+      # 没签名、谁都装不上的包好。
       - run: bun run tauri build
         working-directory: apps/${{ matrix.app }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       # Windows 上 NSIS 和 MSI 都出：装不上 MSI 的机器不少（组策略、旧的
       # Windows Installer），而 NSIS 那个双击就装。
+      #
+      # `*.sig` 一并收走：开了 `createUpdaterArtifacts` 之后每个包旁边会多一个
+      # 同名加 `.sig` 的签名文件，客户端自动更新就验它。现在还没开，什么也不会
+      # 多收；等开了这里不用再改。
       - name: 收集产物（Windows）
         if: runner.os == 'Windows'
         shell: pwsh
@@ -137,18 +149,23 @@ jobs:
           $out = "dist-out"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
           $bundle = "apps/${{ matrix.app }}/src-tauri/target/release/bundle"
-          Get-ChildItem -Path $bundle -Recurse -Include *.exe,*.msi |
+          Get-ChildItem -Path $bundle -Recurse -Include *.exe,*.msi,*.sig |
             ForEach-Object { Copy-Item $_.FullName $out }
           Get-ChildItem $out
       # Linux 上 deb 和 AppImage 都出：deb 给 Debian/Ubuntu，AppImage 给别的
       # 发行版——这个网络的成员装什么发行版我们不知道，只发 deb 等于把一半人
       # 挡在外面。
+      #
+      # `*.AppImage.tar.gz` 和 `*.sig` 同理：前者是自动更新真正下载的那一份，
+      # `createUpdaterArtifacts` 设成 `"v1Compatible"` 时出的就是它，写在这里
+      # 省得那天悄悄漏发；后者是签名。两样现在都不产出。
       - name: 收集产物（Linux）
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist-out
           bundle="apps/${{ matrix.app }}/src-tauri/target/release/bundle"
-          find "$bundle" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \) \
+          find "$bundle" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.rpm' \
+            -o -name '*.AppImage.tar.gz' -o -name '*.sig' \) \
             -exec cp {} dist-out/ \;
           ls -lh dist-out
       - uses: actions/upload-artifact@v4
@@ -172,7 +189,8 @@ jobs:
         run: |
           mkdir -p out
           find artifacts -type f \( -name '*.exe' -o -name '*.msi' -o -name '*.deb' \
-            -o -name '*.AppImage' -o -name '*.rpm' \) -exec cp {} out/ \;
+            -o -name '*.AppImage' -o -name '*.rpm' -o -name '*.AppImage.tar.gz' \
+            -o -name '*.sig' \) -exec cp {} out/ \;
           ls -lh out
       # **X-Plane 的插件也要发出去。** 说明里原本只写"见仓库里
       # apps/xpc/plugin/"——而仓库是私有的，测试者点不进去。装了 xpc-for-can
