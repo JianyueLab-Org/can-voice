@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from "vue";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { t } from "../i18n";
 
 /** 和 Rust 侧 `can_voice_autoupdate::State` 一一对应。 */
@@ -13,8 +13,7 @@ type State =
 const open = ref(false);
 const state = ref<State>({ phase: "checking" });
 
-let unlisten: UnlistenFn | null = null;
-let firstEvent: ReturnType<typeof setTimeout> | null = null;
+let timer: number | null = null;
 
 function mb(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(0)} MB`;
@@ -31,32 +30,43 @@ const message = () => {
   return t("update.checking");
 };
 
-onMounted(async () => {
-  // 只有 `done` 放行。**但如果 Rust 那边一个事件都没发**——它崩了，或者这个
-  // 版本根本没装更新器——就不能永远挡着：启动不能被更新拖住。所以第一个事件
-  // 之前有一道短的兜底，收到任何事件之后就取消，免得把一个正常的长下载切断。
-  firstEvent = setTimeout(() => {
-    open.value = true;
-  }, 8_000);
+function stop() {
+  if (timer !== null) {
+    window.clearInterval(timer);
+    timer = null;
+  }
+}
 
+/**
+ * 问一次 Rust 那边走到哪了。
+ *
+ * **轮询而不是听事件。** `start` 在 `.setup()` 里跑，最常见的两条路——这个包
+ * 不能自己替换自己、或者还没配 `plugins.updater`——几微秒就完事了，那时 webview
+ * 连自己的包都还没加载完，`onMounted` 没跑，监听器不存在，而 tauri 不会为还没
+ * 起来的页面补发事件。状态是拉过来的，晚到多久都读得到。
+ *
+ * 问不出来就放行：启动不能被更新拖住。
+ */
+async function poll() {
   try {
-    unlisten = await listen<State>("update://state", (event) => {
-      if (firstEvent) {
-        clearTimeout(firstEvent);
-        firstEvent = null;
-      }
-      state.value = event.payload;
-      if (event.payload.phase === "done") open.value = true;
-    });
+    state.value = await invoke<State>("update_state");
+    if (state.value.phase === "done") {
+      open.value = true;
+      stop();
+    }
   } catch {
     open.value = true;
+    stop();
   }
+}
+
+onMounted(() => {
+  void poll();
+  // 和各应用主刷新循环同一拍。
+  timer = window.setInterval(() => void poll(), 200);
 });
 
-onUnmounted(() => {
-  if (firstEvent) clearTimeout(firstEvent);
-  unlisten?.();
-});
+onUnmounted(stop);
 </script>
 
 <template>

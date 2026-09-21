@@ -755,6 +755,14 @@ fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
 }
 
+/// 启动更新走到哪一步了。**界面是轮询这个命令的，不是收事件。** `start` 在
+/// `.setup()` 里跑，那时 webview 还没加载完自己的包，监听器一个都还不存在，
+/// 而 tauri 不会为还没起来的页面补发事件。
+#[tauri::command]
+fn update_state() -> can_voice_autoupdate::State {
+    can_voice_autoupdate::state()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 // ——— 日志 ———
 
@@ -904,7 +912,7 @@ pub fn run() {
             if let Some(window) = handle.get_webview_window("main") {
                 apply_window(&window, &appearance, appearance.compact);
             }
-            // 检查更新。立刻返回；结果通过 `update://state` 发给界面。
+            // 检查更新。立刻返回；界面轮询 `update_state` 拿进度。
             can_voice_autoupdate::start(handle.handle());
             Ok(())
         })
@@ -918,6 +926,7 @@ pub fn run() {
             check_update,
             skip_update,
             open_download,
+            update_state,
             connect,
             disconnect,
             snapshot,

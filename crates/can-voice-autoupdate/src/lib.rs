@@ -4,15 +4,16 @@
 //!
 //! - **只在启动时。** 检查发生在用户连上语音之前；一个开着八小时的管制端不会
 //!   在第七个小时突然决定重启自己。
-//! - **失败要安静，而且绝不挡路。** 每一条错误路径都发一次 `done` 然后让界面
-//!   照常进去。更新服务挂掉不该让全网上不了线。
+//! - **失败要安静，而且绝不挡路。** 每一条错误路径最后都把状态置成 `Done`
+//!   然后让界面照常进去。更新服务挂掉不该让全网上不了线。
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Runtime};
+use std::sync::{Mutex, PoisonError};
+use tauri::{AppHandle, Runtime};
 use tauri_plugin_updater::UpdaterExt;
 
-/// 界面等的就是这个事件。**每一条路径最后都要发一次 `Done`**——界面在
-/// 收到它之前是挡着的。
+/// 界面轮询的就是这个状态。**每一条路径最后都要置成 `Done`**——界面在
+/// 读到它之前是挡着的。
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "phase", rename_all = "lowercase")]
 pub enum State {
@@ -22,7 +23,22 @@ pub enum State {
     Done,
 }
 
-const EVENT: &str = "update://state";
+/// 当前状态。一个进程只有一个更新器，所以用进程全局，不用 Tauri 的 managed
+/// state。
+///
+/// **初值是 `Done`，这一点是承重的。** 如果 [`start`] 根本没被调用——某个应用
+/// 没接更新器，或者 `.setup()` 在调到它之前就返回了——界面必须立刻放行，而不是
+/// 挂在那里等一个永远不会来的状态。
+static STATE: Mutex<State> = Mutex::new(State::Done);
+
+/// 界面读的就是这个。配一条 `#[tauri::command]` 转发出去。
+pub fn state() -> State {
+    STATE.lock().unwrap_or_else(PoisonError::into_inner).clone()
+}
+
+fn set(state: State) {
+    *STATE.lock().unwrap_or_else(PoisonError::into_inner) = state;
+}
 
 /// 插件本体。端点和公钥在 `tauri.conf.json` 的 `plugins.updater` 里。
 pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R, tauri_plugin_updater::Config> {
@@ -62,11 +78,15 @@ pub fn bundle_name() -> Option<&'static str> {
 
 /// 在 `.setup()` 里调一次。立刻返回，活在后台跑。
 pub fn start<R: Runtime>(handle: &AppHandle<R>) {
+    // **先置 `Checking`，再 spawn。** 初值是 `Done`，如果留给后台任务去置，
+    // 一个抢先轮询到的界面会读到上一行留下的 `Done` 然后提前放行。
+    set(State::Checking);
+
     let handle = handle.clone();
     tauri::async_runtime::spawn(async move {
         run(&handle).await;
         // 走到哪一步都要放行。
-        emit(&handle, State::Done);
+        set(State::Done);
     });
 }
 
@@ -81,7 +101,7 @@ async fn run<R: Runtime>(handle: &AppHandle<R>) {
         return;
     }
 
-    emit(handle, State::Checking);
+    set(State::Checking);
 
     let updater = match handle.updater() {
         Ok(updater) => updater,
@@ -106,8 +126,6 @@ async fn run<R: Runtime>(handle: &AppHandle<R>) {
     tracing::info!(version = %update.version, "auto-update: installing");
 
     let mut received: u64 = 0;
-    let installing = handle.clone();
-    let progress = handle.clone();
 
     // download_and_install 在 Windows 上装完直接 exit(0)，由安装器把新版本拉
     // 起来；Linux 上它会返回，要自己重启。
@@ -115,15 +133,12 @@ async fn run<R: Runtime>(handle: &AppHandle<R>) {
         .download_and_install(
             move |chunk, total| {
                 received += chunk as u64;
-                emit(
-                    &progress,
-                    State::Downloading {
-                        received,
-                        total: total.unwrap_or(0),
-                    },
-                );
+                set(State::Downloading {
+                    received,
+                    total: total.unwrap_or(0),
+                });
             },
-            move || emit(&installing, State::Installing),
+            || set(State::Installing),
         )
         .await;
 
@@ -133,11 +148,5 @@ async fn run<R: Runtime>(handle: &AppHandle<R>) {
             handle.restart();
         }
         Err(err) => tracing::info!(%err, "auto-update: install failed"),
-    }
-}
-
-fn emit<R: Runtime>(handle: &AppHandle<R>, state: State) {
-    if let Err(err) = handle.emit(EVENT, state) {
-        tracing::info!(%err, "auto-update: could not tell the interface");
     }
 }
