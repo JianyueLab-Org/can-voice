@@ -6,18 +6,26 @@
 //!   GitHub 资产经常卡死，而 api.ceruleanavi.net 本来就通。
 //! - **失败要安静。** 每一条错误路径都返回"没有更新"并记一条 INFO。
 //!   连不上更新服务不值得一个对话框，更不该拖慢或者卡住启动。
-//! - **绝不自动更新。** 这里只**报告**，下不下载是人决定的——一个正在值班的
-//!   管制员不需要一个自作主张重启自己的程序。
+//! - **只有能就地替换自己的包才自动更新。** AppImage、NSIS、MSI 可以；deb 和 rpm
+//!   要提权，而这套更新不问人，所以它们退回横幅提示。判据是
+//!   `self_replaceable`，取值来自 `tauri_utils::platform::bundle_type()`——
+//!   和插件 `install_inner` 用的是同一个，两处判据不同就会出现「我们以为是
+//!   AppImage 而插件以为不是」。
 //! - **不要打断正在工作的人**，而且**记住被跳过的版本**。
 //!
-//! # 回包有两层，而 Python 版两层都读错了
+//! # 清单是平的，而且问的是 can-voice 那条路
 //!
-//! `update.py` 判的是一个顶层的 `update_available`，而 can-api 从来没发过那个
-//! 字段——真的在 `update.available` 里。于是检查**永远**返回"没有更新"，
-//! 四个客户端都一样，而它看起来和"确实没有更新"一模一样。
+//! 这个模块问的是 `/api/v1/voice/update/{client}/{target}/{arch}/{bundle}`。
+//! 路径里已经写明了是哪一个平台，所以回包里没有可以用来分支的东西：
+//! `{version, notes, pub_date, url, signature}`，就是 tauri-plugin-updater
+//! 读的那一份。
 //!
-//! 后面还埋着第二个：顶层的 `client` 是**包名字符串**，每个构建在
-//! `clients[<name>]` 里。只修第一层的话，下一步就是在一个 `String` 上调 `.get()`。
+//! 它此前问的是 `/api/v1/clients/latest`，而那条路解析的是 **can-audio** 的
+//! 发行——一个 can-voice 客户端拿 `27.0.3` 去比 can-audio 的 `2.x`，结论永远
+//! 是"没有更新"，而它看起来和"确实没有更新"一模一样。
+//!
+//! "没什么可装的"一律是 **204**：can-api 那边每一种普通的落空都答 204，
+//! 而插件把 204 读成 `Ok(None)`、把其它非 2xx 读成要重试的错误。
 
 use can_voice_i18n::Message;
 use serde_json::Value;
@@ -32,31 +40,52 @@ pub struct Latest {
     pub size: u64,
 }
 
-/// 从 `/api/v1/clients/latest?client=…&version=…` 的回包里取出该提示的版本。
+/// 这一种包能不能就地把自己换掉。
+///
+/// 参数是 `tauri_utils::platform::bundle_type()` 的名字，插件也是照它分支的。
+/// deb 和 rpm 插件装得了，这里故意不放行：`dpkg -i` 和 `rpm -U` 要走 pkexec
+/// 或者图形 sudo，和"不问人"相冲；而 `/usr` 是包管理器的地盘，下一次
+/// `apt upgrade` 会把版本退回去。
+pub fn self_replaceable(bundle: Option<&str>) -> bool {
+    matches!(bundle, Some("appimage") | Some("nsis") | Some("msi"))
+}
+
+/// 当前这一份构建该问哪个地址。
+pub fn manifest_url(
+    api_origin: &str,
+    client: &str,
+    target: &str,
+    arch: &str,
+    bundle: &str,
+    current: &str,
+) -> String {
+    format!(
+        "{}/api/v1/voice/update/{client}/{target}/{arch}/{bundle}?current={current}",
+        api_origin.trim_end_matches('/')
+    )
+}
+
+/// 读 can-api 发的清单。平的，因为请求里已经写明了一个平台：
+/// `{version, notes, pub_date, url, signature}`。
 ///
 /// 任何一步对不上都返回 `None`——"没有更新"是这条路径上唯一安全的默认值。
-pub fn parse(body: &Value, client: &str) -> Option<Latest> {
-    // 第一层：结论在 `update.available` 里，不在顶层。
-    if !body.get("update")?.get("available")?.as_bool()? {
+pub fn parse(body: &Value) -> Option<Latest> {
+    let version = body.get("version")?.as_str()?.trim_start_matches('v');
+    let download = body.get("url")?.as_str()?;
+    if version.is_empty() || download.is_empty() {
         return None;
     }
-    // 第二层：构建在 `clients[<name>]` 里；顶层的 `client` 只是包名。
-    //
-    // 四个构建里坏了一个时 can-api **不把它列出来**，而不是给一个会 404 的
-    // 地址。所以这里取不到就是"没有更新"。
-    let build = body.get("clients")?.get(client)?;
     Some(Latest {
-        version: build.get("version")?.as_str()?.to_string(),
-        download: build.get("download")?.as_str()?.to_string(),
+        version: version.to_string(),
+        download: download.to_string(),
         notes: body
             .get("notes")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        size: build
-            .get("size")
-            .and_then(Value::as_u64)
-            .unwrap_or_default(),
+        // 清单里没有大小。横幅把 0 显示成"0 MB"，所以这一位是 0 的时候
+        // 调用方用不带大小的那句文案。
+        size: 0,
     })
 }
 
@@ -81,27 +110,35 @@ pub async fn check(
     http: &reqwest::Client,
     api_origin: &str,
     client: &str,
+    target: &str,
+    arch: &str,
+    bundle: &str,
     version: &str,
 ) -> Option<Latest> {
-    let url = format!("{}/api/v1/clients/latest", api_origin.trim_end_matches('/'));
+    let url = manifest_url(api_origin, client, target, arch, bundle, version);
     let resp = match http
         .get(&url)
-        .query(&[("client", client), ("version", version)])
         .header(reqwest::header::USER_AGENT, USER_AGENT)
         .timeout(TIMEOUT)
         .send()
         .await
     {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => {
-            tracing::info!(status = %r.status(), "update check refused; assuming no update");
-            return None;
-        }
+        Ok(r) => r,
         Err(e) => {
             tracing::info!(error = %e, "update check unreachable; assuming no update");
             return None;
         }
     };
+
+    // 204 是"没什么可装的"，不是错误：can-api 那边每一种普通的落空都是它。
+    if resp.status() == reqwest::StatusCode::NO_CONTENT {
+        return None;
+    }
+    if !resp.status().is_success() {
+        tracing::info!(status = %resp.status(), "update check refused; assuming no update");
+        return None;
+    }
+
     let body: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
@@ -109,11 +146,7 @@ pub async fn check(
             return None;
         }
     };
-    let latest = parse(&body, client)?;
-    // can-api 已经比过一次（`update.available`），这里再比一次是因为**两边的
-    // 比较必须一致**：服务端说有、而本机版本号其实更新（本地构建、回滚过），
-    // 提示"请更新到一个更旧的版本"比不提示糟得多。
-    is_newer(&latest.version, version).then_some(latest)
+    parse(&body)
 }
 
 /// 这个平台用哪个命令开浏览器。
@@ -160,8 +193,24 @@ pub fn open_in_browser(url: &str) -> Result<(), Message> {
 ///
 /// 通播制作客户端就是这一种：它本来不需要 reqwest，而"为查一次更新拉一个
 /// HTTP 栈的依赖"和当初把 `can-voice-settings` 拆出来要躲的是同一件事。
-pub async fn check_once(api_origin: &str, client: &str, version: &str) -> Option<Latest> {
-    check(&reqwest::Client::new(), api_origin, client, version).await
+pub async fn check_once(
+    api_origin: &str,
+    client: &str,
+    target: &str,
+    arch: &str,
+    bundle: &str,
+    version: &str,
+) -> Option<Latest> {
+    check(
+        &reqwest::Client::new(),
+        api_origin,
+        client,
+        target,
+        arch,
+        bundle,
+        version,
+    )
+    .await
 }
 
 /// `latest` 比 `current` 新吗。
@@ -215,26 +264,15 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn reply(latest: &str, available: bool, with_build: bool) -> serde_json::Value {
-        let mut clients = serde_json::Map::new();
-        if with_build {
-            clients.insert(
-                "audio-for-can".into(),
-                json!({
-                    "name": "audio-for-can",
-                    "version": latest,
-                    "size": 62_000_000u64,
-                    "download": "https://api.ceruleanavi.net/api/v1/clients/download/audio-for-can?v=x",
-                    "origin": "https://github.com/…"
-                }),
-            );
-        }
+    /// can-api 发的更新清单。**平的**：请求里已经写死了一个平台，
+    /// 所以回包里没有可以用来分支的东西。
+    fn manifest(latest: &str) -> serde_json::Value {
         json!({
             "version": latest,
             "notes": "https://github.com/…/releases/tag/x",
-            "clients": clients,
-            "client": "audio-for-can",
-            "update": { "available": available, "current": "2.2.4", "latest": latest }
+            "pub_date": "2026-09-22T00:00:00Z",
+            "url": "https://api.ceruleanavi.net/api/v1/voice/download/audio-for-can/linux-x86_64-deb",
+            "signature": "dW50cnVzdGVkIGNvbW1lbnQ6…",
         })
     }
 
@@ -276,35 +314,59 @@ mod tests {
     /// "请更新客户端"指向一条走不通的路。
     #[tokio::test]
     async fn a_newer_build_comes_back_as_an_update() {
-        let (origin, req) = serve_once("200 OK", reply("27.1.0", true, true).to_string()).await;
+        let (origin, req) = serve_once("200 OK", manifest("27.1.0").to_string()).await;
 
-        let got = check(&reqwest::Client::new(), &origin, "audio-for-can", "27.0.3")
-            .await
-            .expect("a newer build must be reported");
+        let got = check(
+            &reqwest::Client::new(),
+            &origin,
+            "audio-for-can",
+            "linux",
+            "x86_64",
+            "deb",
+            "27.0.3",
+        )
+        .await
+        .expect("a newer build must be reported");
 
         assert_eq!(got.version, "27.1.0");
-        assert!(
-            got.download.contains("clients/download"),
-            "{}",
-            got.download
-        );
+        assert!(got.download.contains("voice/download"), "{}", got.download);
 
-        // 问的是 can-api 那条已发布的路径，而且带上了自己是谁、现在是哪一版：
-        // 少了 client 参数的话 can-api 不知道该拿哪个包的版本来比。
+        // 问的是 can-api 那条新路径，而且平台的每一段都在地址里：少了任何一段，
+        // 一个 deb 和一个 AppImage 拿到的就是同一个清单。
         let line = req.await.expect("the server saw a request");
-        assert!(line.contains("/api/v1/clients/latest"), "{line}");
-        assert!(line.contains("client=audio-for-can"), "{line}");
-        assert!(line.contains("version=27.0.3"), "{line}");
+        assert!(
+            line.contains("/api/v1/voice/update/audio-for-can/linux/x86_64/deb"),
+            "{line}"
+        );
+        assert!(line.contains("current=27.0.3"), "{line}");
     }
 
-    /// 自带客户端那条路也要真的走通——四个客户端里有一个走的是它。
+    /// 自带客户端那条路也要真的走通——手上没有现成 client 的调用方走的是它。
     #[tokio::test]
     async fn the_self_contained_check_reaches_the_server_too() {
-        let (origin, _req) = serve_once("200 OK", reply("27.1.0", true, true).to_string()).await;
-        let got = check_once(&origin, "audio-for-can", "27.0.3")
+        let (origin, _req) = serve_once("200 OK", manifest("27.1.0").to_string()).await;
+        let got = check_once(&origin, "audio-for-can", "linux", "x86_64", "deb", "27.0.3")
             .await
             .expect("a newer build must be reported");
         assert_eq!(got.version, "27.1.0");
+    }
+
+    /// can-api 的每一个"没什么可装的"都是 204。把它读成错误在这里无害，
+    /// 但会把一个真的错误盖掉。
+    #[tokio::test]
+    async fn two_oh_four_is_not_an_update() {
+        let (origin, _req) = serve_once("204 No Content", String::new()).await;
+        let got = check(
+            &reqwest::Client::new(),
+            &origin,
+            "audio-for-can",
+            "linux",
+            "x86_64",
+            "deb",
+            "27.0.3",
+        )
+        .await;
+        assert!(got.is_none());
     }
 
     /// **失败要安静。** 更新服务出错不值得一个对话框，更不该拖慢启动。
@@ -312,7 +374,16 @@ mod tests {
     async fn a_server_error_is_not_an_update() {
         let (origin, _req) = serve_once("500 Internal Server Error", "nope".into()).await;
         assert_eq!(
-            check(&reqwest::Client::new(), &origin, "audio-for-can", "27.0.3").await,
+            check(
+                &reqwest::Client::new(),
+                &origin,
+                "audio-for-can",
+                "linux",
+                "x86_64",
+                "deb",
+                "27.0.3",
+            )
+            .await,
             None
         );
     }
@@ -325,20 +396,12 @@ mod tests {
                 &reqwest::Client::new(),
                 "http://127.0.0.1:1",
                 "audio-for-can",
+                "linux",
+                "x86_64",
+                "deb",
                 "27.0.3",
             )
             .await,
-            None
-        );
-    }
-
-    /// 同一版不提示。回包里 `update.available` 为 false 时更不提示——
-    /// 那是 can-api 已经比过一次的结论。
-    #[tokio::test]
-    async fn the_same_version_is_not_an_update() {
-        let (origin, _req) = serve_once("200 OK", reply("27.0.3", false, true).to_string()).await;
-        assert_eq!(
-            check(&reqwest::Client::new(), &origin, "audio-for-can", "27.0.3").await,
             None
         );
     }
@@ -397,49 +460,73 @@ mod tests {
         assert!(!is_newer("不是版本号", "2.2.4"));
     }
 
-    // ——— 回包有两层，而这正是 Python 版读错的地方 ———
+    // ——— 清单是平的 ———
 
-    /// `update.py` 判的是一个**顶层的 `update_available`**，而 can-api 从来没有
-    /// 发过那个字段——真的在 `update.available` 里。于是检查永远返回"没有更新"，
-    /// 而它看起来和"确实没有更新"一模一样。
+    /// 只有能就地替换自己的包才自动更新；deb 和 rpm 退回横幅。
     #[test]
-    fn the_verdict_lives_under_update_not_at_the_top() {
-        let r = reply("2.2.5", true, true);
-        assert!(
-            r.get("update_available").is_none(),
-            "the fixture must match reality"
+    fn only_a_bundle_that_can_replace_itself_updates_itself() {
+        // deb 和 rpm 插件装得了，但装它们要 pkexec 或者图形 sudo，而这套更新
+        // 不问人。`/usr` 还是包管理器的地盘，下一次 `apt upgrade` 会把旧版本
+        // 装回来。
+        assert!(self_replaceable(Some("appimage")));
+        assert!(self_replaceable(Some("nsis")));
+        assert!(self_replaceable(Some("msi")));
+
+        assert!(!self_replaceable(Some("deb")));
+        assert!(!self_replaceable(Some("rpm")));
+        assert!(!self_replaceable(Some("app")));
+
+        // 没打包的构建——`cargo run`。没有东西可以替换。
+        assert!(!self_replaceable(None));
+        assert!(!self_replaceable(Some("unknown")));
+    }
+
+    #[test]
+    fn the_manifest_url_carries_every_part_the_route_matches_on() {
+        let url = manifest_url(
+            "https://api.ceruleanavi.net/",
+            "audio-for-can",
+            "linux",
+            "x86_64",
+            "deb",
+            "27.0.3",
         );
-        assert!(parse(&r, "audio-for-can").is_some());
+        assert_eq!(
+            url,
+            "https://api.ceruleanavi.net/api/v1/voice/update/audio-for-can/linux/x86_64/deb?current=27.0.3"
+        );
     }
 
-    /// 另一半：顶层的 `client` 是**包名字符串**，每个构建在 `clients[<name>]` 里。
-    /// 只修第一层的话，下一步就是在一个 `String` 上调 `.get()`。
+    /// 旧回包把每个构建塞在 `clients[<name>]` 底下。新的只有一个平台，
+    /// 因为请求里已经写明了是哪一个。
     #[test]
-    fn the_build_lives_under_clients_keyed_by_name() {
-        let r = reply("2.2.5", true, true);
-        assert!(r["client"].is_string(), "the fixture must match reality");
-        let got = parse(&r, "audio-for-can").expect("a build");
-        assert_eq!(got.version, "2.2.5");
-        assert!(got.download.contains("/clients/download/audio-for-can"));
-        assert_eq!(got.size, 62_000_000);
+    fn the_manifest_is_flat_not_keyed_by_client() {
+        let body = json!({
+            "version": "27.0.9",
+            "notes": "有新版",
+            "pub_date": "2026-09-22T00:00:00Z",
+            "url": "https://api.ceruleanavi.net/api/v1/voice/download/audio-for-can/linux-x86_64-deb",
+            "signature": "sig",
+        });
+        let latest = parse(&body).expect("a manifest is an update");
+        assert_eq!(latest.version, "27.0.9");
+        assert_eq!(
+            latest.download,
+            "https://api.ceruleanavi.net/api/v1/voice/download/audio-for-can/linux-x86_64-deb"
+        );
+        assert_eq!(latest.notes, "有新版");
     }
 
     #[test]
-    fn no_update_available_means_nothing_to_offer() {
-        assert!(parse(&reply("2.2.4", false, true), "audio-for-can").is_none());
-    }
-
-    /// 四个构建里坏了一个时 can-api **不把它列出来**，而不是给一个会 404 的地址。
-    /// 这边照样要当成"没有更新"。
-    #[test]
-    fn a_missing_build_is_not_an_update() {
-        assert!(parse(&reply("2.2.5", true, false), "audio-for-can").is_none());
+    fn a_manifest_without_a_url_is_not_an_update() {
+        let body = json!({ "version": "27.0.9" });
+        assert!(parse(&body).is_none());
     }
 
     #[test]
     fn a_malformed_reply_is_not_an_update() {
-        assert!(parse(&json!("nonsense"), "audio-for-can").is_none());
-        assert!(parse(&json!({}), "audio-for-can").is_none());
+        assert!(parse(&json!("nonsense")).is_none());
+        assert!(parse(&json!({})).is_none());
     }
 
     // ——— 什么时候才弹 ———

@@ -998,8 +998,30 @@ async fn check_update(
         (s.skipped_update, busy)
     };
     let origin = app.settings_snapshot().endpoints.api_origin();
-    let Some(latest) =
-        can_voice_update::check_once(&origin, "atis-for-can", env!("CARGO_PKG_VERSION")).await
+    // 能自己换掉自己的包走插件，那一路在启动时就装完了；这条路只剩
+    // deb / rpm，用来显示横幅。
+    let bundle = can_voice_autoupdate::bundle_name().unwrap_or("unknown");
+    if can_voice_update::self_replaceable(Some(bundle)) {
+        return Ok(None);
+    }
+
+    // 和插件填 `{{target}}`/`{{arch}}` 用的是同一对函数，所以横幅和插件
+    // 问的是同一个平台。
+    let Some(target) = tauri_plugin_updater::target() else {
+        return Ok(None);
+    };
+    let (os, arch) = target.split_once('-').unwrap_or((target.as_str(), ""));
+
+    let Some(latest) = can_voice_update::check(
+        &app.http,
+        &origin,
+        "atis-for-can",
+        os,
+        arch,
+        bundle,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
     else {
         return Ok(None);
     };
@@ -1030,6 +1052,14 @@ fn skip_update(app: tauri::State<'_, App>, version: String) {
 #[tauri::command]
 fn open_download(url: String) -> Result<(), Message> {
     can_voice_update::open_in_browser(&url)
+}
+
+/// 启动更新走到哪一步了。**界面是轮询这个命令的，不是收事件。** `start` 在
+/// `.setup()` 里跑，那时 webview 还没加载完自己的包，监听器一个都还不存在，
+/// 而 tauri 不会为还没起来的页面补发事件。
+#[tauri::command]
+fn update_state() -> can_voice_autoupdate::State {
+    can_voice_autoupdate::state()
 }
 
 // ——— 日志 ———
@@ -1166,14 +1196,22 @@ pub fn run() {
         std::env::args().any(|a| a == "--debug") || saved.debug_log,
     );
 
-    tauri::Builder::default()
-        .manage(App::new())
+    let context = tauri::generate_context!();
+    let mut builder = tauri::Builder::default().manage(App::new());
+    // **只有 tauri.conf.json 里配了 `plugins.updater` 才注册插件。** 没配的时候
+    // 插件初始化直接失败（它的配置里 pubkey 是必填），应用一个窗口都不会出来。
+    if can_voice_autoupdate::configured(context.config()) {
+        builder = builder.plugin(can_voice_autoupdate::plugin());
+    }
+    builder
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
         .setup(|handle| {
             let appearance = handle.state::<App>().settings_snapshot().appearance;
             if let Some(window) = handle.get_webview_window("main") {
                 apply_window(&window, &appearance, appearance.compact);
             }
+            // 检查更新。立刻返回；界面轮询 `update_state` 拿进度。
+            can_voice_autoupdate::start(handle.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1186,6 +1224,7 @@ pub fn run() {
             check_update,
             skip_update,
             open_download,
+            update_state,
             profiles,
             stations,
             add_profile,
@@ -1212,7 +1251,7 @@ pub fn run() {
             refresh,
             settings,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("tauri failed to start");
 }
 

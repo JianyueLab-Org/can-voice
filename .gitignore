@@ -10,3 +10,8 @@ apps/*/node_modules/
 apps/*/dist/
 apps/*/src-tauri/target/
 apps/*/src-tauri/gen/
+
+# can-voice-autoupdate 不在 workspace 里（它依赖 tauri），所以它有自己的
+# target/ 和 Cargo.lock。库不锁版本——锁在四个应用那边。
+crates/can-voice-autoupdate/target/
+crates/can-voice-autoupdate/Cargo.lock

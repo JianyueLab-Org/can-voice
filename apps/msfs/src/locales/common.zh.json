@@ -51,7 +51,11 @@
     "available_sized": "有新版本 {version}（{size}）。本程序不会自动更新，装不装由你决定。",
     "notes": "更新说明",
     "download": "下载",
-    "skip": "跳过这一版"
+    "skip": "跳过这一版",
+    "checking": "正在检查更新…",
+    "downloading": "正在下载新版本…",
+    "downloading_sized": "正在下载新版本… {done} / {total}",
+    "installing": "正在安装，装完会自己重启…"
   },
   "notice": {
     "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",

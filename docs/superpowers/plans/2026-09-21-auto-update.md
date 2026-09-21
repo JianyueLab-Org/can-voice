@@ -2623,3 +2623,59 @@ Two things §8 asks for that are not separate tasks: "两代不串" is Task 1 pl
 **Corrections to the spec, found while writing this.** §6's detection mechanism was wrong (Task 11 step 5). §4.2 did not mention the flat manifest form, which this plan uses throughout (Task 11 step 5). Neither changes a decision.
 
 **Not in scope.** can-api's `const repo` for the legacy routes, which moves on cutover day. macOS, which has no build.
+
+---
+
+## Amendments
+
+What executing the plan changed, and why. The task bodies above are left as
+written; this section is what actually shipped where the two differ.
+
+**Task 2 — `archIn` splits `x86_64`.** `strings.FieldsFunc` treats `_` as a
+separator, and `_` is also part of `x86_64`. The rpm name yielded the field
+`x86`, which `archToken` maps to `i686`, so every rpm was keyed
+`linux-i686-rpm` — a platform nothing publishes, and therefore a permanent 204
+for every rpm user. `archIn` now tries a joined field pair before either half.
+Fixed in the task body above.
+
+**Task 5 — `relayAsset` takes a `cacheControl` parameter.** The plan set
+`Cache-Control` on the response before the upstream request. `httpx.Error` does
+not clear headers, so a 502 or a 416 carried `public, max-age=300`: a cacheable
+error, on the live download route. The header is now passed in and set on the
+success path only.
+
+**Task 8 — a missing `plugins.updater` block is not inert.** The plan assumed
+the block could be added last, on the grounds that `handle.updater()` would
+return `Err` and the glue would treat that as "no update". It does not.
+`tauri_plugin_updater::Config` requires `pubkey`, so with no block the plugin's
+setup fails and `UpdaterState` is never managed — and `updater()` reaches it
+through `self.state::<UpdaterState>()`, which **panics** on unmanaged state.
+`can_voice_autoupdate::configured(&tauri::Config)` was added; each app
+registers the plugin only when the block is present, and `run` checks the same
+predicate. Once the block lands the predicate is always true.
+
+**Tasks 8, 9 and 10 — the interface polls instead of listening.** `start` is
+called from `.setup()`, and on the common paths (`self_replaceable` false, or
+`configured` false) it reaches `Done` in microseconds — before the webview has
+loaded its bundle, let alone reached `onMounted`. Tauri does not queue events
+for a page that is not up, so the event was dropped and the gate fell through
+to its 8-second fallback on every launch: the exact stall it existed to
+prevent.
+
+The event is gone. The state lives in a process-global `Mutex<State>`
+**initialised to `Done`** — load-bearing, so a build where `start` is never
+called opens immediately rather than hanging — and `start` sets `Checking`
+synchronously before it spawns. Each app exposes `update_state`, and
+`StartupGate.vue` polls it every 200 ms, which is the interval the apps already
+use for their main refresh. There is no timer left to tune.
+
+**Task 11 — the end-to-end test cannot run yet, and will look like it passed.**
+`releases/latest` excludes prereleases, and the version scheme reserves
+`YY = 0` for them, so every release from `v27.0.1` to `v27.0.8` is invisible to
+it: GitHub answers 404, the resolver caches nil, and the manifest route answers
+204 forever. The first release this path can see is `v27.1.0`.
+
+From can-api's side that 404 is indistinguishable from GitHub being down —
+both become 204, deliberately, because failure has to be silent. The cost is
+that nothing announces the route is inert. Do not run Task 11 step 4 against a
+prerelease and record a pass.
