@@ -153,24 +153,47 @@ fn unit_word(letter: char, chinese: bool) -> Option<&'static str> {
         .map(|(_, en, zh)| if chinese { *zh } else { *en })
 }
 
+/// 这段文本里有没有汉字。
+///
+/// 范围照抄旧版那条正则（`can-audio/server/ATIS/mumble.py:307`，`[一-鿿]`）：
+/// 它就是 CJK 统一汉字区。中文标点和全角符号不算——一段只有"。"的英文报文
+/// 不该被判成中文。
+///
+/// **选读法（[`process`]）和选嗓子（[`crate::station`]）用的是这一个函数。**
+/// 两处各写一份的时候正是这样对不上的：嗓子按汉字选、读法按分隔符选，于是
+/// 一份没有分隔符的纯中文通播用中文嗓子念出 "one zero zero seven"。
+pub fn has_chinese(text: &str) -> bool {
+    text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
+}
+
 /// 处理一整段 ATIS 文本，自动识别中英混合。
 ///
-/// 恰好一个 [`SEPARATOR`] 才算中英混合；零个当纯英文，两个以上也当纯英文
-/// ——猜它想表达什么只会把一段读不通的东西播出去。
+/// 恰好一个 [`SEPARATOR`] 才算中英混合：英文在前、中文在后，两半各按各的读法。
+///
+/// # 没有分隔符时按文本里有没有汉字选读法
+///
+/// 机队播 datafeed 里**所有** `_ATIS` 席位，不只是 atis-for-can 发出来的那些。
+/// EuroScope 或者别的来源发的纯中文通播没有 `|`，只数分隔符的那一版把它当纯
+/// 英文，于是 [`crate::station`] 用中文嗓子念出 "one zero zero seven"、"niner"
+/// ——那一侧选嗓子按的是 [`has_chinese`]。**两步必须是同一个判据**，所以这里
+/// 调的就是同一个函数。
+///
+/// 两个以上的分隔符仍然当纯英文：那不是"中英混合"，猜它想表达什么只会把一段
+/// 读不通的东西播出去。
 pub fn process(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
     let parts: Vec<&str> = text.split(SEPARATOR).collect();
-    if parts.len() == 2 {
-        format!(
+    match parts.len() {
+        2 => format!(
             "{}{}{}",
             single(parts[0].trim(), false),
             SEPARATOR,
             single(parts[1].trim(), true)
-        )
-    } else {
-        single(text, false)
+        ),
+        1 => single(text, has_chinese(text)),
+        _ => single(text, false),
     }
 }
 
@@ -351,10 +374,35 @@ mod tests {
     }
 
     #[test]
-    fn text_without_a_pipe_is_treated_as_english() {
+    fn english_text_without_a_pipe_stays_english() {
         let out = process("QNH 1007");
         assert!(out.contains("one"));
         assert!(!out.contains('|'));
+    }
+
+    /// **不带分隔符的纯中文报文用中文读法念数字。**
+    ///
+    /// 机队播 datafeed 里所有 `_ATIS` 席位，EuroScope 或者别的来源发的纯中文
+    /// 通播没有 `|`。只数分隔符的那一版把它当纯英文，于是中文嗓子念出
+    /// "one zero zero seven"、"niner"——[`crate::station`] 的 `halves()` 选嗓子
+    /// 按的是有没有汉字，这里按的是分隔符，两步判据不一样就会这样对不上。
+    #[test]
+    fn chinese_text_without_a_pipe_is_read_in_chinese() {
+        let out = process("上海浦东机场通播 修正海压 1007 使用跑道 29");
+        assert!(out.contains("幺 洞 洞 拐"), "{out}");
+        assert!(!out.contains("one"), "{out}");
+        assert!(!out.contains("niner"), "{out}");
+        assert!(!out.contains('|'), "{out}");
+    }
+
+    /// 选读法和 [`crate::station`] 选嗓子用的是**同一个函数**。
+    /// 两处各写一份迟早会分岔，而分岔出来就是中文嗓子念英文数字。
+    #[test]
+    fn the_chinese_test_is_one_function_not_two() {
+        assert!(has_chinese("修正海压 1007"));
+        assert!(!has_chinese("QNH 1007"));
+        // 中文标点不算：一段只有全角句号的英文报文不该被判成中文。
+        assert!(!has_chinese("QNH 1007。"));
     }
 
     /// 两个以上的 `|` 不是"中英混合"，按原样当英文处理——猜它想表达什么

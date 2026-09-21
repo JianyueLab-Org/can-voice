@@ -214,8 +214,13 @@ async fn synthesize(
 /// 机队播 datafeed 里**所有** `_ATIS` 席位，不只是 atis-for-can 发出来的那些。
 /// EuroScope 或者别的来源发的纯中文通播没有 `|`，按分隔符判的那一版会把整段
 /// 交给 `en-US-*` 嗓子，要么念不出来，要么乱念。旧版判的是文本里有没有汉字
-/// （`can-audio/server/ATIS/mumble.py:307`，`[一-鿿]`）。分隔符仍然管着另一件
-/// 事——[`readback::process`] 按它决定哪一半用中文读法——只是不再管嗓子。
+/// （`can-audio/server/ATIS/mumble.py:307`，`[一-鿿]`），那就是
+/// [`readback::has_chinese`]。
+///
+/// **[`readback::process`] 选读法调的是同一个函数。** 两处各判一次的时候正是
+/// 这样对不上的：这一步按汉字选对了嗓子，那一步按分隔符把整段当英文，于是
+/// 中文嗓子念出 "one zero zero seven"、"niner"。分隔符现在只管一件事——有且
+/// 只有一个时，它把英文那一半和中文那一半分开。
 ///
 /// # 中文在前
 ///
@@ -237,20 +242,11 @@ fn halves(text: &str) -> Vec<(String, bool)> {
         .into_iter()
         .map(str::trim)
         .filter(|chunk| !chunk.is_empty())
-        .map(|chunk| (chunk.to_string(), has_chinese(chunk)))
+        .map(|chunk| (chunk.to_string(), readback::has_chinese(chunk)))
         .collect();
     // 稳定排序：中文那几段排到前面，各自内部的顺序不变。
     out.sort_by_key(|(_, chinese)| !*chinese);
     out
-}
-
-/// 这段文本里有没有汉字。
-///
-/// 范围照抄旧版那条正则（`can-audio/server/ATIS/mumble.py:307`，`[一-鿿]`）：
-/// 它就是 CJK 统一汉字区。中文标点和全角符号不算——一段只有"。"的英文报文
-/// 不该被判成中文。
-fn has_chinese(text: &str) -> bool {
-    text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
 }
 
 /// 给 [`crate::script`] 的测试用：语言怎么切是那边要断言的事，
@@ -440,6 +436,22 @@ mod tests {
             chinese[0].1,
             "a chinese report must use the chinese voice: {chinese:?}"
         );
+    }
+
+    /// **选嗓子和选读法必须是同一个判据。**
+    ///
+    /// 嗓子归这里选（按有没有汉字），读法归 [`readback::process`] 选。两步各用
+    /// 各的判据时，一份没有 `|` 的纯中文通播用中文嗓子念出 "one zero zero
+    /// seven"、"niner"——嗓子对了，数字还是英文的。
+    #[test]
+    fn the_voice_and_the_readback_agree_on_the_language() {
+        let got = halves("上海浦东机场通播 修正海压 1007 使用跑道 29");
+        assert_eq!(got.len(), 1, "{got:?}");
+        let (spoken, chinese) = &got[0];
+        assert!(chinese, "{got:?}");
+        assert!(spoken.contains("幺 洞 洞 拐"), "{spoken}");
+        assert!(!spoken.contains("one"), "{spoken}");
+        assert!(!spoken.contains("niner"), "{spoken}");
     }
 
     fn voice_for_test() -> VoiceSettings {
