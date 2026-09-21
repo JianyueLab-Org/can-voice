@@ -363,6 +363,289 @@ mod tests {
         assert!(fold_to_mono(&[1, 2], 0).is_empty());
         assert!(spread_mono(&[1, 2], 0).is_empty());
     }
+
+    // ——— 播放环的时钟对账 ———
+    //
+    // 这一段是**可测的**，尽管下面那段注释说 CI 的 runner 没有声卡：
+    // `fill_output` 是一个纯函数（一个环加一片缓冲），`push_playback` 是生产者
+    // 那一侧的全部。把两者按各自的节拍交替叫一遍，就能在没有声卡的机器上把两个
+    // 时钟之间的任意偏差演出来——而这正是这一段代码唯一要处理的事。
+
+    /// 一段定值音频，长 `n` 个样本。
+    fn tone(n: usize) -> Vec<i16> {
+        vec![1000i16; n]
+    }
+
+    /// 造一个跑在 `rate` 上的空环与它的时钟。
+    fn ring_and_clock(rate: u32) -> (Arc<Mutex<VecDeque<i16>>>, Arc<PlaybackClock>) {
+        let clock = Arc::new(PlaybackClock::new());
+        clock.on_rebuild(rate);
+        (Arc::new(Mutex::new(VecDeque::new())), clock)
+    }
+
+    /// 按 `ratio` 的速率比跑 `callbacks` 次回调。
+    ///
+    /// 生产者每次推 `frames * ratio` 个样本（小数用累加器摊平，模拟一个稳定
+    /// 但和声卡晶振对不上的时钟），消费者每次要 `frames` 个。
+    fn drift(rate: u32, frames: usize, callbacks: usize, ratio: f64) -> PlaybackStats {
+        let (ring, clock) = ring_and_clock(rate);
+        let mut buf = vec![0i16; frames];
+        let chunk = tone(frames * 2);
+        let mut owed = 0.0f64;
+        for _ in 0..callbacks {
+            owed += frames as f64 * ratio;
+            let n = (owed.floor() as usize).min(chunk.len());
+            owed -= n as f64;
+            push_playback(&ring, &chunk[..n], &clock);
+            fill_output(&mut buf, 1, &ring, &clock);
+        }
+        clock.stats()
+    }
+
+    /// 环没攒够水位之前必须是静音。
+    ///
+    /// 流是立刻开始播的，而环是空的，所以第一瞬间回调就在一个空环上取数——
+    /// 旧代码在那里 `unwrap_or(0)`，于是每一次连接的开头都先播一段静音里
+    /// 夹着零星样本的东西，听感就是"电音"。
+    #[test]
+    fn the_output_is_silent_until_the_ring_is_primed() {
+        let (ring, clock) = ring_and_clock(48_000);
+        let mut buf = vec![0i16; 960];
+
+        // 只有一帧，离 60 毫秒的目标水位还差两帧。
+        push_playback(&ring, &tone(960), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+        assert!(buf.iter().all(|&s| s == 0), "没攒够就出声了");
+
+        push_playback(&ring, &tone(960), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+        assert!(buf.iter().all(|&s| s == 0), "没攒够就出声了");
+
+        // 第三帧攒够了，这一拍开始出声。
+        push_playback(&ring, &tone(960), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+        assert!(buf.iter().all(|&s| s == 1000), "攒够了还不出声");
+    }
+
+    /// 两端速率一致时一个样本都不该动。
+    ///
+    /// 转向改的是波形本身，所以它只在水位跑出死区时才动手；稳态下动手就是在和
+    /// 相位较劲——生产者每 20 毫秒一次性推一整帧，回调落在推之前还是之后，
+    /// 测到的水位本来就差一整帧。
+    #[test]
+    fn a_matched_producer_and_consumer_neither_add_nor_drop_samples() {
+        // 3000 次回调 = 60 秒。
+        let s = drift(48_000, 960, 3_000, 1.0);
+        assert_eq!(s.steer_added, 0, "稳态下补了样本: {s:?}");
+        assert_eq!(s.steer_removed, 0, "稳态下丢了样本: {s:?}");
+        assert_eq!(s.underruns, 0, "{s:?}");
+        assert_eq!(s.trimmed_ms, 0, "{s:?}");
+    }
+
+    /// 生产者慢 0.5% 要被转向吃掉，环不能空。
+    ///
+    /// **回调缓冲取 128 帧是有意的。** 每个回调只改一个样本，所以转向的权限
+    /// 恰好是 `1/frames`：128 帧的缓冲上是 0.78%，够吃 0.5%；而 960 帧的缓冲上
+    /// 只有 0.1%，够吃的是这个缺陷真正针对的 ±100 ppm 晶振偏差（0.01%），
+    /// 留了 10 倍余量。偏差超出权限时不是靠改一个样本能补的——那时新加的这几个
+    /// 计数器就是用来把它认出来的东西。
+    #[test]
+    fn a_slow_producer_is_absorbed_without_the_ring_running_dry() {
+        // 50000 次回调 × 128 帧 ≈ 133 秒。
+        let s = drift(48_000, 128, 50_000, 0.995);
+        assert_eq!(s.underruns, 0, "环被吃空了: {s:?}");
+        assert_eq!(s.silence_ms, 0, "补进了静音: {s:?}");
+        assert!(s.steer_added > 0, "转向根本没动手: {s:?}");
+        assert!(s.depth_ms > 0, "{s:?}");
+    }
+
+    /// 生产者快 0.5% 也要被转向吃掉，不能撞上 200 毫秒那一刀。
+    ///
+    /// 那一刀是硬接（丢掉最旧的一整段），听感是"卡顿"；转向是每个回调多吃一个
+    /// 样本，听不出来。
+    #[test]
+    fn a_fast_producer_is_absorbed_without_hitting_the_hard_ceiling() {
+        let s = drift(48_000, 128, 50_000, 1.005);
+        assert_eq!(s.trimmed_ms, 0, "撞上了硬上限: {s:?}");
+        assert!(s.steer_removed > 0, "转向根本没动手: {s:?}");
+        assert!(s.depth_ms <= RING_MS as u32, "水位超过了硬上限: {s:?}");
+    }
+
+    /// 一段欠载是**一段**，不是它跨过的每一个回调各算一次。
+    ///
+    /// 回调每秒跑几十次，按回调计数的话这个数字只能说明"回调在跑"。
+    #[test]
+    fn an_underrun_is_one_episode_however_many_callbacks_it_spans() {
+        let (ring, clock) = ring_and_clock(48_000);
+        let mut buf = vec![0i16; 960];
+        // 攒够水位、放起来。
+        push_playback(&ring, &tone(2_880), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+
+        // 生产者停了：接下来每个回调都在补静音，但这只是一段欠载。
+        for _ in 0..50 {
+            fill_output(&mut buf, 1, &ring, &clock);
+        }
+        let s = clock.stats();
+        assert_eq!(s.underruns, 1, "50 个回调报成了 {} 段", s.underruns);
+        assert!(s.silence_ms > 0, "补了静音却没记下来: {s:?}");
+        assert_eq!(s.depth_ms, 0, "{s:?}");
+    }
+
+    /// 环空了要**重新攒水位**，而不是空着硬撑。
+    ///
+    /// 空着硬撑的表现就是测试员报上来的那一对症状：每个回调补一点静音（电音），
+    /// 而攒不出连续的一段（卡顿）。
+    #[test]
+    fn a_drained_ring_primes_again_instead_of_limping_along_empty() {
+        let (ring, clock) = ring_and_clock(48_000);
+        let mut buf = vec![0i16; 960];
+        push_playback(&ring, &tone(2_880), &clock);
+        for _ in 0..8 {
+            fill_output(&mut buf, 1, &ring, &clock);
+        }
+        // 吃空之后生产者只回来一帧：还不够，必须继续静音。
+        push_playback(&ring, &tone(960), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+        assert!(buf.iter().all(|&s| s == 0), "没重新攒够就又出声了");
+
+        // 攒够三帧才重新出声。
+        push_playback(&ring, &tone(1_920), &clock);
+        fill_output(&mut buf, 1, &ring, &clock);
+        assert!(buf.iter().all(|&s| s == 1000), "重新攒够了还不出声");
+    }
+
+    /// 欠载只报第一行，清除时报一行汇总；中间一行都不许有。
+    ///
+    /// 这条路在实时音频线程上，每个回调打一行的后果参见 `stack.rs` 上一次修的
+    /// 那个缺陷：一份 1 MB 的日志里 7545 行有 7536 行是同一句。
+    #[test]
+    fn a_dry_ring_is_reported_once_and_summarised_when_it_refills() {
+        let log = capture_log(|| {
+            let (ring, clock) = ring_and_clock(48_000);
+            let mut buf = vec![0i16; 960];
+            push_playback(&ring, &tone(2_880), &clock);
+            clock.report();
+            for _ in 0..200 {
+                fill_output(&mut buf, 1, &ring, &clock);
+                // 生产者那一侧每一拍都会看一眼计数器。
+                clock.report();
+            }
+            // 生产者回来了，水位攒回去，汇总应当在这里出现。
+            for _ in 0..4 {
+                push_playback(&ring, &tone(960), &clock);
+                clock.report();
+                fill_output(&mut buf, 1, &ring, &clock);
+            }
+            clock.report();
+        });
+        assert_eq!(
+            log.matches("playback ring ran dry").count(),
+            1,
+            "欠载报了不止一次:\n{log}"
+        );
+        assert_eq!(
+            log.matches("playback ring refilled").count(),
+            1,
+            "汇总行不是恰好一行:\n{log}"
+        );
+    }
+
+    /// 水位被一次突发顶高之后，转向要把它拉回死区。
+    ///
+    /// 只在 200 毫秒处裁是不够的：裁不到的那一段（比如 150 毫秒）会一直留着，
+    /// 而它就是永久的额外延迟。
+    #[test]
+    fn the_depth_is_steered_back_toward_target_after_a_disturbance() {
+        let (ring, clock) = ring_and_clock(48_000);
+        let frames = 960usize;
+        let mut buf = vec![0i16; frames];
+        let burst = tone(9_600);
+        // 一次突发把环灌到 200 毫秒。
+        push_playback(&ring, &burst, &clock);
+        // 之后两端速率完全一致：能把水位拉回来的只有转向。
+        for _ in 0..20_000 {
+            push_playback(&ring, &burst[..frames], &clock);
+            fill_output(&mut buf, 1, &ring, &clock);
+        }
+        let s = clock.stats();
+        assert!((40..=80).contains(&s.depth_ms), "水位没回到目标附近: {s:?}");
+        assert_eq!(s.underruns, 0, "{s:?}");
+    }
+
+    /// 缓冲长度不是声道数的整数倍时，余下那几个位置也要被写成静音。
+    ///
+    /// 旧代码只写 `buf[..interleaved.len()]`，剩下的保持原样——而 cpal 交上来的
+    /// 缓冲是复用的，"原样"是上一轮的音频。
+    #[test]
+    fn a_ragged_output_buffer_leaves_no_stale_samples() {
+        let (ring, clock) = ring_and_clock(48_000);
+        push_playback(&ring, &tone(9_600), &clock);
+        // 两声道、5 个位置：只有两帧属于它，第 5 个位置不属于任何一帧。
+        let mut buf = vec![7i16; 5];
+        fill_output(&mut buf, 2, &ring, &clock);
+        assert_eq!(&buf[..4], &[1000, 1000, 1000, 1000], "帧没被填满");
+        assert_eq!(buf[4], 0, "残留了上一轮的样本");
+    }
+
+    /// 溢出裁掉多少要记下来。它和欠载是同一枚硬币的两面。
+    #[test]
+    fn the_overflow_trim_counts_what_it_drops() {
+        let (ring, clock) = ring_and_clock(48_000);
+        // 250 毫秒，比 200 毫秒的硬上限多 50 毫秒。
+        push_playback(&ring, &tone(12_000), &clock);
+        let s = clock.stats();
+        assert_eq!(s.trimmed_ms, 50, "{s:?}");
+        assert_eq!(s.depth_ms, RING_MS as u32, "{s:?}");
+    }
+
+    /// 重复或跳过的那一个样本挑**能量最低**的地方下手。
+    ///
+    /// 贴着零点改，波形上多出来或少掉的那一点接近 0；在波峰上改则是一个台阶，
+    /// 而台阶是听得见的。这一步是 O(n) 的一遍扫描，回调里付得起。
+    #[test]
+    fn the_steering_edit_lands_on_the_quietest_sample() {
+        assert_eq!(quietest(&[900, -20, 800]), 1);
+        assert_eq!(quietest(&[0, 900, 800]), 0);
+        assert_eq!(quietest(&[]), 0);
+        // `i16::MIN` 的绝对值溢出 i16，别让它 panic。
+        assert_eq!(quietest(&[i16::MIN, 5]), 1);
+    }
+
+    /// 把一段代码期间的日志收下来。
+    ///
+    /// `with_default` 是**按线程**装的，所以并行跑的测试互不干扰；装全局的那个
+    /// 一个进程只许装一次，第二个测试就会 panic。
+    fn capture_log(f: impl FnOnce()) -> String {
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("sink").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = sink.0.lock().expect("sink").clone();
+        String::from_utf8(bytes).expect("utf-8 log")
+    }
 }
 
 // ——— 设备 I/O ———
@@ -389,6 +672,269 @@ use std::sync::{Arc, Mutex};
 /// 播放侧攒多了就是延迟，而延迟在无线电通话里比偶尔一次欠载难受得多；
 /// 采集侧攒多了是同一回事，而且落后的音频追不回来。
 const RING_MS: usize = 200;
+
+/// 播放环要稳住的水位。
+///
+/// 60 毫秒正好是三个 Opus 帧：够吃掉一次调度抖动，又短到没人会把它当成延迟。
+/// 它和 [`RING_MS`] 是两件事——这个是**要稳在**的水位，那个是**绝不能超过**的
+/// 延迟。只有上限没有目标，就是这个缺陷本身：水位在 0 和 200 毫秒之间自由漂，
+/// 而两端都难听。
+const TARGET_MS: usize = 60;
+
+/// 一拍的长度，等于一个 Opus 帧。
+///
+/// 生产者每 20 毫秒一次性推这么多，所以它也是转向死区的宽度——见
+/// [`PlaybackClock::take_for`]。
+const FRAME_MS: usize = 20;
+
+/// 播放环的对账数字。上层每隔几秒把它折进 `Event::Health`。
+///
+/// 时长一律用毫秒而不是样本数：样本数要配着设备采样率才有意义，而界面不知道
+/// 设备采样率。转向那两个数例外——它们每次只动一个样本，换成毫秒会全部变成 0。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PlaybackStats {
+    /// 此刻的水位。
+    pub depth_ms: u32,
+    /// 欠载时补进去的静音总时长。
+    pub silence_ms: u64,
+    /// 欠载发生过几**段**。不是几个回调：回调每秒跑几十次，按回调数只能说明
+    /// "回调在跑"。
+    pub underruns: u64,
+    /// 溢出时从环头裁掉的总时长。
+    pub trimmed_ms: u64,
+    /// 对齐时钟时补进去的样本数。
+    pub steer_added: u64,
+    /// 对齐时钟时拿掉的样本数。
+    pub steer_removed: u64,
+}
+
+/// 播放环两端的时钟对账。
+///
+/// # 为什么需要它
+///
+/// 环的两侧是两个互不相识的时钟。生产者是 tokio 的 20 毫秒节拍（`pump.rs`，
+/// 而且它的 `MissedTickBehavior::Delay` 意味着误了点永远补不回来，只会慢不会
+/// 快）；消费者是声卡自己的晶振。没有任何东西把这两个时钟拉齐，而典型的
+/// ±100 ppm 晶振偏差每约 200 秒就攒出一整帧的差。
+///
+/// 攒到哪一侧都难听，而往空里攒尤其难听：环空了就是每个回调都往里补静音
+/// （听感是"电音"），补出来的静音又永远攒不出连续的一段（听感是"卡顿"）——
+/// 测试员报的正是这两样**同时**出现。
+///
+/// # 它做两件事
+///
+/// **攒够了再出声。** 环是空着建起来的而流是立刻开始播的，所以第一瞬间回调就
+/// 在空环上取数。被吃空之后也一样：退回去重新攒到目标水位，而不是空着硬撑。
+///
+/// **每个回调多吃或少吃一个样本**，把水位拉回目标。一个样本对 960 个样本的
+/// 缓冲是 0.1%（约 1.7 音分），听不出来；而在 200 毫秒处一刀切掉最旧的一整段
+/// 是听得出来的。代价是权限有限：转向的相对速率恰好是 `1/回调缓冲长度`——
+/// 960 帧的缓冲上是 0.1%，对 ±100 ppm 留了 10 倍余量；偏差超出这个数就补不
+/// 回来，而那时这里的计数器就是把它认出来的唯一东西。
+///
+/// # 回调里只碰原子量
+///
+/// 除了那把已有的环锁，实时音频线程上一行 I/O 都没有，也不分配无界的东西。
+/// 要说的话由生产者那一侧照着计数器说，见 [`PlaybackClock::report`]。
+#[derive(Debug, Default)]
+pub(crate) struct PlaybackClock {
+    /// 设备采样率。流会被重建，而重建出来的可能是另一个数。
+    rate: AtomicU32,
+    /// 攒够目标水位之前不出声。
+    primed: AtomicBool,
+    /// 出过声没有。第一次攒水位补的静音不算欠载——那是开场，不是故障。
+    ever_primed: AtomicBool,
+    /// 此刻正在一段欠载里。
+    dry: AtomicBool,
+    silence: AtomicU64,
+    underruns: AtomicU64,
+    trimmed: AtomicU64,
+    added: AtomicU64,
+    removed: AtomicU64,
+    depth: AtomicU64,
+    /// 这一段欠载的第一行报过了吗。
+    reported: AtomicBool,
+    /// 报第一行时的段数与静音数。汇总行减掉它们才是"这之后又发生了多少"。
+    mark_underruns: AtomicU64,
+    mark_silence: AtomicU64,
+}
+
+impl PlaybackClock {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// 流建起来了（第一次，或者换设备之后重建）。
+    ///
+    /// **计数器不清**：它们是这一场会话的总账，清掉就看不出"换了三次设备之后
+    /// 才开始欠载"。清的是水位状态——重建之后要重新攒，而这一次重新攒不算欠载。
+    pub(crate) fn on_rebuild(&self, rate: u32) {
+        self.rate.store(rate.max(1), Ordering::Relaxed);
+        self.primed.store(false, Ordering::Relaxed);
+        self.ever_primed.store(false, Ordering::Relaxed);
+        self.dry.store(false, Ordering::Relaxed);
+        self.depth.store(0, Ordering::Relaxed);
+    }
+
+    fn rate(&self) -> usize {
+        self.rate.load(Ordering::Relaxed).max(1) as usize
+    }
+
+    /// 目标水位，样本数。
+    fn target(&self) -> usize {
+        self.rate() * TARGET_MS / 1000
+    }
+
+    /// 硬上限，样本数。
+    fn cap(&self) -> usize {
+        self.rate() * RING_MS / 1000
+    }
+
+    fn primed(&self) -> bool {
+        self.primed.load(Ordering::Relaxed)
+    }
+
+    /// 这一轮该从环里吃几个样本：深了多吃一个，浅了少吃一个。
+    ///
+    /// 死区至少要有**一个生产帧**那么宽。生产者每 20 毫秒一次性推一整帧，
+    /// 回调落在推之前还是推之后，测到的水位本来就差这么多；死区窄于此，转向就
+    /// 成了跟相位较劲——每个回调都在改波形，却什么也没纠正。
+    fn take_for(&self, depth: usize, frames: usize) -> usize {
+        let target = self.target();
+        let slack = (self.rate() * FRAME_MS / 1000).max(frames);
+        if depth > target + slack && depth > frames {
+            frames + 1
+        } else if depth + slack < target && depth >= frames && frames >= 2 {
+            frames - 1
+        } else {
+            frames
+        }
+    }
+
+    fn set_depth(&self, depth: usize) {
+        self.depth.store(depth as u64, Ordering::Relaxed);
+    }
+
+    fn note_trimmed(&self, n: u64) {
+        if n > 0 {
+            self.trimmed.fetch_add(n, Ordering::Relaxed);
+        }
+    }
+
+    fn note_added(&self, n: u64) {
+        self.added.fetch_add(n, Ordering::Relaxed);
+    }
+
+    fn note_removed(&self, n: u64) {
+        self.removed.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// 补了 `n` 个静音样本。**开场那一段攒水位不算**：那不是故障。
+    fn note_silence(&self, n: usize) {
+        if self.ever_primed.load(Ordering::Relaxed) {
+            self.silence.fetch_add(n as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// 环被吃空了：退回"攒水位"，并把这一段记成一段欠载。
+    fn note_drained(&self) {
+        self.primed.store(false, Ordering::Relaxed);
+        if self.ever_primed.load(Ordering::Relaxed) && !self.dry.swap(true, Ordering::Relaxed) {
+            self.underruns.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 攒够了，这一拍开始出声。
+    fn note_primed(&self) {
+        self.primed.store(true, Ordering::Relaxed);
+        self.ever_primed.store(true, Ordering::Relaxed);
+        self.dry.store(false, Ordering::Relaxed);
+    }
+
+    pub(crate) fn stats(&self) -> PlaybackStats {
+        let rate = self.rate() as u64;
+        let ms = |samples: u64| samples.saturating_mul(1000) / rate;
+        PlaybackStats {
+            depth_ms: ms(self.depth.load(Ordering::Relaxed)).min(u32::MAX as u64) as u32,
+            silence_ms: ms(self.silence.load(Ordering::Relaxed)),
+            underruns: self.underruns.load(Ordering::Relaxed),
+            trimmed_ms: ms(self.trimmed.load(Ordering::Relaxed)),
+            steer_added: self.added.load(Ordering::Relaxed),
+            steer_removed: self.removed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 把欠载说出来。**在生产者那一侧叫**，不在回调里——回调是实时线程。
+    ///
+    /// 照 `stack.rs` 那条路走：第一段报一行，之后闷着数，等这个状况过去了再报
+    /// 一行汇总。每个回调报一行的后果那边有现成的账：一份 1 MB 的日志里 7545 行
+    /// 有 7536 行是同一句，把文件里唯一那条 ERROR 挤了出去。
+    pub(crate) fn report(&self) {
+        if self.dry.load(Ordering::Relaxed) {
+            if !self.reported.swap(true, Ordering::Relaxed) {
+                let s = self.stats();
+                self.mark_underruns.store(s.underruns, Ordering::Relaxed);
+                self.mark_silence.store(s.silence_ms, Ordering::Relaxed);
+                tracing::warn!(
+                    target_ms = TARGET_MS,
+                    trimmed_ms = s.trimmed_ms,
+                    steer_added = s.steer_added,
+                    steer_removed = s.steer_removed,
+                    "the playback ring ran dry; holding silence until it fills again"
+                );
+            }
+        } else if self.reported.swap(false, Ordering::Relaxed) {
+            let s = self.stats();
+            tracing::info!(
+                underruns = s.underruns,
+                // 第一行报出去之后又欠载了几段、又补了多少静音。中间那些回调
+                // 一行都没打。
+                episodes = s
+                    .underruns
+                    .saturating_sub(self.mark_underruns.load(Ordering::Relaxed)),
+                silence_ms = s
+                    .silence_ms
+                    .saturating_sub(self.mark_silence.load(Ordering::Relaxed)),
+                depth_ms = s.depth_ms,
+                "the playback ring refilled"
+            );
+        }
+    }
+}
+
+/// 缓冲里能量最低的那个位置。空缓冲返回 0。
+///
+/// 转向要复制或跳过一个样本，挑这里下手：贴着零点改，多出来或少掉的那一点接近
+/// 0；在波峰上改则是一个台阶，而台阶是听得见的。O(n) 的一遍扫描，回调里付得
+/// 起——它和 `spread_mono` 那一遍是同一个量级。
+fn quietest(buf: &[i16]) -> usize {
+    buf.iter()
+        .enumerate()
+        .min_by_key(|(_, s)| s.unsigned_abs())
+        .map_or(0, |(i, _)| i)
+}
+
+/// 把一段设备采样率的样本推进播放环，超过 [`RING_MS`] 就丢最旧的。
+///
+/// 丢**最旧**的：留着只会让听到的话越来越落后于说出来的话。这一刀是硬接，
+/// 所以它是上限而不是手段——真正把水位稳住的是 [`PlaybackClock::take_for`]。
+fn push_playback(ring: &Arc<Mutex<VecDeque<i16>>>, samples: &[i16], clock: &PlaybackClock) {
+    let cap = clock.cap();
+    let mut trimmed = 0u64;
+    {
+        let mut r = match ring.lock() {
+            Ok(r) => r,
+            Err(p) => p.into_inner(),
+        };
+        r.extend(samples.iter().copied());
+        while r.len() > cap {
+            r.pop_front();
+            trimmed += 1;
+        }
+        clock.set_depth(r.len());
+    }
+    clock.note_trimmed(trimmed);
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -463,6 +1009,8 @@ pub struct AudioIo {
     /// 换设备的代数。变了就重建。
     generation: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
+    /// 播放环两端的时钟对账。回调那一侧只碰它的原子量。
+    clock: Arc<PlaybackClock>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -484,12 +1032,14 @@ impl AudioIo {
             output.map(str::to_string),
         )));
         let generation = Arc::new(AtomicU64::new(0));
+        let clock = Arc::new(PlaybackClock::new());
 
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), Error>>();
         let (pb, cap, st) = (playback.clone(), capture.clone(), stop.clone());
         let (run, fail) = (running.clone(), failed.clone());
         let (orate, irate) = (output_rate.clone(), input_rate.clone());
         let (want, gen) = (wanted.clone(), generation.clone());
+        let clk = clock.clone();
 
         let thread = std::thread::Builder::new()
             .name("can-voice-audio".into())
@@ -513,6 +1063,7 @@ impl AudioIo {
                         pb.clone(),
                         cap.clone(),
                         fail.clone(),
+                        clk.clone(),
                     );
                     let (out_stream, in_stream, (o, i)) = match built {
                         Ok(v) => v,
@@ -574,6 +1125,7 @@ impl AudioIo {
                 wanted,
                 generation,
                 stop,
+                clock,
                 thread: Some(thread),
             }),
             Ok(Err(e)) => Err(e),
@@ -622,18 +1174,19 @@ impl AudioIo {
 
     /// 送一帧 48 kHz 单声道 PCM 去播放。
     pub fn play(&self, pcm48: &[i16]) {
-        let rate = self.output_rate();
-        let at_device_rate = resample_from_48k(pcm48, rate);
-        let cap = rate as usize * RING_MS / 1000;
-        let mut ring = match self.playback.lock() {
-            Ok(r) => r,
-            Err(p) => p.into_inner(),
-        };
-        ring.extend(at_device_rate);
-        while ring.len() > cap {
-            // 溢出时丢**最旧**的：留着只会让听到的话越来越落后于说出来的话。
-            ring.pop_front();
-        }
+        let at_device_rate = resample_from_48k(pcm48, self.output_rate());
+        push_playback(&self.playback, &at_device_rate, &self.clock);
+        // **报告放在这一侧。** 回调是实时音频线程，那里一行日志都不能打；
+        // 而这个方法每 20 毫秒被 `pump.rs` 叫一次，正好是看一眼计数器的地方。
+        self.clock.report();
+    }
+
+    /// 播放环此刻的对账数字。上层每隔几秒把它折进 `Event::Health`。
+    ///
+    /// 没有它的时候，环跑干这件事在客户端里是**完全看不见的**：`fill_output`
+    /// 往外补静音，不计数、不打日志、不出事件，而用户听到的是"电音加卡顿"。
+    pub fn playback_stats(&self) -> PlaybackStats {
+        self.clock.stats()
     }
 
     /// 取走采集到的全部音频，重采样到 48 kHz 单声道。
@@ -745,6 +1298,7 @@ fn build_streams(
     playback: Arc<Mutex<VecDeque<i16>>>,
     capture: Arc<Mutex<VecDeque<i16>>>,
     failed: Arc<AtomicBool>,
+    clock: Arc<PlaybackClock>,
 ) -> Result<Streams, Error> {
     use cpal::traits::{DeviceTrait, StreamTrait};
 
@@ -758,6 +1312,12 @@ fn build_streams(
     let in_rate = in_cfg.sample_rate().0;
     let out_ch = out_cfg.channels();
     let in_ch = in_cfg.channels();
+
+    // **重建出来的设备采样率可能和原来那个不一样**，而目标水位、硬上限和死区
+    // 都是按采样率算的。顺带把"攒水位"重新置上：重建之后环里那点东西是按旧
+    // 采样率重采样过的，不该被当成已经攒好的水位。
+    clock.on_rebuild(out_rate);
+    let out_clock = clock;
 
     // **回调报错要被记下来**，光 warn 一行的后果是"突然听不见了而界面全绿"：
     // 拔一次耳机就是这样。音频线程看这个标志决定要不要重开。
@@ -774,7 +1334,7 @@ fn build_streams(
     let out_stream = match out_cfg.sample_format() {
         cpal::SampleFormat::I16 => out_dev.build_output_stream(
             &out_cfg.config(),
-            move |buf: &mut [i16], _| fill_output(buf, out_ch, &playback),
+            move |buf: &mut [i16], _| fill_output(buf, out_ch, &playback, &out_clock),
             make_err_fn(),
             None,
         ),
@@ -782,7 +1342,7 @@ fn build_streams(
             &out_cfg.config(),
             move |buf: &mut [f32], _| {
                 let mut tmp = vec![0i16; buf.len()];
-                fill_output(&mut tmp, out_ch, &playback);
+                fill_output(&mut tmp, out_ch, &playback, &out_clock);
                 for (d, s) in buf.iter_mut().zip(tmp) {
                     *d = s as f32 / 32768.0;
                 }
@@ -823,19 +1383,82 @@ fn build_streams(
     Ok((out_stream, in_stream, (out_rate, in_rate)))
 }
 
-/// 回调里只做这一件事：从环里取够，不够就补静音。
-fn fill_output(buf: &mut [i16], channels: u16, ring: &Arc<Mutex<VecDeque<i16>>>) {
+/// 回调里做的全部事情：按水位决定这一轮吃几个样本，取出来铺到声道上。
+///
+/// **这条路在实时音频线程上。** 除了那把已有的环锁，这里没有 I/O、没有日志、
+/// 没有无界的分配；要说的话由 [`PlaybackClock::report`] 在生产者那一侧说。
+///
+/// 三件事按顺序发生：没攒够水位就整片静音、按水位多吃或少吃一个样本、
+/// 环被吃空就退回去重新攒。见 [`PlaybackClock`] 的说明。
+fn fill_output(
+    buf: &mut [i16],
+    channels: u16,
+    ring: &Arc<Mutex<VecDeque<i16>>>,
+    clock: &PlaybackClock,
+) {
+    // 先整片写静音。`buf.len()` 不一定是声道数的整数倍，而尾巴上那几个位置不
+    // 属于任何一帧；cpal 交上来的缓冲是复用的，不写就是上一轮的残响。
+    buf.fill(0);
     let frames = buf.len() / channels.max(1) as usize;
-    let mut mono = Vec::with_capacity(frames);
+    if frames == 0 {
+        return;
+    }
+
+    let mut mono: Vec<i16> = Vec::with_capacity(frames + 1);
+    let take;
+    let emptied;
     {
         let mut r = match ring.lock() {
             Ok(r) => r,
             Err(p) => p.into_inner(),
         };
-        for _ in 0..frames {
+        let depth = r.len();
+        if !clock.primed() {
+            if depth < clock.target() {
+                // 还没攒够：整片静音。**一个样本一个样本地凑不行**——空环上凑
+                // 出来的是静音里夹着零星样本的东西，那就是"电音"。
+                clock.set_depth(depth);
+                clock.note_silence(frames);
+                return;
+            }
+            clock.note_primed();
+        }
+        take = clock.take_for(depth, frames);
+        for _ in 0..take.min(depth) {
             mono.push(r.pop_front().unwrap_or(0));
         }
+        emptied = r.is_empty();
+        clock.set_depth(r.len());
     }
+
+    // 转向：多吃了一个就把能量最低的那个丢掉，少吃了一个就把它复制一份。
+    // 两者都只动一个样本，而且动在贴着零点的地方——这比在 200 毫秒处一刀切掉
+    // 20 毫秒安静得多。
+    if mono.len() == take && !mono.is_empty() {
+        match take.cmp(&frames) {
+            std::cmp::Ordering::Greater => {
+                mono.remove(quietest(&mono));
+                clock.note_removed(1);
+            }
+            std::cmp::Ordering::Less => {
+                let i = quietest(&mono);
+                let v = mono[i];
+                mono.insert(i, v);
+                clock.note_added(1);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+
+    if mono.len() < frames {
+        clock.note_silence(frames - mono.len());
+        mono.resize(frames, 0);
+    }
+    if emptied {
+        // 吃空了就退回攒水位，别空着硬撑：硬撑的表现正是"电音加卡顿"同时出现。
+        clock.note_drained();
+    }
+
     let interleaved = spread_mono(&mono, channels);
     buf[..interleaved.len()].copy_from_slice(&interleaved);
 }

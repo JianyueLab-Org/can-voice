@@ -148,6 +148,12 @@ pub enum Event {
         /// 包头解不开的数据报。这是协议漂移，不是网络丢包，
         /// 混进 `lost` 会让后者在正常运行里恒为 0。
         unparsable: u64,
+        /// 播放环的对账数字。**链路好和听得清是两件事。**
+        ///
+        /// 上面那几个数只讲到声卡门口为止：链路一切正常而播放环跑干的时候，
+        /// 它们全是绿的，而用户听到的是电音加卡顿。没有声卡（服务端 ATIS
+        /// 机器人、`audio_devices: false`）时它是全零。
+        playback: crate::audio::PlaybackStats,
     },
 }
 
@@ -500,6 +506,7 @@ mod tests {
             received: 995,
             lost: 5,
             unparsable: 0,
+            playback: crate::audio::PlaybackStats::default(),
         };
         match e {
             Event::Health {

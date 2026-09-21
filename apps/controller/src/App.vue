@@ -65,6 +65,19 @@ interface Snapshot {
     received: number;
     lost: number;
     unparsable: number;
+    /**
+     * 播放环的对账。**链路好和听得清是两件事**：上面那几个数只讲到声卡门口
+     * 为止，链路全绿而播放环跑干时它们一个都不会动，而用户听到的是电音加
+     * 卡顿。`underruns` 是欠载的**段数**，不是回调数。
+     */
+    playback: {
+      depth_ms: number;
+      silence_ms: number;
+      underruns: number;
+      trimmed_ms: number;
+      steer_added: number;
+      steer_removed: number;
+    };
   } | null;
   /** 服务端的其它通知：`[kind, freq_khz, reason]`，最近的在最后。 */
   notices: [string, number, string][];

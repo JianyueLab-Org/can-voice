@@ -8,6 +8,7 @@
 //!
 //! 它也是**唯一**需要知道"哪些事件改变了什么"的地方——前端只读这个结构。
 
+use can_voice_client::audio::PlaybackStats;
 use can_voice_client::conn::{LinkState, RefusedReason};
 use can_voice_client::stack::TxBudget;
 use can_voice_client::Event;
@@ -43,6 +44,9 @@ pub struct Health {
     pub lost: u64,
     /// 包头解不开的数据报——协议漂移，不是网络丢包。
     pub unparsable: u64,
+    /// 播放环的对账。**链路好和听得清是两件事**：链路全绿而播放环跑干的时候，
+    /// 上面那几个数一个都不会动，而用户听到的是电音加卡顿。
+    pub playback: PlaybackStats,
 }
 
 /// 界面要显示的一切。
@@ -206,6 +210,7 @@ impl Snapshot {
                 received,
                 lost,
                 unparsable,
+                playback,
             } => {
                 self.health = Some(Health {
                     rtt_ms: *rtt_ms,
@@ -213,6 +218,7 @@ impl Snapshot {
                     received: *received,
                     lost: *lost,
                     unparsable: *unparsable,
+                    playback: *playback,
                 });
             }
         }
@@ -624,8 +630,16 @@ mod tests {
             received: 99,
             lost: 1,
             unparsable: 0,
+            playback: PlaybackStats {
+                depth_ms: 60,
+                underruns: 2,
+                ..Default::default()
+            },
         });
         assert_eq!(s.health.as_ref().map(|h| h.rtt_ms), Some(42));
+        // 播放环那一半也要跟着留下：掉线那一行要能分清"链路垮了"和"声卡这边
+        // 跑干了"。
+        assert_eq!(s.health.as_ref().map(|h| h.playback.underruns), Some(2));
     }
 
     /// **快照的 JSON 形状是一份跨语言契约，这里把它钉住。**

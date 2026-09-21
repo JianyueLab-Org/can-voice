@@ -13,7 +13,7 @@
 //! 播放、把采集到的音频喂进编码、该发就发、以及（每隔几秒）发一次 PING。
 //! **混音器每一拍都出恰好一帧**，不管有没有人在说话——声卡那头每 20 毫秒都要一帧。
 
-use crate::audio::AudioIo;
+use crate::audio::{AudioIo, PlaybackStats};
 use crate::client::{Command, Config, Event};
 use crate::conn::{self, Disposition, Link, LinkState, ReconnectPolicy};
 use crate::rx::mixer::{RxEvent, RxMixer};
@@ -44,14 +44,17 @@ struct Counters {
 }
 
 impl Counters {
-    /// 组装一条 `Health`。`lost_packets` 是 QUIC 自己的丢包计数。
-    fn health(&self, rtt_ms: u32, lost_packets: u64) -> Event {
+    /// 组装一条 `Health`。`lost_packets` 是 QUIC 自己的丢包计数，
+    /// `playback` 是播放环那一侧的对账——**两者都要有**：链路全绿而播放环
+    /// 跑干的时候，只看链路这几个数会得出"一切正常"。
+    fn health(&self, rtt_ms: u32, lost_packets: u64, playback: PlaybackStats) -> Event {
         Event::Health {
             rtt_ms,
             sent: self.sent,
             received: self.received,
             lost: lost_packets,
             unparsable: self.unparsable,
+            playback,
         }
     }
 }
@@ -395,8 +398,13 @@ async fn pump(
                     }
                     // **掉线必须自己解释。** RTT 和收发计数正是区分"上行真的扛不住"
                     // 和"抖了一下"的东西，而那两者的处置完全不同。
-                    let _ = events
-                        .send(counters.health(rtt_ms, quic.stats().path.lost_packets));
+                    // 没有声卡时是全零：服务端 ATIS 机器人根本不开设备。
+                    let playback = audio.map(AudioIo::playback_stats).unwrap_or_default();
+                    let _ = events.send(counters.health(
+                        rtt_ms,
+                        quic.stats().path.lost_packets,
+                        playback,
+                    ));
                 }
             },
         }
@@ -513,7 +521,7 @@ mod tests {
             unparsable: 7,
         };
 
-        match c.health(42, 3) {
+        match c.health(42, 3, PlaybackStats::default()) {
             Event::Health {
                 lost, unparsable, ..
             } => {
