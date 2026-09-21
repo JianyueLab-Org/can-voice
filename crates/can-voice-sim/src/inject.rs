@@ -198,6 +198,37 @@ impl Injector {
     }
 }
 
+/// 打开他机链路那一串重试的账。
+///
+/// **失败只出声一次。** 模拟器没开的时候外层每 5 秒重试一圈：每圈都报的话，
+/// 一个只是还没启动 MSFS 的人会拿到一个整篇同一行的日志；一次都不报的话，
+/// "没有他机"这件事在日志里没有任何痕迹——原来就是后者，报上来的日志里
+/// 连一条线索都没有。开成之后账清零，所以断一次说一次。
+///
+/// 这里不碰 SimConnect，也不睡觉，只数数，所以在哪个平台上都测得到。
+#[derive(Debug, Default)]
+pub struct LinkRetry {
+    failures: u32,
+}
+
+impl LinkRetry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 这一次没开成。返回 `true` 表示**这一轮的头一次**，该出声。
+    pub fn failed(&mut self) -> bool {
+        self.failures += 1;
+        self.failures == 1
+    }
+
+    /// 开成了，账清零。返回的是**这一轮一共试了几次**：1 就是一次即成，
+    /// 没什么可报的；大于 1 说明是从失败里恢复过来的，值得记一笔。
+    pub fn opened(&mut self) -> u32 {
+        std::mem::take(&mut self.failures) + 1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +425,41 @@ mod tests {
         i.reconcile(&[]);
         i.created("CES123", 42);
         assert!(i.is_empty(), "回音到得太晚，不该再建出来");
+    }
+
+    /// 模拟器没开的那一路：只有头一次该出声，后面全部闭嘴。
+    #[test]
+    fn only_the_first_failure_speaks() {
+        let mut r = LinkRetry::new();
+        assert!(r.failed(), "头一次要报出来，否则日志里没有任何痕迹");
+        for _ in 0..100 {
+            assert!(!r.failed(), "后面每 5 秒一条会把日志刷满");
+        }
+    }
+
+    /// 一次就开成的健康路径不该多出任何一行。
+    #[test]
+    fn opening_straight_away_is_one_attempt() {
+        let mut r = LinkRetry::new();
+        assert_eq!(r.opened(), 1);
+    }
+
+    /// 失败之后开成了：要说得出等了几次，日志里才看得见"恢复"这件事。
+    #[test]
+    fn opening_after_failures_reports_the_attempts() {
+        let mut r = LinkRetry::new();
+        r.failed();
+        r.failed();
+        assert_eq!(r.opened(), 3, "两次失败加这次成功");
+    }
+
+    /// 开成之后账要清零：断一次说一次，否则第二次掉线就成了哑的。
+    #[test]
+    fn a_later_outage_speaks_again() {
+        let mut r = LinkRetry::new();
+        r.failed();
+        assert_eq!(r.opened(), 2);
+        assert!(r.failed(), "这是新的一轮");
+        assert_eq!(r.opened(), 2);
     }
 }

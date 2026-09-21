@@ -1404,14 +1404,29 @@ fn spawn_ai_injection(
         if !overrides.is_empty() {
             tracing::info!(types = overrides.len(), "loaded model title overrides");
         }
+        // **开不开得了只报第一次。** 这一圈每 5 秒转一次，圈圈都报会把日志刷满；
+        // 而原来一律 debug，等于默认级别下一个字都没有——"没有他机"报上来的
+        // 日志里于是连一条线索都找不到。账在 [`can_voice_sim::inject::LinkRetry`]。
+        let mut retry = can_voice_sim::inject::LinkRetry::new();
         loop {
             let mut sink = SimConnectTraffic::default();
             if let Err(e) = sink.open() {
-                tracing::debug!(error = %e, "traffic link");
+                if retry.failed() {
+                    tracing::warn!(error = %e,
+                        "could not open the traffic link; the simulator is probably not running. \
+                         retrying every 5s, and staying quiet until it opens");
+                } else {
+                    tracing::debug!(error = %e, "traffic link");
+                }
                 std::thread::sleep(Duration::from_secs(5));
                 continue;
             }
+            let attempts = retry.opened();
             tracing::info!("traffic link open");
+            // 之前失败过才多说这一句：健康的日志和从前一模一样。
+            if attempts > 1 {
+                tracing::info!(attempts, "the traffic link opened after earlier failures");
+            }
             let mut injector = can_voice_sim::inject::Injector::new();
             loop {
                 // 先收回音：建成的登记 id，失败的记一笔好换下一个机模。
