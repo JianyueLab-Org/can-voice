@@ -23,6 +23,11 @@ mobile projects, and the Square and Store logos are read only by the Microsoft
 Store bundle target, which is not one of the targets built here. Delete them
 after regenerating.
 
+It is also copied to `apps/*/public/favicon.svg`, which `index.html` declares.
+Without it the webview asks for `/favicon.svg`, misses, and Tauri falls back to
+serving `index.html` for it — three DEBUG lines per launch. A Tauri window has
+no tab bar, so nobody sees this icon; it is there to stop the failed request.
+
 `icon.icns` is not reproducible — two runs produce files of the same length
 with different bytes. The four apps' copies are made identical by hand so a
 future diff means something.
