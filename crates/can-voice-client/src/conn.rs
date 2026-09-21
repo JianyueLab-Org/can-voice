@@ -348,6 +348,18 @@ pub struct Identity<'a> {
     pub station: &'a str,
 }
 
+/// 客户端套接字的地址族必须和对端一致。
+///
+/// 绑死 `0.0.0.0` 的话，`lookup_host` 先给出 AAAA 时握手在套接字层就失败，
+/// 错误长得像"语音服务挂了"。IPv6 对端绑 `[::]:0`，IPv4 对端绑 `0.0.0.0:0`。
+fn client_bind(peer: SocketAddr) -> SocketAddr {
+    if peer.is_ipv6() {
+        SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
+    } else {
+        SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0))
+    }
+}
+
 /// 建立连接并完成 HELLO/READY 握手。
 ///
 /// **它等握手真的完成才返回**，所以它的 `Err` 是有意义的：错的主机名、
@@ -374,7 +386,7 @@ pub async fn connect(
         quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|_| Error::QuicCrypto)?,
     ));
 
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().expect("bind address"))?;
+    let mut endpoint = quinn::Endpoint::client(client_bind(addr))?;
     endpoint.set_default_client_config(client_cfg);
 
     let conn = endpoint.connect(addr, server_name)?.await?;
@@ -686,6 +698,18 @@ mod tests {
     }
 
     // ——— N4：`follow` 要在发出去之前自己判 ———
+
+    /// QUIC 客户端套接字的地址族必须和对端一致。绑死 `0.0.0.0` 的话，
+    /// `lookup_host` 先给出 AAAA 时握手在套接字层就失败，看起来像语音服务挂了。
+    #[test]
+    fn the_client_socket_matches_the_peer_address_family() {
+        let v4: SocketAddr = "1.2.3.4:64738".parse().expect("v4");
+        let v6: SocketAddr = "[2001:db8::1]:64738".parse().expect("v6");
+        assert!(client_bind(v4).is_ipv4(), "an IPv4 peer needs an IPv4 bind");
+        assert_eq!(client_bind(v4).port(), 0);
+        assert!(client_bind(v6).is_ipv6(), "an IPv6 peer needs an IPv6 bind");
+        assert_eq!(client_bind(v6).port(), 0);
+    }
 
     /// 规则照抄 can-fsd 的 `IsValidCallsign`（服务端的 `isValidCallsign` 也是照抄的）：
     /// 2–10 个字符，只许 `A-Z` `0-9` `-` `_`。松了会放进永远查不到位置的值，
