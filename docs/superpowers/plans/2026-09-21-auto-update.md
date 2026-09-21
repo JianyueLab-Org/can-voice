@@ -140,6 +140,16 @@ cat internal/release/testdata/can-audio-latest.json
 
 Read the asset names that come back. They are the ground truth for the next step.
 
+As recorded on 2026-09-21 from `v2.2.8`, they are `atis-for-can-v2.2.8.zip`,
+`audio-for-can-v2.2.8.zip`, `msfs-for-can-v2.2.8.zip`, `xpc-for-can-v2.2.8.zip`
+— one per product, exactly the shape the legacy prefix match assumes.
+
+Note the `-v` before the version. Task 2's `classify` requires a digit directly
+after the separator, so it would reject every one of these. That is harmless
+while the two matchers stay separate, and it is the reason they must: anyone
+unifying them breaks the live download route, and this task's fixture is what
+says so.
+
 - [ ] **Step 2: Write the test**
 
 `fetchUpstream` is unexported and takes no payload, so the test decodes the fixture the same way it does and runs the same matching loop through the public surface. Use the `fetch` seam.
@@ -462,10 +472,21 @@ func classify(client, name string) (Platform, bool) {
 // archIn finds the architecture token in the part of the filename between the
 // product name and the extension. Tokens are separated by `_`, `-` or `.`,
 // which is why the version itself never matches: it carries no letters.
+//
+// A joined pair is tried before either half, because `_` is both a separator
+// and part of `x86_64`. Splitting the rpm's `x86_64` leaves `x86`, which maps
+// to i686 — every rpm would be keyed for the wrong architecture.
 func archIn(stem string) (string, bool) {
-	for _, field := range strings.FieldsFunc(stem, func(r rune) bool {
+	fields := strings.FieldsFunc(stem, func(r rune) bool {
 		return r == '_' || r == '-' || r == '.'
-	}) {
+	})
+
+	for i, field := range fields {
+		if i+1 < len(fields) {
+			if arch, ok := archToken[strings.ToLower(field+"_"+fields[i+1])]; ok {
+				return arch, true
+			}
+		}
 		if arch, ok := archToken[strings.ToLower(field)]; ok {
 			return arch, true
 		}
