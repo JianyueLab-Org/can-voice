@@ -1363,6 +1363,12 @@ func TestAStationThatIsNotACallsignIsRefused(t *testing.T) {
 	}
 }
 
+// noticeOfKind 读到指定 kind 的 NOTICE 为止，读到别的 NOTICE 就跳过。
+//
+// 跳过是必须的而不是偷懒：一条会话在同一段时间里可能有好几种 NOTICE 排队
+// （降级那条在第一个被放行的包上就会发出来），而"下一帧必须是它"会让测试
+// 对**别的**功能的存在与否变得敏感。上界是有的——不能无限读下去，否则一个
+// 永远不发这条 NOTICE 的服务端会让测试挂住而不是变红。
 func noticeOfKind(t *testing.T, c *client, kind, why string) *control.Notice {
 	t.Helper()
 	const maxFrames = 8

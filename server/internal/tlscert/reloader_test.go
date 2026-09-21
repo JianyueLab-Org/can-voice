@@ -113,6 +113,29 @@ func TestServesTheInitialPair(t *testing.T) {
 	}
 }
 
+// LoadX509KeyPair 不填 Leaf。不自己 parse 的话 leafAttrs 什么都不记，
+// 续期有没有接上从日志看不出来——那正是这条日志存在的理由。
+func TestTheLoadedCertificateExposesTheLeaf(t *testing.T) {
+	live, _ := letsEncrypt(t)
+	r, err := Load(filepath.Join(live, "fullchain.pem"), filepath.Join(live, "privkey.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := r.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Leaf == nil {
+		t.Fatal("Leaf must be parsed so the load log can print not_after")
+	}
+	if c.Leaf.Subject.CommonName != "can-voice-test" {
+		t.Fatalf("subject = %q, want can-voice-test", c.Leaf.Subject.CommonName)
+	}
+	if c.Leaf.NotAfter.IsZero() {
+		t.Fatal("not_after must be set")
+	}
+}
+
 // 这就是 #68：certbot 续期只换磁盘上的文件，进程不重启。
 func TestPicksUpARenewalWithoutRestarting(t *testing.T) {
 	live, archive := letsEncrypt(t)

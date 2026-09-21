@@ -70,7 +70,9 @@ services:
       CAN_VOICE_SERVER: "${CAN_VOICE_SERVER:-audio.ceruleanavi.net:64738}"
       CAN_VOICE_SERVER_NAME: "${CAN_VOICE_SERVER_NAME:-audio.ceruleanavi.net}"
       CAN_FSD_DATAFEED: "${CAN_FSD_DATAFEED:-https://data.ceruleanavi.net/v1/data.json}"
+      # 下限 5 秒：写坏或者更小机队起不来，不会带着一份不是你写的配置跑下去。
       ATIS_POLL_SECS: "${ATIS_POLL_SECS:-30}"
+      # **和 can-audio 播的同两个男声**（`server/ATIS/mumble.py:317,324`）。
       # 这两行和机队的 DEFAULT_VOICE_* 是同一组值，改一处要改两处——留在这里
       # 是因为 compose 的默认值会盖过 Rust 那一侧，只改常量线上听到的不会变。
       ATIS_VOICE_EN: "${ATIS_VOICE_EN:-en-US-ChristopherNeural}"
