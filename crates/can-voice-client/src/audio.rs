@@ -123,6 +123,62 @@ fn devices(input: bool) -> Vec<DeviceInfo> {
 mod tests {
     use super::*;
 
+    // ——— 挑一个我们建得出来的采样格式 ———
+
+    /// **设备报的第一条能用的采样率，不一定是我们建得出流的格式。**
+    ///
+    /// 这条是一份真实日志换来的：一台 Windows 机器上，`audio-for-can` 从
+    /// v27.0.4 到 v27.0.8 九次启动、三天，每一次都是
+    /// `could not open the audio devices; running deaf and mute
+    /// error=unsupported sample format U8`，再每 5 秒重试一次、45 次全败。
+    /// 连得上、界面全绿、频率认领正常，就是**又聋又哑**。
+    ///
+    /// 原因不是"不支持 U8"，是**我们自己挑了一个自己不接受的**：挑选只看采样率
+    /// 覆不覆盖 48 kHz，而建流只认 I16 / F32。那台设备同时提供 F32，我们没看。
+    /// 重试也救不了——同一份候选表挑出同一条，注定每次都失败。
+    #[test]
+    fn a_format_we_cannot_build_is_skipped_for_one_we_can() {
+        use cpal::SampleFormat::{F32, U8};
+        let ranges = [(U8, 8_000, 48_000), (F32, 8_000, 48_000)];
+        assert_eq!(choose_config(&ranges, 48_000), Some(1));
+    }
+
+    /// 48 kHz 仍然优先——拿到它就完全不必重采样。
+    #[test]
+    fn a_buildable_range_covering_48k_beats_one_that_does_not() {
+        use cpal::SampleFormat::{F32, I16};
+        let ranges = [(F32, 8_000, 44_100), (I16, 8_000, 48_000)];
+        assert_eq!(choose_config(&ranges, 48_000), Some(1));
+    }
+
+    /// 都覆盖 48 kHz 时按格式偏好挑，而不是按设备报的顺序。
+    #[test]
+    fn among_buildable_formats_the_preference_order_decides() {
+        use cpal::SampleFormat::{F32, I16};
+        let ranges = [(I16, 8_000, 48_000), (F32, 8_000, 48_000)];
+        assert_eq!(choose_config(&ranges, 48_000), Some(1));
+    }
+
+    /// 一条都建不出来时说不出来，而不是随便挑一条回去让建流阶段再炸一次。
+    /// **`None` 和"挑了一条建不出的"是两件事**：前者上层可以去问默认配置，
+    /// 后者是这个 bug 本身。
+    #[test]
+    fn nothing_buildable_is_none() {
+        use cpal::SampleFormat::{U16, U8};
+        let ranges = [(U8, 8_000, 48_000), (U16, 8_000, 48_000)];
+        assert_eq!(choose_config(&ranges, 48_000), None);
+    }
+
+    /// 没有一条覆盖 48 kHz 时，退到建得出的那一条里最高的采样率，
+    /// 两端加重采样。**不要在这里放弃**——旧的 Python 版就是这样，
+    /// 注释写着"回退采样率会产生变调音频"，也就是说它知道会变调还是放了出去。
+    #[test]
+    fn without_48k_the_best_buildable_range_still_wins() {
+        use cpal::SampleFormat::{F32, U8};
+        let ranges = [(U8, 8_000, 48_000), (F32, 8_000, 44_100)];
+        assert_eq!(choose_config(&ranges, 48_000), Some(1));
+    }
+
     // ——— 音频线程什么时候重建 ———
 
     /// **叫停压过一切。** 一条正在失败的流不该拦住关闭：那会让
@@ -835,6 +891,42 @@ fn pick(host: &cpal::Host, name: Option<&str>, input: bool) -> Option<cpal::Devi
 /// 拿不到才退回设备默认值并在两端加重采样——旧的 Python 版在这里直接放弃，
 /// 注释写着"48 kHz 是理想路径，回退采样率会产生变调音频"，也就是说设备不支持时
 /// 用户听到的是变调的声音。
+/// 我们真的建得出流的采样格式，**按偏好排序**。
+///
+/// 这张表和 `build_streams` 里的 `match` 是同一件事的两半，改一处要改两处——
+/// 而它们分开的后果正是这个模块修过的那个 bug：挑选只看采样率，建流只认格式，
+/// 于是挑出一条自己不接受的，表现为"连得上、界面全绿、又聋又哑"。
+///
+/// 顺序：F32 是 Windows WASAPI 共享模式的原生格式，走它不经过格式转换；
+/// I16 是我们内部的样本类型。
+const BUILDABLE: [cpal::SampleFormat; 2] = [cpal::SampleFormat::F32, cpal::SampleFormat::I16];
+
+/// 在设备报的候选里挑一条我们建得出流的，返回下标。
+///
+/// `(格式, 最低采样率, 最高采样率)` 而不是 cpal 的类型，是为了能单测——
+/// `SupportedStreamConfigRange` 在测试里造不出来，而这条挑选逻辑正是出过事的
+/// 那一处。
+///
+/// `None` 表示这台设备一条都建不出来。**这和"挑一条建不出的回去"是两件事**：
+/// 前者上层还能去问默认配置、还能把设备报了什么记进日志，后者只会在建流那一步
+/// 再炸一次，而且每次重试都炸在同一个地方。
+fn choose_config(ranges: &[(cpal::SampleFormat, u32, u32)], wanted: u32) -> Option<usize> {
+    let rank = |f: cpal::SampleFormat| BUILDABLE.iter().position(|b| *b == f);
+    // 覆盖 wanted 的那一批优先（拿到 48 kHz 就完全不必重采样），各自内部按格式
+    // 偏好排；一条都不覆盖时退到采样率最高的那条，两端加重采样。
+    let best = |covering: bool| {
+        ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, (f, lo, hi))| {
+                rank(*f).is_some() && ((*lo <= wanted && wanted <= *hi) == covering)
+            })
+            .min_by_key(|(_, (f, _, hi))| (rank(*f).unwrap_or(usize::MAX), std::cmp::Reverse(*hi)))
+            .map(|(i, _)| i)
+    };
+    best(true).or_else(|| best(false))
+}
+
 fn preferred_config(dev: &cpal::Device, input: bool) -> Result<cpal::SupportedStreamConfig, Error> {
     use cpal::traits::DeviceTrait;
     // 两个迭代器的类型不同但元素类型相同，所以各自收成 Vec。
@@ -847,18 +939,45 @@ fn preferred_config(dev: &cpal::Device, input: bool) -> Result<cpal::SupportedSt
             .map(|it| it.collect())
             .unwrap_or_default()
     };
-    {
-        let wanted = cpal::SampleRate(SAMPLE_RATE);
-        for r in ranges {
+    let keys: Vec<(cpal::SampleFormat, u32, u32)> = ranges
+        .iter()
+        .map(|r| {
+            (
+                r.sample_format(),
+                r.min_sample_rate().0,
+                r.max_sample_rate().0,
+            )
+        })
+        .collect();
+    let wanted = cpal::SampleRate(SAMPLE_RATE);
+    if let Some(i) = choose_config(&keys, SAMPLE_RATE) {
+        let r = ranges[i];
+        return Ok(
             if r.min_sample_rate() <= wanted && wanted <= r.max_sample_rate() {
-                return Ok(r.with_sample_rate(wanted));
-            }
-        }
+                r.with_sample_rate(wanted)
+            } else {
+                r.with_max_sample_rate()
+            },
+        );
     }
-    if input {
+
+    // 一条都建不出来。**先把设备报了什么记下来再失败**：这条日志是下一份缺陷
+    // 报告唯一能带走的东西，而没有它，"unsupported sample format U8" 读起来像
+    // 设备只会 U8，实际上那台机器同时提供 F32。
+    tracing::warn!(
+        offered = ?keys.iter().map(|(f, ..)| *f).collect::<Vec<_>>(),
+        input,
+        "no audio format this client can build; falling back to the device default"
+    );
+    let cfg = if input {
         dev.default_input_config()
     } else {
         dev.default_output_config()
     }
-    .map_err(|e| Error::Config(e.to_string()))
+    .map_err(|e| Error::Config(e.to_string()))?;
+    if BUILDABLE.contains(&cfg.sample_format()) {
+        Ok(cfg)
+    } else {
+        Err(Error::SampleFormat(cfg.sample_format()))
+    }
 }
