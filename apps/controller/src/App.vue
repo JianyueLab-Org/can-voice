@@ -6,6 +6,7 @@ import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
+import StartupGate from "./components/StartupGate.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import OnlineList from "./components/OnlineList.vue";
 import { errorText, t } from "./i18n";
@@ -315,200 +316,202 @@ async function act(name: string, args: Record<string, unknown>) {
 </script>
 
 <template>
-  <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
-  <main
-    class="flex h-screen w-full flex-col text-sm"
-    :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
-  >
-    <header class="flex flex-wrap items-center justify-between gap-3">
-      <div class="min-w-0">
-        <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
-        <p class="flex items-center gap-2 truncate text-xs opacity-70">
-          <span
-            class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-            :style="{ background: connected ? '#28a745' : '#dc3545' }"
+  <StartupGate>
+    <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
+    <main
+      class="flex h-screen w-full flex-col text-sm"
+      :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
+    >
+      <header class="flex flex-wrap items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
+          <p class="flex items-center gap-2 truncate text-xs opacity-70">
+            <span
+              class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+              :style="{ background: connected ? '#28a745' : '#dc3545' }"
+            />
+            {{ statusText }}
+          </p>
+        </div>
+        <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
+        <WindowToggles class="ml-auto" @settings="showPrefs = true" />
+        <div v-if="!connected" class="flex items-center gap-2">
+          <input v-model="cid" :placeholder="t('login.cid')" class="w-24 rounded border px-2 py-1" />
+          <input
+            v-model="password"
+            type="password"
+            :placeholder="t('login.password')"
+            class="w-32 rounded border px-2 py-1"
+            @keyup.enter="connect"
           />
-          {{ statusText }}
-        </p>
-      </div>
-      <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
-      <WindowToggles class="ml-auto" @settings="showPrefs = true" />
-      <div v-if="!connected" class="flex items-center gap-2">
-        <input v-model="cid" :placeholder="t('login.cid')" class="w-24 rounded border px-2 py-1" />
-        <input
-          v-model="password"
-          type="password"
-          :placeholder="t('login.password')"
-          class="w-32 rounded border px-2 py-1"
-          @keyup.enter="connect"
-        />
-        <button :disabled="busy" class="rounded border px-3 py-1" @click="connect">
-          {{ t("login.connect") }}
+          <button :disabled="busy" class="rounded border px-3 py-1" @click="connect">
+            {{ t("login.connect") }}
+          </button>
+        </div>
+        <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
+        <button v-else-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
+          {{ t("login.disconnect") }}
         </button>
-      </div>
-      <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
-      <button v-else-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
-        {{ t("login.disconnect") }}
-      </button>
-    </header>
+      </header>
 
-    <UpdateBanner v-if="!compact" />
+      <UpdateBanner v-if="!compact" />
 
-    <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
-      {{ problemText(error) }}
-    </p>
+      <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
+        {{ problemText(error) }}
+      </p>
 
-    <!-- 服务端说的话。不显示的话，"能连上、状态绿、说话没人听见"就是全部症状。 -->
-    <p
-      v-for="(n, i) in snap?.notices ?? []"
-      :key="`${n[0]}-${n[1]}-${i}`"
-      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
-    >
-      {{ noticeText(n) }}
-    </p>
-
-    <p
-      v-if="deniedPairs.length"
-      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
-    >
-      {{ t("radio.xc_denied", { pairs: deniedPairs.join(t("common.separator.list")) }) }}
-    </p>
-
-    <!-- 发射频率数对着服务端的上限。**要在声明之前说**：超额时服务端只是把多出来的
-         拒掉，只靠"发射被拒"的话，人是按下去之后才知道的。
-         超额那一句是给重连的：存下来的台面整份重放，而这一次的上限可能比存的时候低。 -->
-    <p
-      v-if="txBudget && txBudget.declared > txBudget.max_tx"
-      class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
-    >
-      {{ t("radio.tx_over_limit", { declared: txBudget.declared, max: txBudget.max_tx }) }}
-    </p>
-    <p
-      v-else-if="txBudget && txBudget.declared === txBudget.max_tx"
-      class="rounded border border-neutral-400 px-3 py-2 text-xs opacity-70"
-    >
-      {{ t("radio.tx_at_limit", { max: txBudget.max_tx }) }}
-    </p>
-
-    <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->
-    <p
-      v-if="connected && !onDuty"
-      class="rounded border px-3 py-2 text-xs"
-      :class="
-        feed?.reachable
-          ? 'border-amber-400 text-amber-700'
-          : 'border-neutral-400 opacity-70'
-      "
-    >
-      <template v-if="feed?.reachable">
-        {{ t("duty.off") }}
-        <span v-if="feed?.duty.dropped_tx">{{ t("duty.dropped_tx") }}</span>
-      </template>
-      <template v-else>{{ t("duty.unknown") }}</template>
-    </p>
-    <p v-else-if="connected" class="text-xs text-sky-700">
-      {{ t("duty.on", { callsign: feed?.duty.callsign ?? "" }) }}
-      <span v-if="feed?.duty.freq_khz" class="font-mono opacity-70">
-        · {{ (feed.duty.freq_khz / 1000).toFixed(3) }}
-      </span>
-    </p>
-
-    <section v-if="!compact" class="flex items-center gap-2">
-      <input
-        v-model="freqInput"
-        :placeholder="t('freq.hint')"
-        class="w-28 rounded border px-2 py-1"
-        @keyup.enter="addFrequency"
-      />
-      <input
-        v-model="callsignInput"
-        :placeholder="t('freq.callsign_hint')"
-        class="w-40 rounded border px-2 py-1 font-mono uppercase"
-        @keyup.enter="addFrequency"
-      />
-      <button class="rounded border px-3 py-1" @click="addFrequency">
-        {{ t("freq.add") }}
-      </button>
-      <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
-        {{ showSettings ? t("panel.close") : t("panel.open") }}
-      </button>
-    </section>
-
-    <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
-
-    <section class="flex min-h-0 flex-1 flex-col">
-      <div class="flex flex-1 flex-wrap content-start gap-2 overflow-auto">
-        <RadioRow
-          v-for="r in radios"
-          :key="r.freq_khz"
-          :radio="r"
-          :receiving="isReceiving(r.freq_khz)"
-          :tx-denied="txDenied(r.freq_khz)"
-          :rx-denied="rxDenied(r.freq_khz)"
-          @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
-          @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
-          @mute="(on) => act('set_muted', { freqKhz: r.freq_khz, on })"
-          @select="act('set_selected', { freqKhz: r.freq_khz })"
-          :locked="locked(r.freq_khz)"
-          :transmitting="isTransmitting(r)"
-          :last-talk="lastTalk(r.freq_khz)"
-          :roster="feed?.roster ?? {}"
-          :compact="compact"
-          :transmit-allowed="mayTransmit"
-          :over-tx-limit="overTxLimit(r.freq_khz)"
-          :max-tx="txBudget?.max_tx ?? null"
-          @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
-        />
-        <p v-if="!radios.length" class="w-full py-6 text-center text-xs opacity-50">
-          {{ t("freq.empty") }}
-        </p>
-      </div>
-
-      <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
-      <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
-        <p class="text-xs opacity-60">{{ t("online.title") }}</p>
-        <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
-      </div>
-    </section>
-
-    <footer
-      v-if="!compact"
-      class="flex items-center justify-between gap-3 border-t pt-3 text-xs"
-    >
-      <button
-        class="flex items-center gap-2"
-        :title="t('ptt.hold_tip')"
-        @pointerdown="pttDown"
-        @pointerup="pttUp"
-        @pointercancel="pttUp"
+      <!-- 服务端说的话。不显示的话，"能连上、状态绿、说话没人听见"就是全部症状。 -->
+      <p
+        v-for="(n, i) in snap?.notices ?? []"
+        :key="`${n[0]}-${n[1]}-${i}`"
+        class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
       >
-        <span
-          class="inline-block h-3 w-3 rounded-full"
-          :style="{ background: talking ? '#c7861d' : '#8b90a4' }"
-        />
-        <span
-          class="text-xs"
-          :class="talking ? 'font-bold' : 'opacity-60'"
-          :style="talking ? { color: '#c7861d' } : {}"
-        >PTT</span>
-      </button>
-      <span class="opacity-70">
-        <template v-if="connected && onDuty">{{ t("duty.staffing", { callsign: feed?.duty.callsign ?? "" }) }}</template>
-        <template v-else-if="connected">{{ t("duty.observer") }}</template>
-      </span>
-      <span v-if="snap?.health && !compact" class="opacity-60">
-        {{
-          t("health.summary", {
-            rtt: snap.health.rtt_ms,
-            received: snap.health.received,
-            lost: snap.health.lost,
-          })
-        }}
-        <span v-if="snap.health.unparsable" class="text-amber-700">
-          {{ t("health.unparsable", { count: snap.health.unparsable }) }}
+        {{ noticeText(n) }}
+      </p>
+
+      <p
+        v-if="deniedPairs.length"
+        class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+      >
+        {{ t("radio.xc_denied", { pairs: deniedPairs.join(t("common.separator.list")) }) }}
+      </p>
+
+      <!-- 发射频率数对着服务端的上限。**要在声明之前说**：超额时服务端只是把多出来的
+           拒掉，只靠"发射被拒"的话，人是按下去之后才知道的。
+           超额那一句是给重连的：存下来的台面整份重放，而这一次的上限可能比存的时候低。 -->
+      <p
+        v-if="txBudget && txBudget.declared > txBudget.max_tx"
+        class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
+      >
+        {{ t("radio.tx_over_limit", { declared: txBudget.declared, max: txBudget.max_tx }) }}
+      </p>
+      <p
+        v-else-if="txBudget && txBudget.declared === txBudget.max_tx"
+        class="rounded border border-neutral-400 px-3 py-2 text-xs opacity-70"
+      >
+        {{ t("radio.tx_at_limit", { max: txBudget.max_tx }) }}
+      </p>
+
+      <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->
+      <p
+        v-if="connected && !onDuty"
+        class="rounded border px-3 py-2 text-xs"
+        :class="
+          feed?.reachable
+            ? 'border-amber-400 text-amber-700'
+            : 'border-neutral-400 opacity-70'
+        "
+      >
+        <template v-if="feed?.reachable">
+          {{ t("duty.off") }}
+          <span v-if="feed?.duty.dropped_tx">{{ t("duty.dropped_tx") }}</span>
+        </template>
+        <template v-else>{{ t("duty.unknown") }}</template>
+      </p>
+      <p v-else-if="connected" class="text-xs text-sky-700">
+        {{ t("duty.on", { callsign: feed?.duty.callsign ?? "" }) }}
+        <span v-if="feed?.duty.freq_khz" class="font-mono opacity-70">
+          · {{ (feed.duty.freq_khz / 1000).toFixed(3) }}
         </span>
-      </span>
-    </footer>
-    <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
-  </main>
+      </p>
+
+      <section v-if="!compact" class="flex items-center gap-2">
+        <input
+          v-model="freqInput"
+          :placeholder="t('freq.hint')"
+          class="w-28 rounded border px-2 py-1"
+          @keyup.enter="addFrequency"
+        />
+        <input
+          v-model="callsignInput"
+          :placeholder="t('freq.callsign_hint')"
+          class="w-40 rounded border px-2 py-1 font-mono uppercase"
+          @keyup.enter="addFrequency"
+        />
+        <button class="rounded border px-3 py-1" @click="addFrequency">
+          {{ t("freq.add") }}
+        </button>
+        <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
+          {{ showSettings ? t("panel.close") : t("panel.open") }}
+        </button>
+      </section>
+
+      <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
+
+      <section class="flex min-h-0 flex-1 flex-col">
+        <div class="flex flex-1 flex-wrap content-start gap-2 overflow-auto">
+          <RadioRow
+            v-for="r in radios"
+            :key="r.freq_khz"
+            :radio="r"
+            :receiving="isReceiving(r.freq_khz)"
+            :tx-denied="txDenied(r.freq_khz)"
+            :rx-denied="rxDenied(r.freq_khz)"
+            @switch="(s, on) => act('set_switch', { freqKhz: r.freq_khz, switch: s, on })"
+            @volume="(g) => act('set_volume', { freqKhz: r.freq_khz, gain: g })"
+            @mute="(on) => act('set_muted', { freqKhz: r.freq_khz, on })"
+            @select="act('set_selected', { freqKhz: r.freq_khz })"
+            :locked="locked(r.freq_khz)"
+            :transmitting="isTransmitting(r)"
+            :last-talk="lastTalk(r.freq_khz)"
+            :roster="feed?.roster ?? {}"
+            :compact="compact"
+            :transmit-allowed="mayTransmit"
+            :over-tx-limit="overTxLimit(r.freq_khz)"
+            :max-tx="txBudget?.max_tx ?? null"
+            @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
+          />
+          <p v-if="!radios.length" class="w-full py-6 text-center text-xs opacity-50">
+            {{ t("freq.empty") }}
+          </p>
+        </div>
+
+        <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
+        <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
+          <p class="text-xs opacity-60">{{ t("online.title") }}</p>
+          <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
+        </div>
+      </section>
+
+      <footer
+        v-if="!compact"
+        class="flex items-center justify-between gap-3 border-t pt-3 text-xs"
+      >
+        <button
+          class="flex items-center gap-2"
+          :title="t('ptt.hold_tip')"
+          @pointerdown="pttDown"
+          @pointerup="pttUp"
+          @pointercancel="pttUp"
+        >
+          <span
+            class="inline-block h-3 w-3 rounded-full"
+            :style="{ background: talking ? '#c7861d' : '#8b90a4' }"
+          />
+          <span
+            class="text-xs"
+            :class="talking ? 'font-bold' : 'opacity-60'"
+            :style="talking ? { color: '#c7861d' } : {}"
+          >PTT</span>
+        </button>
+        <span class="opacity-70">
+          <template v-if="connected && onDuty">{{ t("duty.staffing", { callsign: feed?.duty.callsign ?? "" }) }}</template>
+          <template v-else-if="connected">{{ t("duty.observer") }}</template>
+        </span>
+        <span v-if="snap?.health && !compact" class="opacity-60">
+          {{
+            t("health.summary", {
+              rtt: snap.health.rtt_ms,
+              received: snap.health.received,
+              lost: snap.health.lost,
+            })
+          }}
+          <span v-if="snap.health.unparsable" class="text-amber-700">
+            {{ t("health.unparsable", { count: snap.health.unparsable }) }}
+          </span>
+        </span>
+      </footer>
+      <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+    </main>
+  </StartupGate>
 </template>

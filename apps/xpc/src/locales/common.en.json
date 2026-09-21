@@ -51,7 +51,11 @@
     "available_sized": "Version {version} ({size}) is available. This program never updates itself; whether to install is up to you.",
     "notes": "Release notes",
     "download": "Download",
-    "skip": "Skip this version"
+    "skip": "Skip this version",
+    "checking": "Checking for updates…",
+    "downloading": "Downloading the new version…",
+    "downloading_sized": "Downloading the new version… {done} / {total}",
+    "installing": "Installing. It will restart itself when done…"
   },
   "notice": {
     "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
