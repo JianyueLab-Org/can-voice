@@ -66,6 +66,7 @@
   "error": {
     "token": {
       "credentials": "Wrong CAN ID or password",
+      "not_rated": "This account has no rating yet and cannot use voice. The password is correct, so changing it will not help; try again once the account is rated",
       "rejected": "can-api refused to issue voice credentials: HTTP {status}",
       "unreachable": "Could not reach can-api: {detail}"
     },

@@ -43,4 +43,25 @@ COPY --from=build /src/target/release/can-voice-atis /usr/local/bin/can-voice-at
 # 不用 root：这个进程只读 datafeed、写 /tmp、往外发 UDP，没有一样要特权。
 RUN useradd --create-home --uid 10001 atis
 USER atis
+
+# 健康检查查的是三件**运行时**的事，而它们全都是"构建绿、运行死"的那一类：
+#
+#   1. PID 1 还是机队自己。这个镜像的 ENTRYPOINT 是 exec 形式，所以进程名就在
+#      /proc/1/comm 里（`can-voice-atis` 十四个字符，没到内核截断的十五）。
+#      读 /proc 而不是 pgrep：pgrep 要 procps，为这一行装一个包不值当；而
+#      `pgrep -f can-voice-atis` 还会匹配上健康检查自己那条命令行，永远是真。
+#      **前提是 PID 1 就是它**：compose 里哪天加了 `init: true`，PID 1 会变成
+#      docker-init，这一条就永远是假，症状是容器一直 unhealthy 而机队好好地播着。
+#   2. ffmpeg 在。合成那一步是 `edge-tts → mp3 → ffmpeg -f s16le → PCM`
+#      （crates/can-voice-atis/src/tts.rs），缺了它每一次合成都失败，而进程
+#      照常活着——全网通播是哑的，容器状态是绿的。
+#   3. edge_tts 这个模块导得进来。缺了同样是哑播：pip 那一层装坏了、或者哪天
+#      基础镜像换了 Python 大版本，症状都在这里。
+#
+# 这不检查"真的在播"——那要一张真票和一个真席位，健康检查里不该有。
+HEALTHCHECK --interval=60s --timeout=15s --start-period=30s --retries=3 \
+    CMD grep -qx can-voice-atis /proc/1/comm \
+     && ffmpeg -version >/dev/null 2>&1 \
+     && python3 -c 'import edge_tts' >/dev/null 2>&1
+
 ENTRYPOINT ["/usr/local/bin/can-voice-atis"]

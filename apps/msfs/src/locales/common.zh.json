@@ -66,6 +66,7 @@
   "error": {
     "token": {
       "credentials": "CAN 号或密码不对",
+      "not_rated": "这个账号还没有定级，暂时不能用语音。密码是对的，改密码没有用；定级之后再试",
       "rejected": "can-api 拒绝发放语音凭据：HTTP {status}",
       "unreachable": "连不上 can-api：{detail}"
     },

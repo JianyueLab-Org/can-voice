@@ -23,6 +23,15 @@ pub enum Error {
     /// 被送去查网络。
     #[error("can-api rejected the CAN ID or password")]
     Credentials,
+    /// **账号还没定级**——凭据是对的。can-api 给 rating < 1 的成员专门回 403
+    /// `insufficient_rating`，和 401 分开的理由和上面一条一样：归进凭据那一类
+    /// 的话，一个密码完全正确的人会被送去改密码，而每重试一次，can-api 按
+    /// CAN ID 的限流就多记一格。机队用的账号也一样——操作员会去查
+    /// `ATIS_PASSWORD`，而问题在 rating。
+    #[error(
+        "can-api refused the token exchange: this account has no rating yet (needs rating >= 1)"
+    )]
+    NotRated,
     /// can-api 答了，但答的不是成功。状态码原样带出来：这一类要看的是它，
     /// 而把它归到密码上会让人去改一个本来对的密码。
     #[error("can-api refused the token exchange: HTTP {0}")]
@@ -42,6 +51,7 @@ impl Error {
         use can_voice_client::conn::RefusedReason;
         match self {
             Error::Credentials => Message::new("error.token.credentials"),
+            Error::NotRated => Message::new("error.token.not_rated"),
             Error::Rejected(status) => {
                 Message::new("error.token.rejected").with("status", status.as_u16())
             }
@@ -67,12 +77,28 @@ impl Error {
 }
 
 /// 换票的地方。
-#[derive(Debug, Clone)]
+///
+/// **`Debug` 是手写的，密码印成 `***`。** 派生的那个会把明文密码带进任何一句
+/// 调试日志或者一条 panic 信息：机队的密码进容器日志，桌面端的进那个可以一键
+/// 回传的日志文件。装着它的结构（比如机队的 `VoiceSettings`）照样可以派生
+/// `Debug`——挡在这一层，外面就不用记得这件事。
+#[derive(Clone)]
 pub struct TokenSource {
     endpoint: String,
     cid: String,
     password: String,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for TokenSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // CID 留着：它不是秘密，而看日志的人要靠它认出是哪个账号。
+        f.debug_struct("TokenSource")
+            .field("endpoint", &self.endpoint)
+            .field("cid", &self.cid)
+            .field("password", &"***")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -111,15 +137,42 @@ impl TokenSource {
         // 的 socket 包成同一个 `reqwest::Error`，而那正是要分开的两件事。
         let status = resp.status();
         if !status.is_success() {
-            return Err(match status {
-                reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-                    Error::Credentials
-                }
-                other => Error::Rejected(other),
-            });
+            // 403 还要看一眼**错误码**：can-api 用它把"还没定级"和"凭据不对"分开，
+            // 而这两种人要做的事完全不同。读不出来的时候当凭据问题——
+            // 那是 403 的另一种来由，也是两者里更常见的一种。
+            let body = resp.text().await.unwrap_or_default();
+            return Err(classify(status, &body));
         }
         Ok(resp.json::<Reply>().await?.token)
     }
+}
+
+/// can-api 给未定级成员回的错误码（`internal/api/voicetoken.go`）。
+const INSUFFICIENT_RATING: &str = "insufficient_rating";
+
+/// 状态码加错误码 → 哪一种失败。
+fn classify(status: reqwest::StatusCode, body: &str) -> Error {
+    match status {
+        reqwest::StatusCode::FORBIDDEN
+            if error_code(body).as_deref() == Some(INSUFFICIENT_RATING) =>
+        {
+            Error::NotRated
+        }
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Error::Credentials,
+        other => Error::Rejected(other),
+    }
+}
+
+/// can-api 错误响应里的 `error` 字段。
+///
+/// 解不出来不是错：**分类不能依赖响应体的形状**——中间挡着的一层代理很可能
+/// 回的是一页 HTML，而那时该说的仍然是"凭据没通过"。
+fn error_code(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 拼换票的地址。
@@ -307,6 +360,61 @@ mod tests {
             "401 报成了网络问题: {msg}"
         );
         assert!(msg.contains("password"), "401 该说到密码: {msg}");
+    }
+
+    /// **未定级不是密码不对。** can-api 给 rating < 1 的成员专门回 403
+    /// `insufficient_rating`（can-api `internal/api/voicetoken.go`）。归到凭据那一类
+    /// 的话，一个密码完全正确的人会被送去改密码，而每重试一次，can-api 按 CAN ID
+    /// 的限流就多记一格——旧版 can-audio 把 "rating >= 1" 单列为登录条件之一，
+    /// `test_mumble.py` 还专门断言提示里要出现 rating，注释写着"这条最容易漏"。
+    #[tokio::test]
+    async fn an_unrated_account_is_not_reported_as_a_wrong_password() {
+        let origin = serve_once(
+            "403 Forbidden",
+            r#"{"error":"insufficient_rating","message":"That account is not permitted to use voice."}"#,
+        )
+        .await;
+        let src = TokenSource::new(&origin, "1001", "right", reqwest::Client::new());
+
+        let err = src.fetch().await.expect_err("403 must not be a success");
+        assert!(matches!(err, Error::NotRated), "{err:?}");
+
+        let msg = err.to_string();
+        assert!(!msg.contains("password"), "未定级归到了密码上: {msg}");
+        assert!(msg.contains("rating"), "这一句该说到 rating: {msg}");
+        assert_eq!(err.message().key, "error.token.not_rated");
+    }
+
+    /// 认不出错误码的 403 照旧当凭据问题：能说的只有"没通过"。
+    #[tokio::test]
+    async fn a_forbidden_without_that_code_is_still_a_credential_problem() {
+        let origin = serve_once("403 Forbidden", r#"{"error":"forbidden"}"#).await;
+        let src = TokenSource::new(&origin, "1001", "wrong", reqwest::Client::new());
+
+        let err = src.fetch().await.expect_err("403 must not be a success");
+        assert!(matches!(err, Error::Credentials), "{err:?}");
+    }
+
+    // ——— 密码不许进日志 ———
+
+    /// **`Debug` 里没有密码。**
+    ///
+    /// 目前没有一处用 `{:?}` 打印它，但以后任何一句调试日志或者一条 panic 信息
+    /// 都会把密码写进日志：机队的进容器日志，桌面端的进那个可以一键回传的日志
+    /// 文件。旧版 `can-audio/server/login.py` 不打印密码，`test_login.py` 守着
+    /// 这一条。CID 留着——它不是秘密，而看日志的人要靠它认出是哪个账号。
+    #[test]
+    fn debug_shows_the_account_but_never_the_password() {
+        let src = TokenSource::new(
+            "https://api.example",
+            "1001",
+            "correct-horse-battery-staple",
+            reqwest::Client::new(),
+        );
+        let shown = format!("{src:?}");
+        assert!(!shown.contains("correct-horse"), "密码进了 Debug: {shown}");
+        assert!(shown.contains("***"), "{shown}");
+        assert!(shown.contains("1001"), "CID 该留着: {shown}");
     }
 
     /// 而 can-api 自己坏了要看得出来是它坏了，不要归到密码上。

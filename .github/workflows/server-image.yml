@@ -8,6 +8,22 @@
 # **两个镜像而不是一个。** 服务端是纯 Go、静态、distroless；机队要 Python
 # （edge-tts）和 ffmpeg。合成一个镜像的话，一个转发着所有人语音的进程会平白
 # 多出一个 Python 运行时和一整套 Debian 依赖。
+#
+# **推之前有两道门：测试，和把容器真的跑起来。**
+#
+# 这个工作流此前只有一个 image job——推到 main 就构建并推送，测试红了照推，
+# 容器一次都没起过。而这两个镜像的失败模式恰恰全在运行时：机队缺 libasound2
+# 进程起不来（cpal 动态链接 libasound.so.2），缺 ffmpeg 或 edge-tts 是每一路
+# 合成都失败而进程照常活着——**这三样漏掉任何一个，docker build 都是绿的**。
+# 而 docker-compose.yml 设了 `pull_policy: always`，一个起不来的镜像推上
+# :latest，下一次 pull 就部署上线了（#72）。
+#
+# 测试为什么是这里自己的 job，而不是 ci.yml 里那几个：`needs:` **只在同一个
+# 工作流内部有效**，跨工作流没有这个东西。另外两条路都更糟——`workflow_run`
+# 触发拿不到上面那套 paths 过滤（改一行客户端代码也会重出镜像，而且 PR 上
+# 完全不跑），把 ci.yml 写成 workflow_call 再整份调用则会为了一个服务端镜像
+# 去跑四个 Windows runner 和八个 Tauri 客户端 job。这里跑的是**镜像里装的
+# 那两个二进制**的测试，范围和产物对齐。
 
 name: server image
 
@@ -46,9 +62,59 @@ permissions:
   contents: read
   packages: write
 
+# 同一个分支上后一次推送把前一次顶掉：:latest 只有最新那个有意义，而两次
+# 推送同时跑的话，先出发的那次有可能后到，于是 :latest 停在旧的提交上。
+concurrency:
+  group: server-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 和 ci.yml 一致，理由也一样：写死而不是 stable。
+  GO_VERSION: '1.27.1'
+
 jobs:
+  # 镜像里装的就是这些代码，装进去之前先跑一遍。和 ci.yml 里对应的 job 重复，
+  # 那是有意的——见文件头上那段关于 `needs:` 的说明。
+  #
+  # 两个 job 而不是一个，理由和 ci.yml 把 job 拆开是同一条：红的时候要一眼看出
+  # 是服务端还是机队。
+  server-test:
+    name: go test（服务端那一半）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      # -race / -count=2 的理由写在 ci.yml 里，这里照抄它那条命令，
+      # 免得两边慢慢长成两套标准。
+      - run: go test ./server/... -race -count=2
+
+  atis-test:
+    name: cargo test（机队那一半）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # 两样构建前置，缺哪个报的错都指不到原因（ci.yml 的 rust job 里有长版）：
+      # autotools 给 audiopus_sys 从源码编 libopus，libasound2-dev 给 cpal 的
+      # ALSA 后端——而 cpal 在 macOS 上走 CoreAudio，所以这一条只在 Linux 露头。
+      - run: >
+          sudo apt-get update && sudo apt-get install -y
+          autoconf automake libtool libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # 只测机队这个 crate（连同它依赖的那几个），不是整个 workspace：
+      # 桌面端那四个的门在 ci.yml，和这个镜像没关系。
+      - run: cargo test -p can-voice-atis
+
   image:
     name: ${{ matrix.name }} (+ push on main)
+    # **这就是 #72 要的那道门。** 少了它，main 上测试红着照样往 :latest 推。
+    #
+    # 两个都等，哪怕 can-voice 这个镜像里一行 Rust 都没有：上面的 paths 里
+    # 有 crates/**，两边的改动都会触发这个工作流，而分别 gate 要把矩阵拆成
+    # 两个 job——为省一次 cargo test 多一份重复，不划算。
+    needs: [server-test, atis-test]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -67,6 +133,177 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
+
+      # 先只出 linux/amd64 并装进 runner 自己的 daemon：冒烟要 `docker run`，
+      # 而**多架构构建没法 load**——buildx 的 docker 导出器只收单架构，写了
+      # load: true 会直接报错。下面推送那一步再出 matrix.platforms 里的全部
+      # 架构，那时 amd64 的每一层都在 gha 缓存里，只剩打标签和上传。
+      - name: 构建（先装进本地 daemon）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          load: true
+          tags: ${{ matrix.name }}:ci
+          # scope 按镜像分开。**共用一个 scope 的话两个镜像会互相顶掉对方的
+          # 缓存**，表现是每次都全量构建，而没有任何东西报错。
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+
+      - name: 冒烟：can-voice
+        if: matrix.name == 'can-voice'
+        run: |
+          set -euo pipefail
+
+          # 一、缺配置必须当场退出，而不是带着半份配置起来（server/cmd/can-voice
+          # 的 LoadConfig 是这么设计的，这里钉住它在镜像里也确实是这样）。
+          echo "::group::缺配置时的退出"
+          set +e
+          out="$(docker run --rm can-voice:ci 2>&1)"; code=$?
+          set -e
+          echo "$out"
+          echo "::endgroup::"
+          if [ "$code" -ne 1 ] || ! grep -q 'configuration is incomplete' <<<"$out"; then
+            echo "缺配置时应当以 1 退出并说明原因，实际是 $code" >&2
+            exit 1
+          fi
+
+          # 二、给一份一次性配置，把它真的跑起来。
+          #
+          # 证书是当场签的自签证书：服务端只是加载它并拿去做 TLS 握手，
+          # 没有人来验它。公钥是 32 个随机字节——配置只校验长度，而这一步
+          # 不验任何一张票。datafeed 指到一个必然连不上的地址：取不到 feed
+          # 时服务端降级为不做射程过滤而不是拒绝启动，顺带把这一条也钉住了。
+          work="$(mktemp -d)"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=localhost' \
+            -keyout "$work/key.pem" -out "$work/cert.pem" 2>/dev/null
+          chmod 644 "$work/key.pem"
+          docker run -d --name smoke-voice \
+            -v "$work:/certs:ro" \
+            -e CAN_VOICE_ADDR=':64738' \
+            -e CAN_VOICE_TLS_CERT=/certs/cert.pem \
+            -e CAN_VOICE_TLS_KEY=/certs/key.pem \
+            -e CAN_VOICE_API_PUBKEY="$(openssl rand -base64 32 | tr -d '\n')" \
+            -e CAN_VOICE_FSD_FEED='http://127.0.0.1:1/events' \
+            can-voice:ci
+
+          echo "::group::等 HEALTHCHECK"
+          status=starting
+          for _ in $(seq 1 30); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' smoke-voice 2>/dev/null || echo gone)"
+            echo "健康状态: $status"
+            case "$status" in healthy|unhealthy|gone) break ;; esac
+            sleep 2
+          done
+          echo "::endgroup::"
+
+          echo "::group::容器日志"
+          logs="$(docker logs smoke-voice 2>&1 || true)"
+          echo "$logs"
+          echo "::endgroup::"
+
+          if [ "$status" != healthy ]; then
+            echo "容器没变成 healthy，停在 ${status}" >&2
+            exit 1
+          fi
+          # healthy 只说明 64738/udp 有人占着。再确认一句 listening——它是在
+          # 证书装好、QUIC 监听真的建起来之后才打的，而 ALPN 也在那一行里。
+          if ! grep -q '"msg":"listening"' <<<"$logs"; then
+            echo "日志里没有 listening，监听没建起来" >&2
+            exit 1
+          fi
+          echo "冒烟通过"
+
+      - name: 冒烟：can-voice-atis
+        if: matrix.name == 'can-voice-atis'
+        run: |
+          set -euo pipefail
+
+          # 一、二进制能不能**加载**。缺 libasound2 的症状正在这一步：cpal
+          # 无条件动态链接 libasound.so.2，哪怕机队一个音频设备都不开，缺了
+          # 它连 main 都进不去（退出码 127，"cannot open shared object file"）。
+          # 装齐了的话，挡在最前面的是配置检查：退 2，并说 ATIS_CID is required。
+          echo "::group::缺 ATIS_CID 时的退出"
+          set +e
+          out="$(docker run --rm can-voice-atis:ci 2>&1)"; code=$?
+          set -e
+          echo "$out"
+          echo "::endgroup::"
+          if [ "$code" -ne 2 ] || ! grep -q 'ATIS_CID is required' <<<"$out"; then
+            # 写成 ${code} 而不是 $code：后面紧跟的是全角标点，而 bash 在
+            # 非 UTF-8 的 locale 下会把它的头一个字节算进变量名，报的是
+            # "unbound variable" ——一次和镜像毫无关系的红。
+            echo "缺 ATIS_CID 时应当以 2 退出，实际是 ${code}；127 就是少了动态库" >&2
+            exit 1
+          fi
+
+          # 二、运行时那两样外部依赖。它们只在**合成**的时候才被用到，所以
+          # 上面那一步跑得再对也说明不了什么：缺了的表现是每一路合成都失败、
+          # 进程照常活着，全网通播是哑的而容器是绿的。
+          #
+          # 三样都在容器里的**同一个 sh** 里跑：`docker run … | head -1` 会让
+          # ffmpeg 吃一个 SIGPIPE，而这个 step 开着 pipefail——那是一次和镜像
+          # 毫无关系的红。
+          echo "::group::ffmpeg / edge-tts 在不在"
+          docker run --rm --entrypoint sh can-voice-atis:ci -c '
+            set -e
+            ffmpeg -version | head -1
+            command -v edge-tts
+            python3 -c "import edge_tts" && echo "edge_tts 导得进来"
+          '
+          echo "::endgroup::"
+
+          # 三、按真实配置起一份，等 HEALTHCHECK 变绿。凭据是假的——机队拿不到
+          # 票会记一条 warn 然后接着轮询，这里要的就是"它不会因此退出"。
+          docker run -d --name smoke-atis \
+            -e ATIS_CID=000000 \
+            -e ATIS_PASSWORD=not-a-real-password \
+            -e CAN_API_ORIGIN='http://127.0.0.1:1' \
+            -e CAN_FSD_DATAFEED='http://127.0.0.1:1/data.json' \
+            -e ATIS_POLL_SECS=5 \
+            can-voice-atis:ci
+
+          echo "::group::等 HEALTHCHECK"
+          status=starting
+          for _ in $(seq 1 45); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' smoke-atis 2>/dev/null || echo gone)"
+            echo "健康状态: $status"
+            case "$status" in healthy|unhealthy|gone) break ;; esac
+            sleep 2
+          done
+          echo "::endgroup::"
+
+          echo "::group::容器日志"
+          docker logs smoke-atis 2>&1 || true
+          echo "::endgroup::"
+
+          if [ "$status" != healthy ]; then
+            echo "容器没变成 healthy，停在 ${status}" >&2
+            exit 1
+          fi
+          echo "冒烟通过"
+
+      # 真的走一遍 `edge-tts → mp3 → ffmpeg → PCM`，也就是 tts.rs 里那条管线。
+      #
+      # **故意不拦推送**（continue-on-error）：这一步要连微软那个合成端点，
+      # 它挂了是服务挂了，不是镜像坏了，没有理由因此不让镜像上线。真正的门是
+      # 上面那两条离线检查。它红的时候值得看一眼——通常意味着 edge-tts 那边
+      # 的接口又变了，而那是全网通播会哑掉的前兆。
+      - name: 合成冒烟（要连外网，不拦推送）
+        if: matrix.name == 'can-voice-atis'
+        continue-on-error: true
+        run: |
+          docker run --rm --entrypoint sh can-voice-atis:ci -c '
+            set -e
+            edge-tts --voice en-US-AriaNeural --text "cerulean aviation network" \
+              --write-media /tmp/smoke.mp3
+            ffmpeg -v error -i /tmp/smoke.mp3 -f s16le -ar 48000 -ac 1 - | wc -c
+          '
+
+      - name: 收摊
+        if: always()
+        run: docker rm -f smoke-voice smoke-atis 2>/dev/null || true
 
       # PR 上只构建不推送：**镜像构建本身就是要验的那件事**，而一个 PR 不该
       # 往 latest 上盖东西。
@@ -87,6 +324,8 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
 
+      # 推送。上一次构建的每一层都在 gha 缓存里，amd64 这一份只是重新打标签
+      # 上传；can-voice 的 arm64 那一份在这里才第一次编（纯 Go 交叉编译，便宜）。
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,7 +334,5 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # scope 按镜像分开。**共用一个 scope 的话两个镜像会互相顶掉对方的
-          # 缓存**，表现是每次都全量构建，而没有任何东西报错。
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}

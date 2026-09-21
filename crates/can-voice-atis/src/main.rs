@@ -20,6 +20,20 @@ use can_voice_token::TokenSource;
 use std::collections::HashMap;
 use std::time::Duration;
 
+/// 默认嗓子，**和 can-audio 播的是同两个男声**
+/// （`can-audio/server/ATIS/mumble.py:317,324`）。
+///
+/// 切换当天全网通播不该换一种声音——听惯的是这两把嗓子，而"今天的通播听着不对"
+/// 是一条没人报得上来的故障。要换改 `ATIS_VOICE_EN` / `ATIS_VOICE_ZH`。
+const DEFAULT_VOICE_EN: &str = "en-US-ChristopherNeural";
+const DEFAULT_VOICE_ZH: &str = "zh-CN-YunxiNeural";
+
+/// 轮询 datafeed 的下限。
+///
+/// 比这个还密没有意义：datafeed 本身每几秒才换一次，而 `0` 会让 `sleep(0)`
+/// 把它轮成一个死循环——对着上游打，而这一侧看上去一切正常。
+const MIN_POLL: Duration = Duration::from_secs(5);
+
 struct Task {
     handle: tokio::task::JoinHandle<()>,
     text: tokio::sync::watch::Sender<String>,
@@ -65,8 +79,8 @@ async fn main() {
             "ATIS_TTS_ARGV",
             "edge-tts --voice {voice} --text {text} --write-media {out}",
         )),
-        voice_en: env("ATIS_VOICE_EN", "en-US-AriaNeural"),
-        voice_zh: env("ATIS_VOICE_ZH", "zh-CN-XiaoxiaoNeural"),
+        voice_en: env("ATIS_VOICE_EN", DEFAULT_VOICE_EN),
+        voice_zh: env("ATIS_VOICE_ZH", DEFAULT_VOICE_ZH),
         ffmpeg: env("FFMPEG", "ffmpeg"),
     };
 
@@ -74,17 +88,28 @@ async fn main() {
         "CAN_FSD_DATAFEED",
         "https://data.ceruleanavi.net/v1/data.json",
     );
-    let poll = Duration::from_secs(env("ATIS_POLL_SECS", "30").parse().unwrap_or(30));
+    let poll = match poll_interval(&env("ATIS_POLL_SECS", "30")) {
+        Ok(poll) => poll,
+        Err(why) => {
+            eprintln!("ATIS_POLL_SECS: {why}");
+            std::process::exit(2);
+        }
+    };
 
     tracing::info!(%feed_url, poll = poll.as_secs(), "atis fleet starting");
 
     let mut running: HashMap<String, Task> = HashMap::new();
     loop {
         match fetch_feed(&http, &feed_url).await {
-            Ok(feed) => {
-                let wanted = datafeed::stations_from(&feed);
-                apply(&mut running, &wanted, &voice, &synth);
-            }
+            Ok(feed) => match datafeed::stations_from(&feed) {
+                Some(wanted) => apply(&mut running, &wanted, &voice, &synth),
+                // **形状不对也不停播**，和取不到时同一条规矩：缺 `atis` 字段的
+                // 一份文档说明不了"全网的 ATIS 都下线了"，而照它对账会把所有
+                // 正在播的席位停掉，下一轮字段回来了再全部重连、重新合成。
+                None => {
+                    tracing::warn!("the datafeed carries no atis array; keeping the current fleet");
+                }
+            },
             Err(e) => {
                 // 取不到 datafeed **不停播**：正在播的那几路照常，
                 // 报文停在最后一次取到的那份。一次网络抖动不该让全网 ATIS 静默。
@@ -173,10 +198,40 @@ fn env(key: &str, default: &str) -> String {
 }
 
 fn require(key: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| {
+    required(std::env::var(key).ok()).unwrap_or_else(|| {
         eprintln!("{key} is required");
         std::process::exit(2);
     })
+}
+
+/// 必填项取到的值，**空白的当没取到**。
+///
+/// `server/docker-compose.yml` 写的是 `ATIS_CID: "${ATIS_CID}"`：`.env` 里没填
+/// 时注入进来的是一个空串，而不是"这个变量不存在"。只看取到了没有的话，
+/// 照 README 部署、忘了填的那台机队看上去是健康的——每一路每 ≤60 秒换一次票、
+/// 拿一次 400，日志里不出现变量名，而全网通播没有声音。旧版把空白值当
+/// "未配置"（`can-audio/server/serverconf.py`）。
+fn required(raw: Option<String>) -> Option<String> {
+    raw.filter(|value| !value.trim().is_empty())
+}
+
+/// 读 `ATIS_POLL_SECS`。**写坏或者太小就起不来**，不悄悄回退。
+///
+/// 回退的那一版日志里什么都没有，于是一个把它写成 `30s` 的人以为自己改生效了。
+/// 服务端那一半的原则是一样的（`server/cmd/can-voice` 的 `LoadConfig`）：
+/// 配置写坏就起不来，比带着一份不是自己写的配置跑下去好。
+fn poll_interval(raw: &str) -> Result<Duration, String> {
+    let secs: u64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("{raw:?} is not a whole number of seconds"))?;
+    if secs < MIN_POLL.as_secs() {
+        return Err(format!(
+            "{secs} is below the {} second floor",
+            MIN_POLL.as_secs()
+        ));
+    }
+    Ok(Duration::from_secs(secs))
 }
 
 /// 极简的命令行切分：空格分隔，支持双引号包住带空格的一段。
@@ -212,6 +267,54 @@ mod tests {
         assert_eq!(shell_words("a \"b c\" d"), vec!["a", "b c", "d"]);
         assert_eq!(shell_words("  spaced   out  "), vec!["spaced", "out"]);
         assert!(shell_words("").is_empty());
+    }
+
+    /// **空串等于没填。**
+    ///
+    /// `server/docker-compose.yml` 写的是 `ATIS_CID: "${ATIS_CID}"`，`.env` 里
+    /// 没填时注入进来的就是一个空串，而 `server/.env.example` 这两项默认留空。
+    /// 只看"取到了没有"的话，照 README 部署、忘了填的那台机队看上去是健康的：
+    /// 每一路每 ≤60 秒换一次票、拿一次 400，日志里不出现变量名，全网通播没有
+    /// 声音。旧版把空白值当"未配置"（`can-audio/server/serverconf.py`）。
+    #[test]
+    fn a_blank_value_counts_as_missing() {
+        assert_eq!(required(Some("1001".into())).as_deref(), Some("1001"));
+        assert!(required(Some(String::new())).is_none());
+        assert!(required(Some("   ".into())).is_none());
+        assert!(required(Some("\t\n".into())).is_none());
+        assert!(required(None).is_none());
+    }
+
+    /// **轮询间隔写坏就起不来**，不悄悄回退成 30。
+    ///
+    /// 服务端那一半的原则是"配置写坏就起不来"（`server/cmd/can-voice` 的
+    /// `LoadConfig`），这一侧照办：悄悄回退的那一版，日志里什么都没有，
+    /// 而 `0` 会让 `sleep(0)` 把 datafeed 轮成一个死循环——两种都是一个人
+    /// 改了配置、以为改生效了的情形。
+    #[test]
+    fn a_poll_interval_that_cannot_be_used_names_itself_instead_of_falling_back() {
+        assert_eq!(poll_interval("30"), Ok(Duration::from_secs(30)));
+        assert_eq!(poll_interval(" 30 "), Ok(Duration::from_secs(30)));
+        assert!(poll_interval("30s").is_err(), "写坏了不该回退成 30");
+        assert!(poll_interval("").is_err());
+        assert!(poll_interval("0").is_err(), "0 会把 datafeed 轮成死循环");
+        assert!(
+            poll_interval("4").is_err(),
+            "下限是 {} 秒",
+            MIN_POLL.as_secs()
+        );
+        assert_eq!(poll_interval("5"), Ok(MIN_POLL));
+    }
+
+    /// **默认嗓子是 can-audio 那两个男声。**
+    ///
+    /// 切换当天全网通播不该换一种声音：旧版播的是 `zh-CN-YunxiNeural` /
+    /// `en-US-ChristopherNeural`（`can-audio/server/ATIS/mumble.py:317,324`），
+    /// 操作员和管制员听惯的是它们。要换嗓子改 `ATIS_VOICE_*`，不是改这里。
+    #[test]
+    fn the_default_voices_are_the_ones_can_audio_spoke_with() {
+        assert_eq!(DEFAULT_VOICE_ZH, "zh-CN-YunxiNeural");
+        assert_eq!(DEFAULT_VOICE_EN, "en-US-ChristopherNeural");
     }
 
     /// **这支机队没有任何绕过账号的捷径。**

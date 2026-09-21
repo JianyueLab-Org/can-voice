@@ -1362,3 +1362,86 @@ func TestAStationThatIsNotACallsignIsRefused(t *testing.T) {
 		t.Fatalf("SessionCount() = %d, want 0: a refused handshake must not leave a session", n)
 	}
 }
+
+func noticeOfKind(t *testing.T, c *client, kind, why string) *control.Notice {
+	t.Helper()
+	const maxFrames = 8
+	for range maxFrames {
+		n := readNotice(t, c, why)
+		if n.Kind == kind {
+			return n
+		}
+		t.Logf("skipping a %q notice while waiting for %q", n.Kind, kind)
+	}
+	t.Fatalf("%s: read %d notices and none was %q", why, maxFrames, kind)
+	return nil
+}
+
+// TestAFloodedUplinkIsRateLimitedAndTheSessionRecovers 是 uplink.go 的接线。
+//
+// 桶的算术在 uplink_test.go 里按注入的时间钉死了；这一条只证明三件事，而三件
+// 都只有走真连接才看得见：readDatagrams **真的**问过那个桶、超额**真的**回一条
+// NOTICE、以及超额之后这条会话**还活着并且还能说话**。
+//
+// 最后那半条是重点。限速拦的多半是客户端的一个 bug，不是攻击者；把它踢下线是
+// 不对称的处理（对端只看得见掉线，于是重连、重放，回到同一个地方），所以正确的
+// 结果是"丢掉多出来的那些，然后继续"。一个只断言"被限了"的测试，对"限完就再也
+// 说不了话"这种实现照样是绿的。
+func TestAFloodedUplinkIsRateLimitedAndTheSessionRecovers(t *testing.T) {
+	addr, priv, _ := testServer(t)
+
+	// max_tx 1：额度按可发射的频率数算，取 1 让突发额度是最小的那一档
+	// （uplinkBurstFrames 帧），洪水才不需要发到几千个包才越线。
+	speaker := connect(t, addr, "1000", 1, priv)
+	listener := connect(t, addr, "1001", 8, priv)
+	speaker.subscribe(t, control.Sub{TX: []uint32{118000}})
+	listener.subscribe(t, control.Sub{RX: []uint32{118000}})
+
+	pkt := func(seq uint16) []byte {
+		return append(wire.Header{
+			Ver: wire.Version, Flags: wire.FlagFirst, Seq: seq, FreqKHz: 118000,
+		}.AppendTo(nil), 0x01, 0x02, 0x03, 0x04)
+	}
+
+	// 远多于突发额度，而且一口气发完——一个卡住的 PTT 就是这个形状。
+	flood := 16 * uplinkBurstFrames
+	for i := range flood {
+		if err := speaker.conn.SendDatagram(pkt(1)); err != nil {
+			t.Fatalf("SendDatagram %d: %v", i, err)
+		}
+	}
+
+	n := noticeOfKind(t, speaker, control.KindRateLimited,
+		"an uplink far above the Opus frame rate must be answered")
+	if n.Reason == "" {
+		t.Fatal("the rate_limited notice carries no reason; the client can show the member nothing but the word itself")
+	}
+
+	// 会话还在：下一帧是 PONG，不是 BYE，也不是断开。
+	ping(t, speaker)
+
+	// 而且它还能说话。等一帧的时间让桶回血，再发一个认得出的包，
+	// 听众必须收到它。
+	time.Sleep(50 * time.Millisecond)
+	const recovered = 999
+	if err := speaker.conn.SendDatagram(pkt(recovered)); err != nil {
+		t.Fatalf("SendDatagram after the flood: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	for {
+		got, err := listener.conn.ReceiveDatagram(ctx)
+		if err != nil {
+			t.Fatalf("the listener never heard the packet sent after the flood: %v — a rate-limited session that cannot speak again is stuck until it reconnects, and nothing tells it to", err)
+		}
+		h, _, err := wire.Parse(got)
+		if err != nil {
+			t.Fatalf("Parse: %v", err)
+		}
+		if h.Seq == recovered {
+			return
+		}
+		// 洪水里被放行的那几帧还在路上，跳过它们。
+	}
+}
