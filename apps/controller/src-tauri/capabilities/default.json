@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions the app's own windows hold.",
+  "windows": ["main"],
+  "permissions": ["updater:default"]
+}

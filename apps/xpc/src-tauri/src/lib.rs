@@ -1458,8 +1458,30 @@ async fn check_update(
         (s.skipped_update, busy)
     };
     let origin = app.settings_snapshot().endpoints.api_origin();
-    let Some(latest) =
-        can_voice_update::check(&app.http, &origin, "xpc-for-can", env!("CARGO_PKG_VERSION")).await
+    // 能自己换掉自己的包走插件，那一路在启动时就装完了；这条路只剩
+    // deb / rpm，用来显示横幅。
+    let bundle = can_voice_autoupdate::bundle_name().unwrap_or("unknown");
+    if can_voice_update::self_replaceable(Some(bundle)) {
+        return Ok(None);
+    }
+
+    // 和插件填 `{{target}}`/`{{arch}}` 用的是同一对函数，所以横幅和插件
+    // 问的是同一个平台。
+    let Some(target) = tauri_plugin_updater::target() else {
+        return Ok(None);
+    };
+    let (os, arch) = target.split_once('-').unwrap_or((target.as_str(), ""));
+
+    let Some(latest) = can_voice_update::check(
+        &app.http,
+        &origin,
+        "xpc-for-can",
+        os,
+        arch,
+        bundle,
+        env!("CARGO_PKG_VERSION"),
+    )
+    .await
     else {
         return Ok(None);
     };
@@ -1670,8 +1692,14 @@ pub fn run() {
         app.csl_loading.clone(),
         csl_root(&app.settings_snapshot()),
     );
-    tauri::Builder::default()
-        .manage(app)
+    let context = tauri::generate_context!();
+    let mut builder = tauri::Builder::default().manage(app);
+    // **只有 tauri.conf.json 里配了 `plugins.updater` 才注册插件。** 没配的时候
+    // 插件初始化直接失败（它的配置里 pubkey 是必填），应用一个窗口都不会出来。
+    if can_voice_autoupdate::configured(context.config()) {
+        builder = builder.plugin(can_voice_autoupdate::plugin());
+    }
+    builder
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
         .setup(|handle| {
             let app = handle.state::<App>();
@@ -1683,6 +1711,8 @@ pub fn run() {
             if let Some(window) = handle.get_webview_window("main") {
                 apply_window(&window, &appearance, appearance.compact);
             }
+            // 检查更新。立刻返回；结果通过 `update://state` 发给界面。
+            can_voice_autoupdate::start(handle.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1731,7 +1761,7 @@ pub fn run() {
             take_captured_binding,
             mouse_ptt_supported,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("tauri failed to start");
 }
 
