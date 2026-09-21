@@ -7,6 +7,7 @@
 //! 放在共享库而不是 controller 应用里：xpc/msfs 用的是它的退化版（单频率）。
 
 use can_voice_proto::control::Sub;
+use std::collections::BTreeMap;
 
 /// 服务端一份声明里最多处理的耦合对数，等于 `router.go` 的 `maxXCPairs`。
 ///
@@ -107,6 +108,24 @@ pub struct RadioStack {
     /// 设成 `false` 会让他们一句话也说不出去；只有管制端会按数据源上的席位把它
     /// 关掉。所以 [`Default`] 是手写的，不是 derive 的。
     transmit_allowed: bool,
+    /// 每个频率上"不在席位却想发射"被拒了多少次，**第一次也算在内**。
+    ///
+    /// 不在这里存"报过没有"而存次数，是因为要报的就是这个数：第一次报出去，
+    /// 后面的只往上加，等状态真的变了（重新可以发射、或者这个电台被删掉）
+    /// 再把总数报一次。只闷掉不计数的话，这件事就彻底看不见了——而一份测试员
+    /// 的日志里 7545 行有 7536 行是这一句，说明**有东西在一秒钟里问五遍**，
+    /// 那个"有东西"至今没找到。
+    ///
+    /// **按频率分开数**，不是一个全局计数：现场是两个频率各自在被问，
+    /// 合成一个数就看不出是哪一个。
+    ///
+    /// **TX 和 XC 共用一个计数器。** 它们成对到来（现场是相隔约 37 微秒的一对），
+    /// 出自同一个调用方的同一个动作；分成两个计数器只会把同一件事的次数劈成两半，
+    /// 还要多报一倍的行数。代价是一对里的第二句（XC）连第一次都不报——可以接受：
+    /// 要认的是"谁在反复按"，不是"按的是哪一格"。
+    ///
+    /// `BTreeMap` 而不是 `HashMap`：汇报时按频率从小到大出，日志才是稳定的。
+    refusals: BTreeMap<u32, u32>,
 }
 
 impl Default for RadioStack {
@@ -115,6 +134,7 @@ impl Default for RadioStack {
             radios: Vec::new(),
             locked_khz: None,
             transmit_allowed: true,
+            refusals: BTreeMap::new(),
         }
     }
 }
@@ -181,6 +201,8 @@ impl RadioStack {
     pub fn set_transmit_allowed(&mut self, allowed: bool) -> bool {
         self.transmit_allowed = allowed;
         if allowed {
+            // 状态变了：把这一段里压下来的拒绝一次性报出去，然后重新开始数。
+            self.report_refusals(None);
             return false;
         }
         let mut dropped = false;
@@ -209,6 +231,11 @@ impl RadioStack {
         }
         let before = self.radios.len();
         self.radios.retain(|r| r.freq_khz != freq_khz);
+        // 电台没了，它的计数器也不该留着：留着的话，下一次汇报会报出一个
+        // 已经不存在的频率。
+        if self.radios.len() != before {
+            self.report_refusals(Some(freq_khz));
+        }
         // 移掉的正好是选中的那一行时，把标记交给第一个。
         if !self.radios.iter().any(|r| r.selected) {
             if let Some(first) = self.radios.first_mut() {
@@ -236,10 +263,12 @@ impl RadioStack {
     /// 一个关了 TX 却还标着 XC 的电台只会产出一对必然被拒的耦合。
     pub fn set_tx(&mut self, freq_khz: u32, on: bool) {
         if on && !self.transmit_allowed {
-            tracing::info!(
-                freq_khz,
-                "not staffing a position on the datafeed, refusing to turn TX on"
-            );
+            if self.note_refusal(freq_khz) {
+                tracing::info!(
+                    freq_khz,
+                    "not staffing a position on the datafeed, refusing to turn TX on"
+                );
+            }
             return;
         }
         if let Some(r) = self.get_mut(freq_khz) {
@@ -255,10 +284,12 @@ impl RadioStack {
     /// 打开 XC 强制打开 RX 和 TX。
     pub fn set_xc(&mut self, freq_khz: u32, on: bool) {
         if on && !self.transmit_allowed {
-            tracing::info!(
-                freq_khz,
-                "not staffing a position on the datafeed, refusing to turn XC on"
-            );
+            if self.note_refusal(freq_khz) {
+                tracing::info!(
+                    freq_khz,
+                    "not staffing a position on the datafeed, refusing to turn XC on"
+                );
+            }
             return;
         }
         if let Some(r) = self.get_mut(freq_khz) {
@@ -361,6 +392,19 @@ impl RadioStack {
     /// 时开关本来就按不动——那是另一句话，不该再叠一句"会超额"。
     pub fn tx_budget(&self, max_tx: u32) -> TxBudget {
         let declared = self.declared_tx();
+        // 不在席位上时每一格都按不动，两张表必然是空的（`off_duty_nothing_is_
+        // flagged_as_over_the_limit` 钉的就是这个）。**要提前返回，不能照常试按**：
+        // 试按会在副本上真的走一遍"拒绝"那条路，而界面每隔几百毫秒读一次快照，
+        // 于是每读一次就按出 2N 次拒绝。试按不是按——它既不该进日志，也不该算进
+        // 计数（副本上加的那一笔还会随副本一起丢掉，把真实次数也弄脏）。
+        if !self.transmit_allowed {
+            return TxBudget {
+                max_tx,
+                declared,
+                tx_over: Vec::new(),
+                xc_over: Vec::new(),
+            };
+        }
         let limit = usize::try_from(max_tx).unwrap_or(usize::MAX);
         let over = |press: fn(&mut RadioStack, u32)| -> Vec<u32> {
             self.radios
@@ -379,6 +423,41 @@ impl RadioStack {
             declared,
             tx_over: over(|s, f| s.set_tx(f, true)),
             xc_over: over(|s, f| s.set_xc(f, true)),
+        }
+    }
+
+    /// 这个频率上被压掉、还没报出去的拒绝次数。**第一次那一条不算**——它已经
+    /// 出现在日志里了。没被拒过就是 0。
+    pub fn suppressed_refusals(&self, freq_khz: u32) -> u32 {
+        self.refusals
+            .get(&freq_khz)
+            .map_or(0, |n| n.saturating_sub(1))
+    }
+
+    /// 记一次被拒的发射，返回**该不该把它写进日志**——只有一段里的第一次该。
+    fn note_refusal(&mut self, freq_khz: u32) -> bool {
+        let n = self.refusals.entry(freq_khz).or_insert(0);
+        *n += 1;
+        *n == 1
+    }
+
+    /// 把某个频率（`None` = 全部）压下来的拒绝次数报出来一次，然后忘掉。
+    ///
+    /// 只压掉了 0 次就什么也不说：第一次那一条已经把话讲完了。
+    fn report_refusals(&mut self, freq_khz: Option<u32>) {
+        let freqs: Vec<u32> = match freq_khz {
+            Some(f) => self.refusals.keys().copied().filter(|k| *k == f).collect(),
+            None => self.refusals.keys().copied().collect(),
+        };
+        for f in freqs {
+            let suppressed = self.refusals.remove(&f).unwrap_or(0).saturating_sub(1);
+            if suppressed > 0 {
+                tracing::info!(
+                    freq_khz = f,
+                    suppressed,
+                    "further transmit attempts were refused while not staffing a position"
+                );
+            }
         }
     }
 
@@ -803,6 +882,224 @@ mod tests {
 
         assert_eq!(b.declared, 0);
         assert!(b.tx_over.is_empty() && b.xc_over.is_empty(), "{b:?}");
+    }
+
+    // ——— 拒绝发射的日志不许刷屏 ———
+
+    /// 把一段代码期间的日志收下来。
+    ///
+    /// `with_default` 是**按线程**装的，所以并行跑的测试互不干扰；装全局的那个
+    /// （`init`）一个进程只许装一次，第二个测试就会 panic。
+    fn capture(f: impl FnOnce()) -> String {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("sink").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let sink = Sink::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        let bytes = sink.0.lock().expect("sink").clone();
+        String::from_utf8(bytes).expect("utf-8 log")
+    }
+
+    fn count_of(log: &str, needle: &str) -> usize {
+        log.matches(needle).count()
+    }
+
+    const REFUSED_TX: &str = "refusing to turn TX on";
+    const REFUSED_XC: &str = "refusing to turn XC on";
+    const SUMMARY: &str = "further transmit attempts were refused";
+
+    /// **一个频率只报第一次，后面的只记数。**
+    ///
+    /// 测试员那份日志里 7545 行有 7536 行是这两句，把唯一一条 ERROR 之前的历史
+    /// 全部挤出了轮转——日志被刷爆的代价不是磁盘，是查不了问题。
+    #[test]
+    fn the_first_refusal_is_reported_and_the_rest_are_only_counted() {
+        let mut s = stack_with(&[119_250]);
+        s.set_transmit_allowed(false);
+
+        let log = capture(|| {
+            for _ in 0..500 {
+                s.set_tx(119_250, true);
+                s.set_xc(119_250, true);
+            }
+        });
+
+        assert_eq!(count_of(&log, REFUSED_TX), 1, "log was:\n{log}");
+        assert_eq!(
+            count_of(&log, REFUSED_XC),
+            0,
+            "TX 和 XC 共用一个计数器，成对到来的第二句不该再报一次：\n{log}"
+        );
+        // 1000 次尝试，报了 1 次，压掉 999 次。
+        assert_eq!(s.suppressed_refusals(119_250), 999);
+    }
+
+    /// 压掉的次数要准——那个数就是这次修的全部意义：它告诉下一个看日志的人
+    /// "有东西在一秒钟里问五遍"，而只是把话闷掉会把这件事一起藏掉。
+    #[test]
+    fn the_suppressed_count_is_accurate() {
+        let mut s = stack_with(&[119_250]);
+        s.set_transmit_allowed(false);
+
+        assert_eq!(s.suppressed_refusals(119_250), 0, "还没被拒过");
+        s.set_tx(119_250, true);
+        assert_eq!(s.suppressed_refusals(119_250), 0, "第一次是报出去的那一次");
+        s.set_xc(119_250, true);
+        assert_eq!(s.suppressed_refusals(119_250), 1);
+        for _ in 0..7 {
+            s.set_tx(119_250, true);
+        }
+        assert_eq!(s.suppressed_refusals(119_250), 8);
+    }
+
+    /// 重新可以发射时，把压掉的次数一次性报出来，然后忘掉。
+    #[test]
+    fn becoming_permitted_reports_the_count_once_and_forgets_it() {
+        let mut s = stack_with(&[119_250]);
+        s.set_transmit_allowed(false);
+        for _ in 0..42 {
+            s.set_tx(119_250, true);
+        }
+
+        let log = capture(|| {
+            s.set_transmit_allowed(true);
+            // 再放行一次不该再报一遍：已经报过了，也已经清干净了。
+            s.set_transmit_allowed(true);
+        });
+
+        assert_eq!(count_of(&log, SUMMARY), 1, "log was:\n{log}");
+        assert!(log.contains("suppressed=41"), "log was:\n{log}");
+        assert_eq!(s.suppressed_refusals(119_250), 0);
+    }
+
+    /// 压掉 0 次就没什么可报的——第一次那句已经说完了。
+    #[test]
+    fn becoming_permitted_after_a_single_refusal_adds_no_summary() {
+        let mut s = stack_with(&[119_250]);
+        s.set_transmit_allowed(false);
+        s.set_tx(119_250, true);
+
+        let log = capture(|| {
+            s.set_transmit_allowed(true);
+        });
+
+        assert_eq!(count_of(&log, SUMMARY), 0, "log was:\n{log}");
+    }
+
+    /// 第二次下席位是**新的一段**：重新报一次第一句，也重新数一次。
+    #[test]
+    fn a_second_outage_reports_again() {
+        let mut s = stack_with(&[119_250]);
+
+        let log = capture(|| {
+            for _ in 0..2 {
+                s.set_transmit_allowed(false);
+                for _ in 0..5 {
+                    s.set_tx(119_250, true);
+                }
+                s.set_transmit_allowed(true);
+            }
+        });
+
+        assert_eq!(count_of(&log, REFUSED_TX), 2, "log was:\n{log}");
+        assert_eq!(count_of(&log, SUMMARY), 2, "log was:\n{log}");
+        assert_eq!(count_of(&log, "suppressed=4"), 2, "log was:\n{log}");
+    }
+
+    /// 删掉的频率不许留下一个计数器：它已经不存在了，而留着的那个数会在下一次
+    /// 放行时报出一个没有电台的频率。
+    #[test]
+    fn removing_a_radio_takes_its_suppressed_count_with_it() {
+        let mut s = stack_with(&[119_250, 124_550]);
+        s.set_transmit_allowed(false);
+        for _ in 0..4 {
+            s.set_tx(119_250, true);
+        }
+
+        let log = capture(|| {
+            assert!(s.remove(119_250));
+        });
+
+        assert_eq!(count_of(&log, SUMMARY), 1, "log was:\n{log}");
+        assert!(log.contains("suppressed=3"), "log was:\n{log}");
+        assert_eq!(s.suppressed_refusals(119_250), 0);
+
+        // 报过就没了：之后放行不该再提它一次。
+        let log = capture(|| {
+            s.set_transmit_allowed(true);
+        });
+        assert_eq!(count_of(&log, SUMMARY), 0, "log was:\n{log}");
+    }
+
+    /// **两个频率分开数。** 测试员那份日志里就是两个（119.250 三千多次、
+    /// 124.550 五百多次），合成一个数就看不出是哪一个在被问。
+    #[test]
+    fn two_frequencies_are_counted_separately() {
+        let mut s = stack_with(&[119_250, 124_550]);
+        s.set_transmit_allowed(false);
+
+        let log = capture(|| {
+            for _ in 0..10 {
+                s.set_tx(119_250, true);
+            }
+            for _ in 0..3 {
+                s.set_tx(124_550, true);
+            }
+        });
+
+        // 每个频率各报一次第一句。
+        assert_eq!(count_of(&log, REFUSED_TX), 2, "log was:\n{log}");
+        assert_eq!(s.suppressed_refusals(119_250), 9);
+        assert_eq!(s.suppressed_refusals(124_550), 2);
+
+        let log = capture(|| {
+            s.set_transmit_allowed(true);
+        });
+        assert_eq!(count_of(&log, SUMMARY), 2, "log was:\n{log}");
+        assert!(log.contains("suppressed=9"), "log was:\n{log}");
+        assert!(log.contains("suppressed=2"), "log was:\n{log}");
+    }
+
+    /// **试按不是按。** `tx_budget` 在副本上把每一格都按一遍来数 TX，界面每隔
+    /// 几百毫秒读一次快照——那些按下去的"拒绝"既不该进日志，也不该算进计数。
+    #[test]
+    fn probing_the_tx_budget_off_duty_neither_logs_nor_counts() {
+        let mut s = stack_with(&[119_250, 124_550]);
+        s.set_transmit_allowed(false);
+
+        let log = capture(|| {
+            for _ in 0..50 {
+                let b = s.tx_budget(2);
+                assert!(b.tx_over.is_empty() && b.xc_over.is_empty(), "{b:?}");
+            }
+        });
+
+        assert_eq!(count_of(&log, REFUSED_TX), 0, "log was:\n{log}");
+        assert_eq!(count_of(&log, REFUSED_XC), 0, "log was:\n{log}");
+        assert_eq!(s.suppressed_refusals(119_250), 0);
+        assert_eq!(s.suppressed_refusals(124_550), 0);
     }
 
     #[test]
