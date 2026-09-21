@@ -506,6 +506,98 @@ fn every_key_rust_sends_to_the_interface_exists() {
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
 }
 
+/// 界面会显示的每一个 NOTICE `kind`，`common` 里都要有一句话。
+///
+/// 这条链子的前两截已经有人守着：Go 的常量对 `notice_kind`（`control.rs` 的
+/// `every_notice_kind_the_server_sends_has_a_constant_here`），`notice_kind` 对
+/// `on_notice` 的分派。少的是最后一截——**一个 kind 到了界面上没有对应的话**，
+/// 落到的是 `notice.other`，于是飞行员看到的是一行 `range_unavailable` 原文。
+///
+/// 不在这份名单里的三个 kind，每一个都说得出为什么：`tx_denied` 和 `talker` 被
+/// `pump.rs` 的 `on_notice` 变成了别的 Event，从不进 `Snapshot.notices`；
+/// `audio_restored` 进了 `snapshot.rs` 是**撤掉** `audio_unavailable` 那一条，
+/// 不是再叠一句。
+///
+/// 放在 `common` 而不是某一个 `app.*.json`：这些 kind 是协议的一部分，四个客户端
+/// 收到的是同一条通知，措辞分家只会让同一件事有四种说法。
+#[test]
+fn every_notice_kind_the_interface_shows_has_a_line_in_the_common_dictionary() {
+    /// `on_notice` 分流走的，永远到不了界面。
+    const DIVERTED: &[&str] = &["tx_denied", "talker"];
+    /// 客户端自己造的本地通知，走同一条展示路径但从不上线
+    /// （`crates/can-voice-app/src/snapshot.rs`）。
+    const LOCAL: &[&str] = &["audio_unavailable"];
+    /// 认不出的 kind 的兜底两句：一条带频率，一条不带。
+    const FALLBACK: &[&str] = &["other", "other_on"];
+
+    let src = std::fs::read_to_string(repo().join("crates/can-voice-proto/src/control.rs"))
+        .expect("control.rs");
+    let module = src
+        .split_once("pub mod notice_kind {")
+        .expect("notice_kind 模块不见了")
+        .1
+        .split_once("\n}")
+        .expect("notice_kind 模块没有闭合")
+        .0;
+    let mut kinds: BTreeSet<String> = module
+        .lines()
+        .filter(|l| l.trim_start().starts_with("pub const"))
+        .filter_map(|l| l.split('"').nth(1))
+        .map(str::to_string)
+        .filter(|k| !DIVERTED.contains(&k.as_str()))
+        .collect();
+
+    // 下界：常量的写法一改这条扫描就会一条都取不到，而空集合恒等于通过。
+    assert!(
+        kinds.len() >= 2,
+        "只从 notice_kind 里认出 {} 个会上界面的 kind（{kinds:?}）——是不是常量的写法变了？",
+        kinds.len()
+    );
+    kinds.extend(LOCAL.iter().map(|k| k.to_string()));
+    kinds.extend(FALLBACK.iter().map(|k| k.to_string()));
+
+    let mut problems = Vec::new();
+    for lang in ["zh", "en"] {
+        let common = load(APPS[0], "common", lang);
+        for k in &kinds {
+            let key = format!("notice.{k}");
+            if !common.contains_key(&key) {
+                problems.push(format!("common.{lang}.json: {key} 不在字典里"));
+            }
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+/// 快照里带 `notices` 的客户端，界面上必须真的把它画出来（#91）。
+///
+/// 这条要单独钉，是因为**漏掉它的时候什么都不会报**：类型声明在、Rust 一路把
+/// 通知填进快照、字典也齐，只是没有哪一行模板读它。症状于是是"能连上、状态绿、
+/// 说话没人听见"，而两支飞行员端就这么过了很久。
+///
+/// 认的是 `.vue` 里有没有调 `noticeText(`——那是三个客户端共用的展示入口。
+#[test]
+fn every_app_whose_snapshot_carries_notices_renders_them() {
+    let mut problems = Vec::new();
+    for app in APPS {
+        let all = files(&repo().join(format!("apps/{app}/src")), &["vue", "ts"]);
+        let read = |f: &PathBuf| std::fs::read_to_string(f).expect("read");
+        if !all.iter().any(|f| read(f).contains("notices:")) {
+            continue; // 这个客户端的快照里本来就没有 notices
+        }
+        let rendered = all
+            .iter()
+            .filter(|f| f.extension().and_then(|e| e.to_str()) == Some("vue"))
+            .any(|f| read(f).contains("noticeText("));
+        if !rendered {
+            problems.push(format!(
+                "{app}: 快照里有 notices，却没有一个 .vue 调 noticeText() 把它画出来"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
 // ——— 没有写死的中文 ———
 
 /// 界面代码里（注释除外）不许有汉字：每一句话都要进字典。

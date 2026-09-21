@@ -371,7 +371,7 @@ async function act(name: string, args: Record<string, unknown>) {
       v-if="deniedPairs.length"
       class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
     >
-      {{ t("notice.xc_denied", { pairs: deniedPairs.join(t("common.separator.list")) }) }}
+      {{ t("radio.xc_denied", { pairs: deniedPairs.join(t("common.separator.list")) }) }}
     </p>
 
     <!-- 发射频率数对着服务端的上限。**要在声明之前说**：超额时服务端只是把多出来的
@@ -381,13 +381,13 @@ async function act(name: string, args: Record<string, unknown>) {
       v-if="txBudget && txBudget.declared > txBudget.max_tx"
       class="rounded border border-amber-400 px-3 py-2 text-xs text-amber-700"
     >
-      {{ t("notice.tx_over_limit", { declared: txBudget.declared, max: txBudget.max_tx }) }}
+      {{ t("radio.tx_over_limit", { declared: txBudget.declared, max: txBudget.max_tx }) }}
     </p>
     <p
       v-else-if="txBudget && txBudget.declared === txBudget.max_tx"
       class="rounded border border-neutral-400 px-3 py-2 text-xs opacity-70"
     >
-      {{ t("notice.tx_at_limit", { max: txBudget.max_tx }) }}
+      {{ t("radio.tx_at_limit", { max: txBudget.max_tx }) }}
     </p>
 
     <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->

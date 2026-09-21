@@ -29,17 +29,6 @@
     "callsign_hint": "Callsign (optional)",
     "empty": "No frequencies yet. Enter one above, e.g. 121.800"
   },
-  "notice": {
-    "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
-    "range_unavailable": "Position service unavailable, range filtering is off: this frequency is audible network-wide right now",
-    "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
-    "rate_limited": "Uplink audio exceeded the server's rate limit and the excess was dropped: this is usually a client bug (a stuck PTT). Reconnect; if it keeps happening, send the log in.",
-    "other": "{kind}: {reason}",
-    "other_on": "{kind} · {frequency}: {reason}",
-    "xc_denied": "These cross-couples did not take effect: {pairs}",
-    "tx_at_limit": "Transmit is on for as many frequencies as the server allows ({max}); turning on another TX or XC will be denied.",
-    "tx_over_limit": "Transmit is on for {declared} frequencies, but the server allows only {max} this time; the extra ones will be denied, so turn off the ones you do not need."
-  },
   "duty": {
     "off": "You are not staffing any position right now (the data feed does not list you). TX is off, but you can still hear. Once you log on in EuroScope, this updates within a minute.",
     "dropped_tx": "All TX that was on has been switched off.",
@@ -69,6 +58,9 @@
     "receiving": "Receiving",
     "no_transmit": "You are not staffing any position right now, so you cannot transmit",
     "over_tx_limit_tip": "Turning this on would take transmit past the server's limit of {max} frequencies, and it would be denied",
+    "xc_denied": "These cross-couples did not take effect: {pairs}",
+    "tx_at_limit": "Transmit is on for as many frequencies as the server allows ({max}); turning on another TX or XC will be denied.",
+    "tx_over_limit": "Transmit is on for {declared} frequencies, but the server allows only {max} this time; the extra ones will be denied, so turn off the ones you do not need.",
     "unmute_tip": "Muted; click to unmute",
     "mute_tip": "Mute this frequency (still receives packets, light still shows)",
     "last_talk": "Last transmission",

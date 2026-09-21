@@ -53,6 +53,14 @@
     "download": "Download",
     "skip": "Skip this version"
   },
+  "notice": {
+    "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
+    "range_unavailable": "Position service unavailable, range filtering is off: this frequency is audible network-wide right now",
+    "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
+    "rate_limited": "Uplink audio exceeded the server's rate limit and the excess was dropped: this is usually a client bug (a stuck PTT). Reconnect; if it keeps happening, send the log in.",
+    "other": "{kind}: {reason}",
+    "other_on": "{kind} · {frequency}: {reason}"
+  },
   "log": {
     "title": "Log",
     "no_file": "No log file could be created on this machine (the directory is not writable). The program works normally, but if something goes wrong there will be no record to send.",

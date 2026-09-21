@@ -53,6 +53,14 @@
     "download": "下载",
     "skip": "跳过这一版"
   },
+  "notice": {
+    "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",
+    "range_unavailable": "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听",
+    "unknown_message": "服务端不认识客户端发的一帧（{reason}），可能需要更新客户端",
+    "rate_limited": "上行语音超过了服务端的速率上限，多出来的被丢掉了：这通常是客户端的 bug（PTT 卡住），重连一次；反复出现请回传日志。",
+    "other": "{kind}：{reason}",
+    "other_on": "{kind} · {frequency}：{reason}"
+  },
   "log": {
     "title": "日志",
     "no_file": "这台机器上没能建起日志文件（目录不可写）。程序照常运行，但出了问题没有记录可发。",

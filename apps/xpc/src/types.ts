@@ -249,6 +249,32 @@ export function voiceText(v: VoiceSnapshot | null | undefined): string {
 }
 
 /**
+ * 服务端通知的人话。措辞在 `common.*.json` 里，四个客户端共用一份：这些 kind
+ * 是协议的一部分，同一条通知不该在管制端和飞行员端有两种说法。
+ *
+ * **不认识的 kind 也要显示出来**：一条服务端认为值得说、而客户端太旧不认识的
+ * 通知，落到界面上是一句原文，总好过一片安静。
+ */
+export function noticeText([kind, freq, reason]: [string, number, string]): string {
+  switch (kind) {
+    case "audio_unavailable":
+      return t("notice.audio_unavailable");
+    case "range_unavailable":
+      return t("notice.range_unavailable");
+    case "unknown_message":
+      return t("notice.unknown_message", { reason });
+    // 服务端按**会话**算这个桶，freq 恒为 0，所以这一条不能落进 other_on 去
+    // 说成某一条频率的问题。
+    case "rate_limited":
+      return t("notice.rate_limited");
+    default:
+      return freq
+        ? t("notice.other_on", { kind, frequency: (freq / 1000).toFixed(3), reason })
+        : t("notice.other", { kind, reason });
+  }
+}
+
+/**
  * FSD 链路对人怎么说。在模板里调：切了语言要跟着变。
  *
  * 取值和 Rust 那边的 `FsdState` 一一对应，每一种都要有一句——漏掉的那种会在
