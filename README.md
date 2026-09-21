@@ -89,7 +89,7 @@ UDP 不通就是不通，客户端不会退到别的通道上去。
 go build ./... && go vet ./... && go test ./server/... -race
 ```
 
-运行方式与全部环境变量见 `server/README.md`，那里也有线协议、关闭码与排障。
+部署清单见 [`docs/deploy.md`](docs/deploy.md)。变量、线协议、关闭码与排障仍在 `server/README.md`。
 
 ## 客户端核心库（Rust）
 
@@ -151,6 +151,8 @@ CAN_VOICE_E2E=1 cargo test -p can-voice-client --test e2e
 
 ## 手工验证
 
+真声卡、真票、真顶号、真通播机队那一套，清单在 [`docs/manual-test.md`](docs/manual-test.md)。下面两条命令只开核心库的命令行客户端，用来确认本机夹具还活着。
+
 ```bash
 # 只收听（--audio 才真的开声卡）
 cargo run -p can-voice-client --example canvoice-cli -- \
@@ -182,15 +184,15 @@ cargo run -p can-voice-atis
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `ATIS_CID` / `ATIS_PASSWORD` | 必需 | **一个真实成员账号。** 没有任何绕过账号的捷径，`no_shortcut_for_any_account` 钉着 |
+| `ATIS_CID` / `ATIS_PASSWORD` | 必需 | **一个真实成员账号，rating ≥ 1。** 没有任何绕过账号的捷径，`no_shortcut_for_any_account` 钉着。未定级的账号换不到票：can-api 回 403 `insufficient_rating`，日志里说的是 rating，不是密码。**空串等于没填**——`docker-compose.yml` 注入的就是空串 |
 | `CAN_API_ORIGIN` | `https://api.ceruleanavi.net` | 换票的地方（`POST /api/v1/voice/token`） |
 | `CAN_VOICE_SERVER` | `audio.ceruleanavi.net:64738` | 语音服务端 |
 | `CAN_FSD_DATAFEED` | `https://data.ceruleanavi.net/v1/data.json` | 席位从哪来 |
 | `ATIS_TTS_ARGV` | `edge-tts --voice {voice} --text {text} --write-media {out}` | 合成命令模板 |
-| `ATIS_VOICE_EN` / `ATIS_VOICE_ZH` | `en-US-AriaNeural` / `zh-CN-XiaoxiaoNeural` | 两种语言的嗓子 |
-| `ATIS_POLL_SECS` | `30` | 多久看一次 datafeed |
+| `ATIS_VOICE_EN` / `ATIS_VOICE_ZH` | `en-US-ChristopherNeural` / `zh-CN-YunxiNeural` | 两种语言的嗓子，见下 |
+| `ATIS_POLL_SECS` | `30` | 多久看一次 datafeed。**下限 5 秒**；写坏或者更小就起不来，不悄悄回退 |
 
-三条和四个桌面客户端**相反**的规矩，都写在代码里：
+四条和四个桌面客户端**相反**的规矩，都写在代码里：
 
 - **不设有界重连。** 桌面端掉线三次就下线；一支给三次机会就放弃的机队，会在一次
   网络抖动之后让全网 ATIS 悄无声息地下线，而没有任何人在看着它。
@@ -198,3 +200,21 @@ cargo run -p can-voice-atis
   只查在不在表里的话，一次瞬时故障就让这个席位永远停播，而管理器还以为它好好的、
   每 30 秒给它更新一次文本。
 - **取不到 datafeed 不停播。** 正在播的照常，报文停在最后一次取到的那份。
+  **一份取到了但缺 `atis` 字段的文档同样不停播**：它比一次网络错误更不可能
+  说明"全网的 ATIS 都下线了"。只有字段在、而且是个空数组才是"没人在播"。
+- **被顶号（关闭码 2）退到最大退避，而不是彻底停下。** 桌面端遵守的是"停止
+  重连、告诉用户账号在别处登录了"；机队没有用户可以告诉，真停下就没有人把这个
+  席位拉回来——顶掉它的那一套可能几分钟后自己就下线了。所以同一个 `ATIS_CID`
+  跑了两套机队时（比如演练环境连到了生产服务端），两边不再按席位每秒互踢一轮，
+  而是各自等一分钟再试一次，日志里单独一条 warn 说明账号在别处被用着。
+
+播出的两件事**照旧和 can-audio 一样**，是拍过板的保留，不是没来得及改：
+
+- **嗓子是那两个男声**：`zh-CN-YunxiNeural` / `en-US-ChristopherNeural`
+  （`can-audio/server/ATIS/mumble.py:317,324`）。换一种声音全网都听得出来，
+  而"今天的通播听着不对"是一条没人报得上来的故障。要换改 `ATIS_VOICE_*`。
+- **先播中文、再播英文**（`mumble.py:371-388`）。稿子里英文在前那是分隔符的
+  约定（`en|zh`），不是播出的顺序。
+
+嗓子按文本里**有没有汉字**选，与分隔符无关（旧版的判据，`mumble.py:307`）：
+机队播的是 datafeed 里所有 `_ATIS` 席位，而别的来源发的纯中文通播没有 `|`。

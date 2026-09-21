@@ -280,3 +280,53 @@ checked:
 		t.Fatal("the feed never came up during the whole run, so stream() may never have reached the line that reads feedIdleTimeout and this test proves nothing")
 	}
 }
+
+// TestTheSubscriptionSendsABrowserShapedUserAgent 钉住订阅请求带着 User-Agent。
+//
+// **数据源前面挡着 Cloudflare，非浏览器形态的 UA 一律 403。** 不带这个头的话，
+// net/http 会替我们填上 `Go-http-client/1.1`——而 403 在这一侧的样子是
+// stream() 立刻返回错误、Run 每 5 秒重来一次、日志里只有一行 `fsd feed dropped`，
+// 射程过滤永久降级成全球互通。can-audio 的 `server/ATIS/request.py` 为此写过
+// 一整段注释，本仓库 Rust 侧的两处（can-voice-atis、can-voice-datafeed）也各自
+// 设了同一形状的 UA；这一处是最后一个漏掉的。
+func TestTheSubscriptionSendsABrowserShapedUserAgent(t *testing.T) {
+	got := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case got <- r.UserAgent():
+		default:
+		}
+		// 什么都不写就返回：200 加一个空 body，stream() 读到 EOF 正常退出。
+		// 这条测试只关心请求头。
+	}))
+	defer srv.Close()
+
+	f := NewFeed(srv.URL)
+	_ = f.stream(context.Background())
+
+	select {
+	case ua := <-got:
+		if ua != userAgent {
+			t.Fatalf("User-Agent = %q, want %q", ua, userAgent)
+		}
+	default:
+		t.Fatal("the feed never issued a request, so this test proves nothing about its headers")
+	}
+}
+
+// TestTheUserAgentDoesNotLookLikeALibraryDefault 是上一条的另一半：
+// 头**设了**不等于设对了。
+//
+// 和 Rust 侧 `crates/can-voice-atis/src/datafeed.rs` 的
+// `the_user_agent_does_not_look_like_a_library_default` 是同一条断言，
+// 刻意照抄那张拒绝名单——三处实现共用一条规则，就该共用同一张名单。
+func TestTheUserAgentDoesNotLookLikeALibraryDefault(t *testing.T) {
+	if !strings.HasPrefix(userAgent, "Mozilla/") {
+		t.Fatalf("User-Agent = %q, want something that starts with Mozilla/", userAgent)
+	}
+	for _, banned := range []string{"Go-http-client", "reqwest", "python-requests", "curl"} {
+		if strings.Contains(userAgent, banned) {
+			t.Fatalf("User-Agent = %q contains %q, which is on Cloudflare's reject list", userAgent, banned)
+		}
+	}
+}

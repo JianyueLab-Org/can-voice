@@ -37,6 +37,12 @@ pub mod notice_kind {
     pub const UNKNOWN_MESSAGE: &str = "unknown_message";
     /// 某个会话开始对你说话。`session` 是包头里的 speaker，`cid` 是 CAN 号。
     pub const TALKER: &str = "talker";
+    /// 你的上行超过了正常语音的速率，多出来的帧被服务端丢掉了。
+    ///
+    /// **按会话算，所以不带频率**（服务端的 `transport/uplink.go`）。展示时不要
+    /// 说成某一个频率的问题——一次超额不归某一条频率，替用户指认一个元凶比不说
+    /// 更糟。会话不断开，收敛靠客户端自己停下来。
+    pub const RATE_LIMITED: &str = "rate_limited";
 }
 
 /// 把 JSON 的 `null` 当成缺省值读。
@@ -512,6 +518,70 @@ mod tests {
     /// 都必须原样出现在重新编码的结果里**。不按字节比（serde_json 是字典序、Go 是
     /// 声明序），也不整体比相等——那会把 Go 的 nil-slice-编成-null 和这边多出的
     /// 零值键误判成故障。
+    /// 服务端的每一个 NOTICE `kind` 都要在 `notice_kind` 里有一个常量。
+    ///
+    /// **这条扫描存在，是因为黄金文件管不到它。** `control-golden.json` 钉的是
+    /// 消息的**形状**——字段名、类型、谁会缺席——而 `kind` 是 `Notice.kind` 里的
+    /// 一个字符串值，加一个新的取值不改变任何形状，所以两边漂了黄金文件全绿。
+    ///
+    /// 漂掉的后果不是崩溃，是**比崩溃更难查的那一种**：`on_notice` 的 `else` 分支
+    /// 把不认识的 kind 原样塞进 `Snapshot.notices`，界面于是照着 `notice.other_on`
+    /// 显示一串生的 `rate_limited`。能看见，但看见的人不知道那是什么，也没有中文。
+    /// 这正好发生过一次：服务端加了 `rate_limited`，这边一无所知。
+    ///
+    /// 只单向查（Go 有的 Rust 必须有）。反向不查是故意的：`audio_unavailable` /
+    /// `audio_restored` 是客户端自己造的本地通知，走同一条展示路径但从不上线。
+    #[test]
+    fn every_notice_kind_the_server_sends_has_a_constant_here() {
+        let go_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../server/internal/control/message.go"
+        );
+        let go = std::fs::read_to_string(go_path).unwrap_or_else(|e| panic!("read {go_path}: {e}"));
+
+        // 只取 `Kind… = "…"` 这一种形状。注释里出现的 `KindTalker：` 没有等号，
+        // 不会被算进来。
+        let kinds: Vec<String> = go
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("Kind"))
+            .filter_map(|l| l.split_once('='))
+            .filter_map(|(_, v)| {
+                let v = v.trim();
+                v.strip_prefix('"')?
+                    .split_once('"')
+                    .map(|(s, _)| s.to_string())
+            })
+            .collect();
+
+        // 下界：Go 那边被重排或改名之后这条扫描会一条都取不到，而空集合恒等于
+        // 通过——这正是"看起来在设防"的形状。
+        assert!(
+            kinds.len() >= 5,
+            "只从 message.go 里认出 {} 个 kind（{kinds:?}），少于下界 5 —— \
+             是不是常量的写法变了、这条扫描已经瞎了？",
+            kinds.len()
+        );
+
+        let me = include_str!("control.rs");
+        let module = me
+            .split_once("pub mod notice_kind {")
+            .expect("notice_kind 模块不见了")
+            .1
+            .split_once("\n}")
+            .expect("notice_kind 模块没有闭合")
+            .0;
+
+        for k in &kinds {
+            assert!(
+                module.contains(&format!("\"{k}\"")),
+                "服务端会发 NOTICE kind {k:?}，而 notice_kind 里没有它的常量。\n\
+                 加一个常量，并在 pump.rs 的 on_notice 里决定它该变成哪个 Event；\n\
+                 只当普通通知转出去也行，但那要是一个决定，不是漏掉。"
+            );
+        }
+    }
+
     #[test]
     fn the_control_plane_matches_the_cross_implementation_golden() {
         let path = concat!(

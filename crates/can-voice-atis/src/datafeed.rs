@@ -38,11 +38,17 @@ pub struct Station {
 ///
 /// **单条坏数据只跳过那一条。** 一个缺字段的上游不该让整个机队崩掉——
 /// 那会让全网的 ATIS 一起下线，而这正是这支机队存在的理由。
-pub fn stations_from(feed: &Value) -> Vec<Station> {
-    let Some(list) = feed.get("atis").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    list.iter().filter_map(station_from).collect()
+///
+/// # 缺 `atis` 字段答 `None`，不是一个空列表
+///
+/// 两者对调用方是两件事：空列表的意思是"此刻没有人在播"，对账据此把所有正在
+/// 播的席位停掉；而一份 200 但形状不对的文档说明不了这件事，它比一次网络错误
+/// 更不可能代表"全网的 ATIS 都下线了"。答空列表的那一版会让整队停播，30 秒后
+/// 字段回来了再全部重连、重新合成一遍。旧版有这道保护：
+/// `if data and 'atis' in data`（`can-audio/server/ATIS/mumble.py:460`）。
+pub fn stations_from(feed: &Value) -> Option<Vec<Station>> {
+    let list = feed.get("atis")?.as_array()?;
+    Some(list.iter().filter_map(station_from).collect())
 }
 
 fn station_from(entry: &Value) -> Option<Station> {
@@ -156,9 +162,15 @@ mod tests {
         json!({ "callsign": callsign, "frequency": frequency, "text_atis": text })
     }
 
+    /// 形状是对的那一份。缺字段的那一份归
+    /// `a_feed_without_an_atis_array_is_not_the_same_as_nobody_broadcasting` 管。
+    fn stations(feed: &serde_json::Value) -> Vec<Station> {
+        stations_from(feed).expect("the feed carries an atis array")
+    }
+
     #[test]
     fn a_station_comes_through_with_its_frequency_in_khz() {
-        let s = stations_from(&feed(json!([one(
+        let s = stations(&feed(json!([one(
             "ZSSS_ATIS",
             "132.250",
             &["ZSSS ATIS A"]
@@ -172,7 +184,7 @@ mod tests {
     /// 而报文的断行只是终端宽度，不是句读。
     #[test]
     fn the_lines_are_joined_with_a_single_space() {
-        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "132.250", &["A B", "C D"])])));
+        let s = stations(&feed(json!([one("ZSSS_ATIS", "132.250", &["A B", "C D"])])));
         assert_eq!(s[0].text, "A B C D");
     }
 
@@ -180,7 +192,7 @@ mod tests {
     /// 谁也不在的频率上播一整天，而日志里一切正常。
     #[test]
     fn the_no_frequency_placeholder_is_skipped() {
-        let s = stations_from(&feed(json!([
+        let s = stations(&feed(json!([
             one("ZSSS_ATIS", "199.998", &["x"]),
             one("ZBAA_ATIS", "127.800", &["y"]),
         ])));
@@ -193,7 +205,7 @@ mod tests {
     #[test]
     fn the_placeholder_is_matched_numerically_not_textually() {
         for raw in ["199.998", "199.9980", "199.998000"] {
-            let s = stations_from(&feed(json!([one("ZSSS_ATIS", raw, &["x"])])));
+            let s = stations(&feed(json!([one("ZSSS_ATIS", raw, &["x"])])));
             assert!(s.is_empty(), "{raw} should have been skipped");
         }
     }
@@ -203,7 +215,7 @@ mod tests {
     /// 管制席位的频率上播通播。
     #[test]
     fn only_atis_callsigns_are_broadcast() {
-        let s = stations_from(&feed(json!([
+        let s = stations(&feed(json!([
             one("ZSSS_TWR", "118.500", &["x"]),
             one("ZSSS_ATIS", "132.250", &["y"]),
         ])));
@@ -213,7 +225,7 @@ mod tests {
 
     #[test]
     fn a_station_with_no_text_is_skipped() {
-        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "132.250", &[])])));
+        let s = stations(&feed(json!([one("ZSSS_ATIS", "132.250", &[])])));
         assert!(s.is_empty(), "there is nothing to say");
     }
 
@@ -221,7 +233,7 @@ mod tests {
     /// **不该让整个机队崩掉**——那会让全网 ATIS 一起下线。
     #[test]
     fn a_malformed_entry_is_skipped_rather_than_fatal() {
-        let s = stations_from(&feed(json!([
+        let s = stations(&feed(json!([
             json!({ "callsign": "ZSSS_ATIS" }),
             json!({ "frequency": "127.800", "text_atis": ["x"] }),
             json!("not even an object"),
@@ -234,16 +246,26 @@ mod tests {
         );
     }
 
+    /// **缺字段不是"没人在播"。**
+    ///
+    /// 返回空列表的那一版会让对账把所有正在播的席位停掉，30 秒后字段回来了
+    /// 再全部重连、重新合成一遍——而同一个循环的另一条规矩是"取不到 datafeed
+    /// 不停播"。一份 200 但形状不对的文档，比一次网络错误更不可能说明
+    /// "全网的 ATIS 都下线了"。旧版有这道保护：`if data and 'atis' in data`
+    /// （`can-audio/server/ATIS/mumble.py:460`）。
     #[test]
-    fn a_feed_without_an_atis_array_yields_nothing() {
-        assert!(stations_from(&json!({ "pilots": [] })).is_empty());
-        assert!(stations_from(&json!({ "atis": null })).is_empty());
-        assert!(stations_from(&json!("nonsense")).is_empty());
+    fn a_feed_without_an_atis_array_is_not_the_same_as_nobody_broadcasting() {
+        assert!(stations_from(&json!({ "pilots": [] })).is_none());
+        assert!(stations_from(&json!({ "atis": null })).is_none());
+        assert!(stations_from(&json!({ "atis": "nonsense" })).is_none());
+        assert!(stations_from(&json!("nonsense")).is_none());
+        // 字段在、而且是个空数组：**这一条**才是"此刻没有人在播"。
+        assert_eq!(stations_from(&feed(json!([]))), Some(Vec::new()));
     }
 
     #[test]
     fn a_frequency_that_is_not_a_number_is_skipped() {
-        let s = stations_from(&feed(json!([one("ZSSS_ATIS", "N/A", &["x"])])));
+        let s = stations(&feed(json!([one("ZSSS_ATIS", "N/A", &["x"])])));
         assert!(s.is_empty());
     }
 
@@ -277,7 +299,7 @@ mod tests {
         let feed: serde_json::Value =
             serde_json::from_slice(&raw).expect("parse the golden datafeed");
 
-        let s = stations_from(&feed);
+        let s = stations(&feed);
         assert_eq!(
             s.len(),
             1,

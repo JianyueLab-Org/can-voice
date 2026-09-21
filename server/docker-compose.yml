@@ -71,8 +71,10 @@ services:
       CAN_VOICE_SERVER_NAME: "${CAN_VOICE_SERVER_NAME:-audio.ceruleanavi.net}"
       CAN_FSD_DATAFEED: "${CAN_FSD_DATAFEED:-https://data.ceruleanavi.net/v1/data.json}"
       ATIS_POLL_SECS: "${ATIS_POLL_SECS:-30}"
-      ATIS_VOICE_EN: "${ATIS_VOICE_EN:-en-US-AriaNeural}"
-      ATIS_VOICE_ZH: "${ATIS_VOICE_ZH:-zh-CN-XiaoxiaoNeural}"
+      # 这两行和机队的 DEFAULT_VOICE_* 是同一组值，改一处要改两处——留在这里
+      # 是因为 compose 的默认值会盖过 Rust 那一侧，只改常量线上听到的不会变。
+      ATIS_VOICE_EN: "${ATIS_VOICE_EN:-en-US-ChristopherNeural}"
+      ATIS_VOICE_ZH: "${ATIS_VOICE_ZH:-zh-CN-YunxiNeural}"
       RUST_LOG: "${ATIS_LOG:-info}"
     logging:
       driver: json-file

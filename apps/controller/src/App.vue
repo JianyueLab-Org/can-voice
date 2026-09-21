@@ -290,6 +290,10 @@ function noticeText([kind, freq, reason]: [string, number, string]): string {
       return t("notice.range_unavailable");
     case "unknown_message":
       return t("notice.unknown_message", { reason });
+    // 服务端按**会话**算这个桶，freq 恒为 0，所以这一条不能落进 other_on 去
+    // 说成某一条频率的问题。
+    case "rate_limited":
+      return t("notice.rate_limited");
     default:
       return freq
         ? t("notice.other_on", { kind, frequency: (freq / 1000).toFixed(3), reason })

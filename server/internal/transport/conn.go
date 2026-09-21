@@ -256,7 +256,7 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		}
 		_ = cw.write(out)
 	})
-	go readDatagrams(ctx, conn, r, sess.ID, cw)
+	go readDatagrams(ctx, conn, r, sess, cw)
 	if code, reason, ok := closeAfterControl(readControl(st, cw, r, sess)); ok {
 		// 关在这里而不是靠外层那条 defer：那条发的是 CloseNormal，
 		// 而 CloseNormal 的意思是"你可以重连"，在这里恰恰是错的答案。
@@ -696,15 +696,51 @@ const txDeniedEvery = 3 * time.Second
 // 不封顶的话一个乱发的客户端能让这张表一直长下去。
 const txDeniedFreqs = 64
 
+// rateLimitNoticeEvery 是同一条会话两条 rate_limited 之间的最小间隔。
+//
+// 和 txDeniedEvery 同一个理由、同一个值：触发它的是一路每秒几百上千帧的上行，
+// 一帧一条 NOTICE 就是拿一个静默失败换一场针对控制流的拒绝服务，而同一条流上还
+// 跑着 SUBACK 和 PONG。**第一条不等**：出故障的那一刻要立刻说。
+//
+// 刻意不用 noticeBudget 那种"发够几条就永远闭嘴"的形状。那个预算配的是"解不开的
+// 帧"——对端的协议版本不会在一条连接里变回来，所以说过就不必再说。超速是会好
+// 的：桶自己回血，客户端也可能只是抖了一下。用完就闭嘴的话，同一条会话第二次
+// 出故障时服务端一个字都不会说，而那正是它最需要说话的时候。
+const rateLimitNoticeEvery = 3 * time.Second
+
 // readDatagrams 把上行音频交给 router 扇出。
-func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, id router.SessionID, cw *controlWriter) {
-	// 这两样只有这一条 goroutine 碰，所以不用锁。
+func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, sess *router.Session, cw *controlWriter) {
+	id := sess.ID
+	// 这几样只有这一条 goroutine 碰，所以都不用锁。
 	denied := make(map[uint32]time.Time)
 	toldDegraded := false
+	// 限速的状态同上。桶按这条会话**授权后**的 MaxTX 算额度，见 uplink.go。
+	limiter := newUplinkLimiter(sess.MaxTX, time.Now())
+	var limitedAt time.Time
+	var limitedDrops uint64
 	for {
 		p, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
 			return
+		}
+		// **限速排在最前面，连包头都不解。** 位置是有意的：正常路径上它只多了
+		// 一次 time.Now() 和几次浮点运算，而超额路径上它省掉的是 wire.Parse、
+		// router 的读锁和一整轮听众遍历——一路失控的上行正是靠那一整轮把同频率上
+		// 每个听众队列里的正常语音挤出去的（outbound.go 的队列满了丢最旧的）。
+		now := time.Now()
+		if !limiter.allow(now) {
+			limitedDrops++
+			// 零值的 limitedAt 减出来是一段极大的时长，所以第一条立刻就发。
+			if now.Sub(limitedAt) >= rateLimitNoticeEvery {
+				limitedAt = now
+				// Info 而不是 Debug：这条是要在排障时找得到的。节流之后一次
+				// 故障只留几行，不会刷屏。
+				slog.Info("uplink audio is over the rate limit, dropping frames",
+					"session", id, "cid", sess.CID, "dropped", limitedDrops,
+					"max_tx", sess.MaxTX)
+				sendRateLimited(cw)
+			}
+			continue
 		}
 		if _, err := r.Fanout(id, p); err != nil {
 			// 这里刻意是 Debug：一个还没发完 SUB 就开始说话的客户端
@@ -728,6 +764,21 @@ func readDatagrams(ctx context.Context, conn quic.Connection, r *router.Router, 
 		}
 		toldDegraded = degraded
 	}
+}
+
+// sendRateLimited 回一条"你的上行超速了，多出来的被丢掉了"。
+//
+// 不带频率：桶是按会话算的，一次超额不归某一个频率（见 control.KindRateLimited）。
+// 写失败不处理，理由同 sendTxDenied——控制流坏了的话 readControl 那条会先撞上。
+func sendRateLimited(cw *controlWriter) {
+	out, err := control.Encode(&control.Notice{
+		Kind:   control.KindRateLimited,
+		Reason: "uplink audio is above the rate a 20 ms Opus stream can produce; the excess is being dropped",
+	})
+	if err != nil {
+		return
+	}
+	_ = cw.write(out)
 }
 
 // sendRangeUnavailable 回一条"射程过滤现在不生效"。

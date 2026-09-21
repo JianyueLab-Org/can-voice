@@ -6,6 +6,14 @@
 //! 操作员听惯的也是它。把合成这一步做成"跑一条命令"，既留住了那把嗓子，
 //! 也不用把一个重量级 TTS 塞进二进制——而且换后端只是改一行配置。
 //!
+//! **"那把嗓子"有具体的值，也有东西钉着。** 默认是 `zh-CN-YunxiNeural` /
+//! `en-US-ChristopherNeural`，和 can-audio 播的同两个男声
+//! （`can-audio/server/ATIS/mumble.py:317,324`）；值在机队的 `DEFAULT_VOICE_*`
+//! （`main.rs`），`the_default_voices_are_the_ones_can_audio_spoke_with` 守着。
+//! 这一段一度写着"留住了那把嗓子"而默认值是另外两个女声——切换当天全网通播
+//! 换了一种声音，而没有一行字说过这件事。这里只管把 `{voice}` 填进命令行：
+//! 换嗓子是改 `ATIS_VOICE_*`，不是改这里。
+//!
 //! 转码同理：Python 版的部署本来就要求 PATH 上有 ffmpeg。
 //!
 //! ```text

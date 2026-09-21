@@ -26,6 +26,23 @@ import (
 // reconnectDelay 是 SSE 连接断开或建立失败后，重试前的等待时间。
 const reconnectDelay = 5 * time.Second
 
+// userAgent 是订阅 can-fsd 事件流时报出的 User-Agent。
+//
+// **数据源前面挡着 Cloudflare，非浏览器形态的 UA 一律 403。** can-audio 的
+// `server/ATIS/request.py` 记着这条规则，本仓库 Rust 侧的两处
+// （`crates/can-voice-atis/src/datafeed.rs`、`crates/can-voice-datafeed/src/lib.rs`）
+// 也各自设了同一形状的头。net/http 不设这个头时会填上 `Go-http-client/1.1`，
+// 而那正是被拒的那一类——Rust 那边的测试把它逐字列在拒绝名单里。
+//
+// 被拒的样子最值得记住：不是一条"403"的日志，而是 stream() 立刻返回、Run 每 5 秒
+// 重来一次、日志里只有 `fsd feed dropped`，射程过滤永久降级成全球互通。
+// 那个形状和"上游挂了"一模一样，没有任何一处指回这一行。
+//
+// 三处的取值不是同一个串而是同一个**形状**：`Mozilla/5.0 (compatible; X/V)`，
+// X 说的是哪一个组件。服务端和客户端在上游日志里要分得开——同一个串的话，
+// "语音服务器还在订阅吗"这个问题没法在 Cloudflare 那边回答。
+const userAgent = "Mozilla/5.0 (compatible; CanVoiceServer/1.0)"
+
 // maxEventBytes 是单个 SSE 事件的上限。超过这个尺寸的 datafeed 意味着
 // 上游出了问题，而不是网络大了一点。
 const maxEventBytes = 8 << 20
@@ -613,6 +630,9 @@ func (f *Feed) stream(parent context.Context) error {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	// 必须的，不是礼貌：不设的话 net/http 填 `Go-http-client/1.1`，而上游前面的
+	// Cloudflare 对非浏览器形态的 UA 回 403。见 userAgent。
+	req.Header.Set("User-Agent", userAgent)
 	// f.client，不是 http.DefaultClient：后者的 Transport 没有
 	// ResponseHeaderTimeout，而这一行下面的看门狗要到 Do() 返回之后才上弦
 	// ——扣着响应头不发的上游因此能把 Run() 停到进程退出。见 responseHeaderTimeout。
