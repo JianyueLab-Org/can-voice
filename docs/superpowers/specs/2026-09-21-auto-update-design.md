@@ -30,7 +30,7 @@
 | 自动到什么程度 | 下载、安装、重启，全自动，不问 | 版本收敛 |
 | 什么时候 | **只在启动时**，进主界面之前 | 那一刻没有连语音，绕开值班问题 |
 | 用什么 | `tauri-plugin-updater` | 见 §3 |
-| Linux | AppImage 自更新；**deb / rpm 维持现状的提示** | 包管理器的地盘，见 §6 |
+| Linux | AppImage 自更新；**deb / rpm 维持现状的提示** | 插件**能**装它们，但要提权，和"不问人"矛盾。见 §6 |
 | macOS | 不涉及——根本没有构建 | 缺 Developer ID |
 | 清单与包体 | 都走 can-api 的新路由，不走 GitHub | 大陆连通性，见 §4 |
 | 旧路由 | `/api/v1/clients/*` **不动**，继续指 can-audio | 两代产品名相同，见 §4.3 |
@@ -50,6 +50,10 @@ Windows 和 Linux 的包到今天都没有代码签名（2026-09-17 定的，REA
 
 代价接受：插件的行为（静默装 NSIS/MSI、就地替换 AppImage、重启）是它定的，我们只在
 外面决定"什么时候调它"。
+
+钉的版本是 **`tauri-plugin-updater = "2.12.0"`**（仓库是 `tauri = "2.11.6"`，插件
+声明 `tauri = "2.10"`，兼容）。本设计 §4.2 / §6 / §7 的每个字段名和取值都是从这个
+版本的源码里读出来的，换版本要重核一遍。
 
 ## 4. 清单与包体从哪来
 
@@ -86,9 +90,28 @@ GET /api/v1/voice/update/{client}/{target}/{arch}?current=<version>
 }
 ```
 
-**占位符的确切拼法、`target` / `arch` 的取值、以及"没有更新"该回 204 还是回一份同
-版本的清单，实施时对着钉住的插件版本核，不照本文档抄。** 本节定的是"清单由 can-api
-出、地址指回 can-api"，不是字段名。
+以上字段名已对着 `tauri-plugin-updater 2.12.0` 的源码核过（`src/updater.rs` 的
+`RemoteRelease` 及其自定义 `Deserialize`），不是照记忆写的：
+
+- `version` 必填，带 `#[serde(alias = "name")]`，解析时 `trim_start_matches('v')`，
+  所以 `"v27.0.9"` 也收。
+- `notes` 可选。`pub_date` 可选，但**必须是 RFC 3339**——格式不对是反序列化直接失败，
+  不是忽略。
+- `platforms` 的键是 `"<os>-<arch>"`，也可以带安装器后缀
+  （`"linux-x86_64-deb"`、`"windows-x86_64-nsis"`）；插件先查带后缀的，再退回不带的。
+- `os`：`windows` / `linux` / `darwin`（**是 `darwin` 不是 `macos`**）。
+  `arch`：`i686` / `x86_64` / `armv7` / `aarch64` / `riscv64`。
+
+**URL 占位符有四个，不是三个**：`{{current_version}}`、`{{target}}`、`{{arch}}`、
+以及容易漏掉的 **`{{bundle_type}}`**（取值 `appimage` / `deb` / `rpm` / `app` /
+`msi` / `nsis`）。
+
+**"没有更新"回 HTTP 204**，插件见 204 直接 `Ok(None)`。回 200 加一份版本号不大于
+当前版本的清单也等效，但 204 是显式约定，用它。非 2xx **不算"没有更新"**——插件会
+记日志并试下一个 endpoint，全失败才报错。
+
+仍未核实的只有一处：npm 侧 `@tauri-apps/plugin-updater` 的 TypeScript 签名（发布到
+crates.io 的包把 guest-js 排除了）。本设计的调用都在 Rust 侧，用不到它。
 
 ### 4.3 旧路由不动，而且分不开
 
@@ -159,12 +182,29 @@ can-audio 每个产品只发一个包，所以这个模型一直成立。can-voi
 | Linux | `.deb` / `.rpm` | **否，退回提示横幅** |
 | macOS | —— | 没有构建 |
 
-**deb / rpm 不做，是因为不该做。** 它们装在 `/usr` 下，归包管理器管；一个程序自己
-去盖那些文件，是发行版明令禁止的事，而且下一次 `apt upgrade` 会把它盖回去——那时候
-用户会看到版本莫名其妙地退回去，且无从查起。
+**deb / rpm 不做，不是因为做不到——这一点本设计的初稿写错了，写在这里免得下一个人
+照着错的前提重新决定一次。**
 
-判别用 `APPIMAGE` 环境变量（AppImage 运行时会设）。判别写成纯函数，单测钉住；
-判错的后果是 deb 用户被推进一条注定失败的更新路径。
+插件**能**装它们：`install_deb` 走 `dpkg -i`、`install_rpm` 走 `rpm -U`，
+2.10.0（PR #2624）加的，CHANGELOG 原话是 "Updater plugin now supports all bundle
+types: Deb, Rpm and AppImage for Linux"。`tauri build` 也会给这两种产物签名。
+
+不做的理由换成两条，而且第一条是**这份设计自己的第一个决定**逼出来的：
+
+- **装 deb / rpm 要提权。** 插件的做法是 `pkexec` → 图形 sudo（zenity/kdialog）→
+  终端 `sudo` 三级回退。而 §2 定的是"全自动、不问人、启动时装"——在 deb / rpm 上
+  那等于**每次启动弹一个系统密码框**。这不是体验差一点，是和那个决定直接矛盾：一个
+  要输密码的"不问人"更新不存在。
+- **`/usr` 是包管理器的地盘。** 就算用户每次都输了密码，下一次 `apt upgrade` 会把
+  版本盖回去，而用户看到的是"版本莫名其妙退回去了"，无从查起。
+
+所以 Linux 上自动更新只走 AppImage。**哪天决定改，要先推翻的是"不问人"那一条**，
+不是这一条。
+
+判别不要自己发明：插件自己读的是 **`APPIMAGE` 环境变量**（辅以 `APPDIR`），在
+`tauri-utils` 的 `Env::default()` 里，而且它还会校验 `current_exe()` 是不是在
+`{temp_dir}/.mount_` 下面。我们的判别用同一个变量，理由是两处判据一旦不同，就会出现
+"我们以为是 AppImage 而插件以为不是"的那一类分歧。判别写成纯函数，单测钉住。
 
 deb / rpm 上退回现有的 `can-voice-update` 提示横幅——那条路径**不删**，它现在是
 Linux 一半用户唯一的更新通知。
@@ -173,9 +213,17 @@ Linux 一半用户唯一的更新通知。
 
 一对 **minisign** 密钥，和代码签名无关（所以"暂不签名"那个决定不挡这件事）。
 
+- 生成：`tauri signer generate -w <路径>`（CI 场景加 `--ci` 跳过交互）
 - 私钥 + 口令：can-voice 的 Actions secrets（`TAURI_SIGNING_PRIVATE_KEY`、
-  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）
-- 公钥：四份 `tauri.conf.json`，跟着客户端一起发出去
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。前者既收私钥内容也收私钥文件路径
+- 公钥：四份 `tauri.conf.json` 的 **`plugins.updater.pubkey`**，跟着客户端一起发出去
+- `.sig` 的命名是**在原文件名后直接追加 `.sig`**（`app_27.0.9_amd64.AppImage.tar.gz`
+  → `….tar.gz.sig`），所以中转按名字找签名时不要去掉原扩展名
+- 签名的 trusted comment 里带版本号，插件用它防降级
+
+四个 `src-tauri/capabilities/*.json` 还要加权限，否则命令调不通：`"updater:default"`
+（等于 `allow-check` / `allow-download` / `allow-install` /
+`allow-download-and-install` 四项）。
 
 **丢了私钥的后果要写在这里**：所有已经装出去的客户端都持着那个公钥，换一对新的就意味着
 它们会拒绝之后的每一次更新——**所有人只能手动重装一遍**。它和 `VOICE_TOKEN_KEY`、
@@ -197,8 +245,14 @@ TLS 证书是同一类东西，备份放在一起。
 
 - **第一次真正的验证只能靠手工。** 自动更新这件事，写得对不对要等到有一个真的旧版在
   真的机器上自己换成新版才知道。它和封闭测试（R6）应该排在一起做。
-- **插件的确切接口没有对着版本核过。** §4.2 的字段名、占位符、"没有更新"的回法都
-  按记忆写的，实施第一步是钉住插件版本并核对，不是照抄本文档。
+- ~~插件的确切接口没有对着版本核过。~~ **已核**：`tauri-plugin-updater 2.12.0`
+  的 vendored 源码，结论进了 §4.2、§6、§7。核的过程推翻了初稿里"deb/rpm 不支持"
+  这条事实——**结论没变，理由全换了**，见 §6。
+- **Windows 的重启由安装器做，不是我们做。** 插件在 Windows 上安装完直接
+  `std::process::exit(0)`，由 NSIS / MSI 把新版本拉起来（`restart_after_install`
+  默认为真，当前命令行参数经 `/ARGS` 或 `LAUNCHAPPARGS` 传过去）。**Linux 上插件
+  不会自己重启**，要自己调 `tauri::process::restart`。两个平台走两条路，这一处是
+  "写一遍两边都对"最容易出错的地方。
 - **更新失败会静默。** 这是有意的（§5），代价是"一批人停在旧版上"没有任何声音。
   can-api 侧应当能看出清单被谁取过——但**日志之外不做遥测**，这个网络没有那种东西。
 - **`const repo` 的改动落在切换日**，不在本设计内。新路由自己解析 can-voice 的
