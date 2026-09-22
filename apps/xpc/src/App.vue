@@ -2,6 +2,8 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
 import Panel from "./components/Panel.vue";
+import StateToggle from "./components/StateToggle.vue";
+import StatusBar from "./components/StatusBar.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
@@ -60,6 +62,63 @@ const receiving = computed(() => {
   if (khz == null) return false;
   return (view.value?.voice?.receiving?.[String(khz)]?.length ?? 0) > 0;
 });
+
+/**
+ * TX / RX 两块色块的三态。**和管制端同一套语义**（`RadioRow.vue:54-60`）：
+ * 有频率就是 `on`，此刻真的在收 / 发是 `active`，一个频率都没有是 `off`。
+ *
+ * **红色（`muted`）不用。** 管制端那边红色只表示静音；同一个组件在两个端表示两件事，
+ * 看代码的人就再也分不清红是什么意思。can-audio 的 `Indicator("TX", MUTED_COLOR)`
+ * 和今天这里的 `bg-red-600` 都让出来，换四个端一套颜色。
+ */
+const txState = computed<"off" | "on" | "active">(() =>
+  talking.value ? "active" : voiceKhz.value !== null ? "on" : "off",
+);
+const rxState = computed<"off" | "on" | "active">(() =>
+  receiving.value ? "active" : voiceKhz.value !== null ? "on" : "off",
+);
+
+/**
+ * 底栏中间那句话此刻在说什么。**存的是状态不是那句话**：存一句翻好的话，
+ * 切了语言之后已经显示着的那一句不会跟着变（和 `error` 同一条规矩，见 `:34-38`）。
+ *
+ * `"update"` 由任务 9 的「帮助 → 检查更新」置上，那一任务还会再给它加一种取值。
+ */
+const transient = ref<"update" | null>(null);
+
+/** 底栏那句话。can-audio 空闲时说「就绪」，有事说那件事（`xpc/gui.py:200`）。 */
+const barStatus = computed(() => {
+  if (transient.value === "update") return t("update.checking");
+  if (talking.value) return t("chat.transmitting");
+  return t("status.ready");
+});
+
+/**
+ * 无线电那一行右边那串数字。can-audio 的 `position_label`（`xpc/gui.py:532-535`）
+ * 就是这一格——它装的是**本机的位置和姿态**，不是管制席位。
+ *
+ * 不画标签：五个标签摊在这一行上会把它挤散，而 can-audio 也没有标签。标签进
+ * `title`（下面那个函数），悬停时仍说得出这串数字各是什么。
+ */
+function cockpitText(): string {
+  const s = view.value?.sim;
+  if (!s) return "—";
+  const squawk = String(s.squawk).padStart(4, "0");
+  const heading = String(Math.round(s.heading)).padStart(3, "0");
+  return `A${squawk} ${xpdrText(s.xpdr_mode)}  ${s.altitude} ft  ${s.groundspeed} kt  ${heading}°  ${s.pressure_delta} ft`;
+}
+
+/** 上面那串数字的读法，按顺序列出五个标签。分隔符走字典：中文是「、」，英文是「, 」。 */
+function cockpitTitle(): string {
+  return [
+    t("cockpit.transponder"),
+    t("cockpit.altitude"),
+    t("cockpit.groundspeed"),
+    t("cockpit.heading"),
+    t("cockpit.pressure_delta"),
+  ].join(t("common.separator.list"));
+}
+
 const mouseSupported = ref(true);
 const recipient = ref("");
 const message = ref("");
@@ -74,12 +133,21 @@ const online = computed(() => view.value?.link != null || observing.value);
 /** 频率框里显示的样子：存的是 kHz，框里写 `121.800`，没有就空着。 */
 const boxText = (khz: number | null) => (khz === null ? "" : khzText(khz));
 
+/**
+ * 屏幕上那颗 PTT。**两头都写成幂等的**：键盘 / 鼠标侧键那一路的按下状态在 Rust 侧
+ * （`ptt_pressed`），而这里每按一下都发一趟命令。多余的一次 `set_transmitting(false)`
+ * 会在人还按着键的时候把话切断——那时候他正在说话，而界面上一点异样都没有。
+ */
 function pttDown(e: PointerEvent) {
-  holding.value = true;
+  // 指针捕获：按住说话时手是会动的，滑出按钮之后 `pointerup` 就落到别的元素上，
+  // 松手事件永远不来，麦克风一直开着。
   (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  if (holding.value) return;
+  holding.value = true;
   void invoke("set_transmitting", { on: true });
 }
 function pttUp() {
+  if (!holding.value) return;
   holding.value = false;
   void invoke("set_transmitting", { on: false });
 }
@@ -402,57 +470,7 @@ const send = () =>
         </div>
       </Panel>
 
-      <!-- 观察员的频率。正常上网络时频率只跟 COM1 走，界面上没有第二个框；观察员是
-           例外——右座的人未必开着模拟器，开着的那台也未必调在机长那个频率上。
-           精简时也在：这是他唯一的调频手段。 -->
-      <section
-        v-if="observer"
-        class="flex flex-wrap items-center gap-2 rounded border px-3 py-2 text-xs"
-      >
-        <span class="opacity-60">{{ t("observer.frequency") }}</span>
-        <input
-          v-model="manualFrequency"
-          :placeholder="t('observer.frequency_placeholder')"
-          :title="t('observer.frequency_tip')"
-          class="w-28 rounded border px-2 py-1 font-mono"
-          @change="applyFrequency"
-        />
-        <template v-if="view?.observer">
-          <span v-if="view.observer.frequency !== null" class="font-mono">
-            {{ khzText(view.observer.frequency) }}
-            <span class="opacity-60">{{
-              view.observer.manual ? t("observer.manual") : t("observer.follow_com1")
-            }}</span>
-          </span>
-          <span v-else class="text-amber-700">
-            {{ t("observer.no_frequency") }}
-          </span>
-        </template>
-      </section>
-
-      <!-- 座舱读数。频率跟着 COM1 走，界面上没有第二个频率框——
-           客户端上再有一个就会有两个真相。（观察员例外，见上面那一栏。） -->
-      <!-- 精简时收起：这几个数模拟器里都有，压在模拟器上的窗口不必再显示一遍。 -->
-      <section
-        v-if="!compact"
-        class="grid grid-cols-6 gap-2 rounded border px-3 py-2 font-mono text-xs tabular-nums"
-      >
-        <div><p class="opacity-60">COM1</p>{{ mhz(view?.sim?.com1) }}</div>
-        <div>
-          <p class="opacity-60">{{ t("cockpit.transponder") }}</p>
-          {{ view?.sim ? String(view.sim.squawk).padStart(4, "0") : "—" }}
-          <span class="opacity-60">{{ xpdrText(view?.sim?.xpdr_mode) }}</span>
-        </div>
-        <div><p class="opacity-60">{{ t("cockpit.altitude") }}</p>{{ view?.sim?.altitude ?? "—" }} ft</div>
-        <div><p class="opacity-60">{{ t("cockpit.groundspeed") }}</p>{{ view?.sim?.groundspeed ?? "—" }} kt</div>
-        <div><p class="opacity-60">{{ t("cockpit.heading") }}</p>{{ view?.sim ? Math.round(view.sim.heading) : "—" }}°</div>
-        <div>
-          <p class="opacity-60">{{ t("cockpit.pressure_delta") }}</p>
-          {{ view?.sim?.pressure_delta ?? "—" }} ft
-        </div>
-      </section>
-
-      <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
+      <!-- 三张卡片：消息、附近管制、他机。文字消息此前整块不存在：管制员打字
            飞行员看不见，而他会以为对方没理他。 -->
       <!-- 精简时只留文字消息：管制员打的字飞行员必须看得见，附近的飞机和在线席位
            是参考，不是值班时要盯的东西。 -->
@@ -506,26 +524,100 @@ const send = () =>
         </Panel>
       </section>
 
-      <footer class="flex items-center gap-2 border-t" :class="compact ? 'pt-2' : 'pt-3'">
-        <span
-          class="rounded border px-2 py-1 font-mono text-xs"
-          :class="talking ? 'bg-red-600 text-white' : 'opacity-50'"
-        >TX</span>
-        <span
-          class="rounded border px-2 py-1 font-mono text-xs"
-          :class="receiving ? 'bg-green-500 text-white' : 'opacity-50'"
-        >RX</span>
-        <button
-          class="rounded border px-4 py-2 text-xs"
-          :class="talking ? 'bg-red-600 text-white' : ''"
-          :title="t('chat.push_to_talk_tip')"
-          @pointerdown="pttDown"
-          @pointerup="pttUp"
-          @pointercancel="pttUp"
-        >
-          {{ t("chat.push_to_talk") }}
-        </button>
-      </footer>
+      <!-- 无线电。can-audio 的 `_build_radio_bar`（`xpc/gui.py:334-380`）：这张卡片
+           本来**就是**模拟器状态行，COM1、频道、他机计数和座舱读数都属于这里。 -->
+      <!-- 精简时也在，只收起他机计数和座舱读数：屏幕上这颗 PTT 在 Wayland 上是唯一
+           能发话的路径，手输频率框是观察员唯一的调频手段，两样都不能跟着精简消失。 -->
+      <Panel :title="t('radio.title')">
+        <!-- 排不下就换行，不是裁掉：900×600 的最小尺寸只管正常模式，精简时窗口能
+             拖到 320px 宽。 -->
+        <div class="flex flex-wrap items-center gap-2">
+          <StateToggle label="TX" :state="txState" :width="52" :height="26" />
+          <StateToggle label="RX" :state="rxState" :width="52" :height="26" />
+
+          <!-- 电门关着时照样显示调在哪：这是座舱里的读数，而「听不见」由左边两块
+               色块转暗去说。 -->
+          <span class="font-mono text-[15px] font-bold tabular-nums">
+            {{
+              view?.sim?.com1
+                ? t("radio.com1", { frequency: mhz(view.sim.com1) })
+                : t("radio.com1_none")
+            }}
+          </span>
+
+          <!-- 手输频率**只有观察员有**。正常上网络的飞行员要是能把语音频率和座舱 COM1
+               分开设，迟早出现「管制以为你在 121.8、你人在别的频道」，那比听不见更糟。 -->
+          <input
+            v-if="observer"
+            v-model="manualFrequency"
+            :placeholder="t('observer.frequency_placeholder')"
+            :title="t('observer.frequency_tip')"
+            class="w-28 rounded border px-2 py-1 font-mono text-xs"
+            @change="applyFrequency"
+          />
+          <!-- 频道文案也只有观察员有：飞行员的频道就是左边那个 COM1，同一个数字写两遍
+               就是两个真相（`:352-353` 原来那条注释说的就是这件事）。 -->
+          <template v-if="observer && view?.observer">
+            <span v-if="view.observer.frequency !== null" class="font-mono text-xs opacity-60">
+              {{ khzText(view.observer.frequency) }}
+              {{ view.observer.manual ? t("observer.manual") : t("observer.follow_com1") }}
+            </span>
+            <span
+              v-else
+              class="min-w-0 truncate text-xs text-amber-700"
+              :title="t('observer.no_frequency')"
+            >
+              {{ t("observer.no_frequency") }}
+            </span>
+          </template>
+
+          <span class="grow" />
+
+          <span v-if="!compact" class="font-mono text-xs tabular-nums opacity-60">
+            {{ t("radio.traffic", { count: view?.traffic.length ?? 0 }) }}
+          </span>
+
+          <!-- 座舱读数。精简时收起：这几个数模拟器里都有，压在模拟器上的窗口不必再
+               显示一遍。 -->
+          <span
+            v-if="!compact"
+            class="font-mono text-xs tabular-nums opacity-60"
+            :title="cockpitTitle()"
+          >
+            {{ cockpitText() }}
+          </span>
+
+          <!-- 一直画着，没连上就是灰的：格子来回出现会让右边所有东西横着跳。
+               观察员没有 FSD 链路，`connected` 对他恒为假，所以这颗对他一直是灰的。 -->
+          <button
+            class="rounded border px-3 py-1 text-xs"
+            :disabled="!connected || busy"
+            @click="ident"
+          >
+            {{ t("session.ident") }}
+          </button>
+
+          <button
+            class="rounded border px-4 py-2 text-xs"
+            :class="talking ? 'text-white' : ''"
+            :style="talking ? { background: 'var(--can-active)' } : {}"
+            :title="t('chat.push_to_talk_tip')"
+            @pointerdown="pttDown"
+            @pointerup="pttUp"
+            @pointercancel="pttUp"
+          >
+            {{ t("chat.push_to_talk") }}
+          </button>
+        </div>
+      </Panel>
+
+      <!-- can-audio 飞行员端的 `QStatusBar`（`xpc/gui.py:200`）：只说「就绪」和瞬时状态。
+           **不传 `pttTitle`**，所以这条栏上不画 PTT——那颗按钮在上面那一行里。
+           也**不接 `@down` / `@up`**：`StatusBar` 卸载时会补发一次 `up` 当保险
+           （`StatusBar.vue:54`），而 xpc 的 PTT 不在这条栏上，拆这条栏不该松开麦克风。
+           `talking` 仍然要传，它是必填属性。 -->
+      <StatusBar v-if="!compact" :talking="talking" :status="barStatus" />
+
       <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">
         <PilotSettings :cid="cid" :csl="view?.csl" />

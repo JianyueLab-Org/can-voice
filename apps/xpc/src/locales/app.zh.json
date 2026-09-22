@@ -80,7 +80,6 @@
     "disconnect": "下线"
   },
   "observer": {
-    "frequency": "语音频率",
     "frequency_placeholder": "留空跟随 COM1",
     "frequency_tip": "观察员模式专用：手输一个频率，语音就待在那里。清空则回到跟随座舱 COM1。",
     "manual": "手输",

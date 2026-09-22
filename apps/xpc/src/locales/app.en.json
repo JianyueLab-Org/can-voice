@@ -80,7 +80,6 @@
     "disconnect": "Disconnect"
   },
   "observer": {
-    "frequency": "Voice frequency",
     "frequency_placeholder": "Leave blank to follow COM1",
     "frequency_tip": "Observer mode only: type a frequency and voice stays on it. Clear it to follow the cockpit COM1 again.",
     "manual": "manual",
