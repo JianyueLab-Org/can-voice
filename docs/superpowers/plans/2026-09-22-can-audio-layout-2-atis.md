@@ -46,7 +46,6 @@
 | `apps/atis/src/components/StationDialog.vue` | 新建 | `Modal` + `StationEditor`。取代中间那一栏。 |
 | `apps/atis/src/components/PresetDialog.vue` | 新建 | `Modal` + `PresetEditor`。从右栏「编辑预设」进。 |
 | `apps/atis/src/components/StationEditor.vue` | 改 | 去掉自带的外框和标题行（它现在是模态的内容），去掉内嵌的 `PresetEditor`——构型改走 `PresetDialog`。 |
-| `apps/atis/src/components/PresetEditor.vue` | 改 | 只去掉外框；表单本身不动。 |
 | `apps/atis/src/components/Splitter.vue` | 新建 | 两栏可拖分割条，左栏宽度只活在会话里。 |
 | `apps/atis/src/components/StationList.vue` | 新建 | 席位列表，每行一句 can-audio 的单行摘要。 |
 | `apps/atis/src/components/AiringPanel.vue` | 新建 | 播出设置（报文周期、登录等级）加 `LogPanel`，塞进 `SettingsDialog` 的插槽。对应管制端的 `SettingsPanel.vue`。 |
@@ -202,6 +201,7 @@ import json
 ZH = {
     "login": {"account": "账号"},
     "station": {
+        "list_title": "通播席位",
         "new": "新建",
         "edit": "编辑",
         "delete": "删除",
@@ -227,6 +227,7 @@ ZH = {
 EN = {
     "login": {"account": "Account"},
     "station": {
+        "list_title": "ATIS Positions",
         "new": "New",
         "edit": "Edit",
         "delete": "Delete",
@@ -855,6 +856,8 @@ function dot(callsign: string): string | null {
 读一遍**现在**那三个导入按钮（`App.vue:394-429` 的 `<details>` 块）再写，把它们的 `:disabled`、`busy` 文案和 `@click` **照搬**过来——上面这段是形状，真值以现有代码为准。改错一个 `busy` 判定，按钮就会在跑的时候可以连点。
 
 删掉的东西：整个 `<details>` 导入折叠块，列表下面原来那个 `+ 新席位` 按钮，以及任务 3 临时加的那个编辑钮。隐藏的 `<input type="file">` **必须跟着搬进来**，别留在删掉的 `<details>` 里——`vatisFile?.click()` 找不到它就是"点了没反应"。
+
+**Airing 和 Log 两个 `<details>` 块不在这份删除名单里，原样留在 `#left` 插槽末尾。** 任务 7 才把它们并进 `SettingsDialog`；本任务只重画导入折叠块和按钮区。提前删掉的话，METAR 刷新间隔的设置、登录等级和寄日志的表单在任务 5 和任务 7 之间的两个提交里都够不着。
 
 - [ ] **步骤 4：门**
 

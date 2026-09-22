@@ -69,7 +69,7 @@
     "chinese_extra": "Chinese additional remarks",
     "label": "Preset",
     "edit": "Edit preset",
-    "title": "Preset \"{name}\""
+    "title": "Preset “{name}”"
   },
   "import": {
     "title": "Import",
