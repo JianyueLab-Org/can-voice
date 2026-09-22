@@ -68,6 +68,7 @@ watch(
     values.value = { ...(s.endpoints ?? {}) };
     debugLog.value = s.debug_log ?? false;
   },
+  { immediate: true },
 );
 
 async function saveEndpoints() {
