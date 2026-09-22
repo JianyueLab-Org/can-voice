@@ -10,12 +10,22 @@ import { t } from "../i18n";
  *
  * 四个客户端逐字节相同的一份。
  */
+/**
+ * `only` 挑显示哪几个钮，不传是三个都显示。
+ *
+ * 通播端要把置顶/精简放进左栏标题行、设置留在顶栏——can-audio 就是这么放的
+ * （`atis/gui.py:340-358` 对 `:323`），为的是精简模式下整条顶栏藏起来之后，
+ * 置顶和精简还在。另外三个端不传，行为和以前一模一样。
+ */
+const props = defineProps<{ only?: ("on_top" | "compact" | "settings")[] }>();
+const shows = (key: "on_top" | "compact" | "settings") => !props.only || props.only.includes(key);
 defineEmits<{ settings: [] }>();
 </script>
 
 <template>
   <div class="flex shrink-0 items-center gap-1 text-xs">
     <button
+      v-if="shows('on_top')"
       class="rounded border"
       :class="[
         appearance.compact ? 'h-[26px] w-[30px]' : 'px-2 py-0.5',
@@ -28,6 +38,7 @@ defineEmits<{ settings: [] }>();
       {{ appearance.compact ? t("window.on_top_short") : t("window.on_top") }}
     </button>
     <button
+      v-if="shows('compact')"
       class="rounded border"
       :class="[
         appearance.compact ? 'h-[26px] w-[30px]' : 'px-2 py-0.5',
@@ -41,7 +52,7 @@ defineEmits<{ settings: [] }>();
     </button>
     <!-- 精简时收起：窄窗口里它占的是值班要看的地方。退出精简就回来。 -->
     <button
-      v-if="!appearance.compact"
+      v-if="shows('settings') && !appearance.compact"
       class="rounded border px-2 py-0.5 opacity-60"
       :title="t('window.settings_tip')"
       @click="$emit('settings')"
