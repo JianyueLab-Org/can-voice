@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "../i18n";
+import StateToggle from "./StateToggle.vue";
 
 interface Radio {
   freq_khz: number;
@@ -38,12 +39,6 @@ const emit = defineEmits<{
 
 const mhz = (khz: number) => (khz / 1000).toFixed(3);
 
-/** TrackAudio 三态：关 / 开 / 正在响。静音时 RX 整颗变红。 */
-const OFF = "#436384";
-const ON = "#28a745";
-const ACTIVE = "#c7861d";
-const MUTED = "#dc3545";
-
 const overLimit = (s: "rx" | "tx" | "xc") =>
   s !== "rx" && props.transmitAllowed && props.maxTx !== null && props.overTxLimit[s];
 
@@ -55,12 +50,13 @@ function switchTitle(s: "rx" | "tx" | "xc"): string {
   return t("radio.xc_tip");
 }
 
-function fill(s: "rx" | "tx" | "xc"): string {
-  if (s === "rx" && props.radio.muted) return MUTED;
-  if (!props.radio[s]) return OFF;
-  if (s === "rx" && props.receiving) return ACTIVE;
-  if (s === "tx" && props.transmitting) return ACTIVE;
-  return ON;
+/** TrackAudio 三态：关 / 开 / 正在响。静音时 RX 整颗变红。 */
+function state(s: "rx" | "tx" | "xc"): "off" | "on" | "active" | "muted" {
+  if (s === "rx" && props.radio.muted) return "muted";
+  if (!props.radio[s]) return "off";
+  if (s === "rx" && props.receiving) return "active";
+  if (s === "tx" && props.transmitting) return "active";
+  return "on";
 }
 
 function toggle(s: "rx" | "tx" | "xc") {
@@ -82,7 +78,7 @@ const lastTalkText = () => {
   <div
     class="flex flex-col rounded border"
     :class="[
-      compact ? 'w-[200px] gap-1 p-2' : 'w-[232px] gap-1.5 p-2.5',
+      compact ? 'min-h-[116px] w-[200px] gap-1 p-2' : 'min-h-[116px] w-[232px] gap-1.5 p-2.5',
       radio.selected ? 'border-sky-500' : 'border-neutral-300',
       transmitting ? 'ring-1 ring-amber-600' : '',
     ]"
@@ -101,61 +97,57 @@ const lastTalkText = () => {
         </p>
       </div>
       <div class="flex flex-col gap-1">
-        <button
-          type="button"
-          class="h-[26px] w-[52px] rounded text-xs font-bold text-white"
-          :style="{ background: fill('rx') }"
+        <StateToggle
+          label="RX"
+          :state="state('rx')"
+          :width="52"
+          :height="26"
           :title="switchTitle('rx')"
-          @click.stop="toggle('rx')"
-        >
-          RX
-        </button>
-        <button
-          type="button"
-          class="h-[26px] w-[52px] rounded text-xs font-bold text-white"
-          :class="!transmitAllowed ? 'opacity-40' : ''"
+          @press="toggle('rx')"
+        />
+        <StateToggle
+          label="TX"
+          :state="state('tx')"
+          :width="52"
+          :height="26"
           :disabled="!transmitAllowed"
-          :style="{ background: fill('tx') }"
           :title="switchTitle('tx')"
-          @click.stop="toggle('tx')"
-        >
-          TX
-        </button>
+          @press="toggle('tx')"
+        />
       </div>
     </div>
 
     <div class="flex items-center gap-1">
-      <button
-        type="button"
-        class="h-[22px] w-9 rounded text-xs font-bold text-white"
-        :class="!transmitAllowed ? 'opacity-40' : ''"
+      <StateToggle
+        label="XC"
+        :state="state('xc')"
+        :width="36"
+        :height="22"
         :disabled="!transmitAllowed"
-        :style="{ background: fill('xc') }"
         :title="switchTitle('xc')"
-        @click.stop="toggle('xc')"
-      >
-        XC
-      </button>
-      <button
-        type="button"
-        class="h-[22px] rounded px-1.5 text-xs font-bold text-white"
-        :style="{ background: radio.muted ? MUTED : OFF }"
+        @press="toggle('xc')"
+      />
+      <StateToggle
+        :label="t('radio.mute')"
+        :state="radio.muted ? 'muted' : 'off'"
+        :width="46"
+        :height="22"
         :title="radio.muted ? t('radio.unmute_tip') : t('radio.mute_tip')"
-        @click.stop="$emit('mute', !radio.muted)"
-      >
-        {{ t("radio.mute") }}
-      </button>
+        @press="$emit('mute', !radio.muted)"
+      />
       <input
         v-if="!compact"
         type="range"
         min="0"
-        max="2"
-        step="0.05"
-        :value="radio.gain"
+        max="100"
+        step="1"
+        :value="Math.round(radio.gain * 50)"
         class="h-[18px] min-w-0 flex-1"
         :class="radio.muted ? 'opacity-40' : ''"
         @click.stop
-        @input="$emit('volume', Number(($event.target as HTMLInputElement).value))"
+        @input="
+          $emit('volume', Number(($event.target as HTMLInputElement).value) / 50)
+        "
       />
       <button
         v-if="!compact"

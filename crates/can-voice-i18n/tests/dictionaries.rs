@@ -751,6 +751,7 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
         "components/StartupGate.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
+    ("components/StateToggle.vue", &["controller"]),
     (
         "components/UpdateBanner.vue",
         &["controller", "atis", "xpc", "msfs"],
