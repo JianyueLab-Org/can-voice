@@ -24,6 +24,14 @@ watch(
     box.value?.focus();
   },
 );
+
+// 遮罩点击和底部关闭钮都先让输入框失焦，原生 blur 补一次 `change`，编辑才落盘。
+// Esc 直接销毁子树，浏览器不会为一个已经不在 DOM 里的输入框补发 `change`——
+// 所以这里要在 emit 之前手动 blur 一次，把还没提交的编辑先逼出来。
+function closeOnEscape() {
+  (document.activeElement as HTMLElement | null)?.blur();
+  emit("close");
+}
 </script>
 
 <template>
@@ -37,7 +45,7 @@ watch(
       tabindex="-1"
       class="flex max-h-full flex-col gap-4 overflow-auto rounded border bg-white p-4 text-sm outline-none"
       :class="width ?? 'w-[44rem]'"
-      @keyup.escape="emit('close')"
+      @keyup.escape="closeOnEscape"
     >
       <h2 class="font-semibold">{{ title }}</h2>
 

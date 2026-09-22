@@ -63,6 +63,25 @@ const asking = ref<"profile" | "rename" | "station" | "edit" | "preset" | null>(
 let timer: number | undefined;
 
 const station = computed(() => stations.value.find((s) => callsignOf(s) === selected.value));
+/**
+ * 对话框绑的是**这一个对象**，不是每次拿 `station` 现查。改机场或类型是直接改
+ * `station.identifier`/`atis_type`，字母还没打完 `callsignOf` 就先变了，
+ * `station` 计算属性眼下按 `selected` 查不到——`<StationDialog v-if="station">`
+ * 会连着输入光标一起卸载重建，`save()` 也会因为拿到 `undefined` 而静悄悄地不存。
+ *
+ * 这里缓存"上一次查到的那个对象"，只在查得到的时候才更新，查不到的间隙里维持
+ * 原值——原值还是同一个对象，只是暂时按呼号查不到。`save()` 已经先把 `selected`
+ * 指到新呼号，`reload()` 把 `stations` 换成新数组之后 `station` 会用新呼号重新
+ * 查到，这里的 watch 跟着自动指到新对象，不用另外写重新指向的代码。
+ */
+const editingStation = ref<Station | undefined>(undefined);
+watch(
+  station,
+  (s) => {
+    if (s) editingStation.value = s;
+  },
+  { immediate: true },
+);
 const current = computed<Live | undefined>(() => live.value[selected.value]);
 const onAir = computed(() => selected.value in live.value);
 const editedPreset = computed(() => station.value?.presets.find((p) => p.name === presetName.value));
@@ -131,7 +150,9 @@ async function guard(fn: () => Promise<unknown>) {
 
 const save = () =>
   guard(async () => {
-    const s = station.value;
+    // 用 `editingStation`，不用 `station`：改机场或类型的时候，打字打到一半
+    // `station` 会按新呼号查不到东西，直接用它会白白吞掉这次编辑。
+    const s = editingStation.value;
     if (!s) return;
     // 呼号可能因为改了机场或类型而变，所以要把**原来那个**一起送过去。
     await invoke("save_station", { callsign: selected.value, station: s });
@@ -619,9 +640,9 @@ onUnmounted(() => window.clearInterval(timer));
       />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
       <StationDialog
-        v-if="station"
+        v-if="editingStation"
         :open="asking === 'edit'"
-        :station="station"
+        :station="editingStation"
         :preset-name="presetName"
         @close="asking = null"
         @change="save"
