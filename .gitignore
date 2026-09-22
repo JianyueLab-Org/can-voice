@@ -1,5 +1,6 @@
 *.pem
 .temp/
+.DS_Store
 
 # Rust 构建产物（P3 起）。Go 那半边没有对应物，所以此前不需要这一条。
 /target/
