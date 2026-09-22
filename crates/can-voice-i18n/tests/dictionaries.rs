@@ -746,6 +746,7 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
         "components/LogPanel.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
+    ("components/Modal.vue", &["atis", "xpc"]),
     (
         "components/SettingsCommon.vue",
         &["controller", "atis", "xpc", "msfs"],
@@ -760,8 +761,8 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
         "components/StartupGate.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
-    ("components/StateToggle.vue", &["controller"]),
-    ("components/StatusBar.vue", &["controller"]),
+    ("components/StateToggle.vue", &["controller", "xpc"]),
+    ("components/StatusBar.vue", &["controller", "xpc"]),
     ("components/TrafficList.vue", &["xpc", "msfs"]),
     (
         "components/UpdateBanner.vue",
