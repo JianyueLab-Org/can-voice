@@ -507,6 +507,7 @@ async function act(name: string, args: Record<string, unknown>) {
         :status="barStatus"
         :duty="dutyText"
         :duty-on="connected && onDuty"
+        :ptt-title="t('ptt.hold_tip')"
         @down="pttDown"
         @up="pttUp"
       >

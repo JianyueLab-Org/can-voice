@@ -21,6 +21,8 @@ defineProps<{
   duty: string;
   /** 在席位上。着绿，旧版如此。 */
   dutyOn: boolean;
+  /** PTT 按钮的提示文字。各客户端自己传，因为这是共用组件。 */
+  pttTitle: string;
 }>();
 
 defineEmits<{ down: [e: PointerEvent]; up: [] }>();
@@ -30,6 +32,7 @@ defineEmits<{ down: [e: PointerEvent]; up: [] }>();
   <footer class="flex items-center gap-3 border-t pt-3 text-xs">
     <button
       class="flex shrink-0 items-center gap-2"
+      :title="pttTitle"
       @pointerdown="$emit('down', $event)"
       @pointerup="$emit('up')"
       @pointercancel="$emit('up')"
@@ -47,7 +50,13 @@ defineEmits<{ down: [e: PointerEvent]; up: [] }>();
       </span>
     </button>
     <span class="min-w-0 flex-1 truncate opacity-70">{{ status }}</span>
-    <span class="shrink-0" :class="dutyOn ? 'text-green-700' : 'opacity-70'">{{ duty }}</span>
+    <span
+      class="shrink-0"
+      :class="dutyOn ? '' : 'opacity-70'"
+      :style="dutyOn ? { color: 'var(--can-on)' } : {}"
+    >
+      {{ duty }}
+    </span>
     <slot />
   </footer>
 </template>
