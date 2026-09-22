@@ -718,7 +718,68 @@ fn every_app_declares_the_can_audio_palette() {
             .unwrap_or_else(|e| panic!("{app}: style.css: {e}"));
         for (name, value) in TOKENS {
             let decl = format!("{name}: {value}");
-            assert!(css.contains(&decl), "{app}: style.css does not declare `{decl}`");
+            assert!(
+                css.contains(&decl),
+                "{app}: style.css does not declare `{decl}`"
+            );
+        }
+    }
+}
+
+// ——— 共用的前端文件是逐字节相同的副本 ———
+
+/// 哪些前端文件是共用的，以及每个该出现在哪几个客户端里。
+///
+/// **这张表就是"共用"这件事的声明处。** 仓库里共用代码靠复制而不是抽包
+/// （见 README 里桌面端不进 workspace 那一段），所以唯一的防线是断言副本相同：
+/// 改了一个客户端而忘了其余三个，在这里失败；某个客户端多出一份没登记的同名
+/// 文件，也在这里失败。没登记的文件按定义就是那个客户端自己的。
+const SHARED_FRONTEND: &[(&str, &[&str])] = &[
+    ("appearance.ts", &["controller", "atis", "xpc", "msfs"]),
+    ("i18n.ts", &["controller", "atis", "xpc", "msfs"]),
+    ("main.ts", &["controller", "atis", "xpc", "msfs"]),
+    ("style.css", &["controller", "atis", "xpc", "msfs"]),
+    (
+        "components/LogPanel.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
+    (
+        "components/SettingsCommon.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
+    (
+        "components/StartupGate.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
+    (
+        "components/UpdateBanner.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
+    (
+        "components/WindowToggles.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
+];
+
+#[test]
+fn shared_frontend_files_are_identical_in_every_app_that_carries_them() {
+    for (file, owners) in SHARED_FRONTEND {
+        let path = |app: &str| repo().join(format!("apps/{app}/src/{file}"));
+        let first =
+            std::fs::read(path(owners[0])).unwrap_or_else(|e| panic!("{}: {file}: {e}", owners[0]));
+        for app in &owners[1..] {
+            let other = std::fs::read(path(app)).unwrap_or_else(|e| panic!("{app}: {file}: {e}"));
+            assert!(
+                other == first,
+                "apps/{app}/src/{file} differs from apps/{}'s",
+                owners[0]
+            );
+        }
+        for app in &APPS {
+            assert!(
+                owners.contains(app) || !path(app).exists(),
+                "apps/{app}/src/{file} exists but is not registered for {app} in SHARED_FRONTEND"
+            );
         }
     }
 }
