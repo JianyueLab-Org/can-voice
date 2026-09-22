@@ -4,7 +4,8 @@ import WindowToggles from "./components/WindowToggles.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
-import StationEditor from "./components/StationEditor.vue";
+import StationDialog from "./components/StationDialog.vue";
+import PresetDialog from "./components/PresetDialog.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import StartupGate from "./components/StartupGate.vue";
 import LogPanel from "./components/LogPanel.vue";
@@ -56,14 +57,16 @@ const busy = ref<"metar" | "vatis" | "online" | "network" | null>(null);
 const network = ref<NetworkPreview | null>(null);
 const vatisFile = ref<HTMLInputElement | null>(null);
 
-/** 当前打开的是哪个对话框。`null` 是没开。 */
-const asking = ref<"profile" | "rename" | "station" | null>(null);
+/** 当前打开的是哪个对话框。`null` 是没开。一次只可能开一个。 */
+const asking = ref<"profile" | "rename" | "station" | "edit" | "preset" | null>(null);
 
 let timer: number | undefined;
 
 const station = computed(() => stations.value.find((s) => callsignOf(s) === selected.value));
 const current = computed<Live | undefined>(() => live.value[selected.value]);
 const onAir = computed(() => selected.value in live.value);
+const editedPreset = computed(() => station.value?.presets.find((p) => p.name === presetName.value));
+const chineseShown = computed(() => station.value?.voice_language !== "en");
 
 /** 在播时看的是真正上线的那份，没上线时看预览。 */
 const shown = computed<Rendered | null>(() => (current.value ? current.value : preview.value));
@@ -146,6 +149,7 @@ const removeStation = () =>
   guard(async () => {
     // 抛的是 key 不是一句话：和 Rust 交回来的错误同一个形状，显示时才翻。
     if (onAir.value) throw { key: "problem.station.stop_first" satisfies Key } satisfies Message;
+    asking.value = null;
     await invoke("remove_station", { callsign: selected.value });
     selected.value = "";
   });
@@ -391,6 +395,9 @@ onUnmounted(() => window.clearInterval(timer));
           >
             {{ t("station.new") }}
           </button>
+          <button class="rounded border px-2 py-1 text-xs" :disabled="!station" @click="asking = 'edit'">
+            {{ t("station.edit") }}
+          </button>
           <details class="rounded border px-2 py-1 text-xs">
             <summary class="cursor-pointer opacity-70">{{ t("import.title") }}</summary>
             <div class="flex flex-col gap-1 pt-2">
@@ -477,117 +484,114 @@ onUnmounted(() => window.clearInterval(timer));
           </details>
         </aside>
 
-        <!-- 编辑 -->
-        <div v-if="!compact" class="flex min-w-0 flex-1 flex-col gap-3 overflow-auto">
-          <StationEditor
-            v-if="station"
-            :station="station"
-            :preset-name="presetName"
-            @change="save"
-            @pick="(n) => (presetName = n)"
-            @remove="removeStation"
-          />
-          <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
-        </div>
-
         <!-- 稿子 -->
-        <aside v-if="!compact" class="flex w-80 flex-col gap-2 overflow-auto border-l pl-4">
-          <div class="flex items-center gap-2">
-            <span class="text-xs font-semibold">{{ stateText(current) }}</span>
-            <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
-            <button
-              v-if="!onAir"
-              class="ml-auto rounded border px-3 py-1 text-xs"
-              :disabled="!station"
-              @click="start"
-            >
-              {{ t("draft.start") }}
-            </button>
-            <template v-else>
-              <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
-                   而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
-                   跑道变了就是另一份通播。 -->
-              <select
-                v-model="presetName"
-                class="ml-auto rounded border px-2 py-1 text-xs"
-                :title="t('draft.preset_tip')"
-              >
-                <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
-              </select>
+        <aside v-if="!compact" class="flex min-w-0 flex-1 flex-col gap-2 overflow-auto border-l pl-4">
+          <template v-if="station">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-semibold">{{ stateText(current) }}</span>
+              <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
               <button
                 class="rounded border px-2 py-1 text-xs"
-                :title="t('draft.bump_tip')"
-                @click="bumpLetter"
+                :disabled="!editedPreset"
+                @click="asking = 'preset'"
               >
-                {{ t("draft.bump") }}
+                {{ t("preset.edit") }}
               </button>
-              <button class="rounded border px-2 py-1 text-xs" @click="refresh">
-                {{ t("draft.refresh") }}
-              </button>
-              <button class="rounded border px-2 py-1 text-xs" @click="stop">
-                {{ t("draft.stop") }}
-              </button>
-            </template>
-          </div>
-
-          <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
-               就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
-          <p
-            v-if="problems.length"
-            class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
-          >
-            {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
-          </p>
-
-          <label class="flex flex-col gap-1">
-            <span class="flex items-center text-xs opacity-60">
-              {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
               <button
                 v-if="!onAir"
-                class="ml-auto rounded border px-2 py-0.5"
-                :disabled="!station || busy !== null"
-                :title="t('draft.fetch_metar_tip')"
-                @click.prevent="fetchMetar"
+                class="ml-auto rounded border px-3 py-1 text-xs"
+                :disabled="!station"
+                @click="start"
               >
-                {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
+                {{ t("draft.start") }}
               </button>
-            </span>
-            <textarea
-              v-if="!onAir"
-              v-model="sampleMetar"
-              rows="3"
-              class="rounded border px-2 py-1 font-mono text-xs"
-            />
-            <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-              current?.metar || t("draft.no_metar")
-            }}</pre>
-          </label>
+              <template v-else>
+                <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
+                     而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
+                     跑道变了就是另一份通播。 -->
+                <select
+                  v-model="presetName"
+                  class="ml-auto rounded border px-2 py-1 text-xs"
+                  :title="t('draft.preset_tip')"
+                >
+                  <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
+                </select>
+                <button
+                  class="rounded border px-2 py-1 text-xs"
+                  :title="t('draft.bump_tip')"
+                  @click="bumpLetter"
+                >
+                  {{ t("draft.bump") }}
+                </button>
+                <button class="rounded border px-2 py-1 text-xs" @click="refresh">
+                  {{ t("draft.refresh") }}
+                </button>
+                <button class="rounded border px-2 py-1 text-xs" @click="stop">
+                  {{ t("draft.stop") }}
+                </button>
+              </template>
+            </div>
 
-          <template v-if="shown">
-            <div>
-              <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
-              <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
-            </div>
-            <div>
-              <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
-              <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                shown.voice_en
+            <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
+                 就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
+            <p
+              v-if="problems.length"
+              class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
+            >
+              {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
+            </p>
+
+            <label class="flex flex-col gap-1">
+              <span class="flex items-center text-xs opacity-60">
+                {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
+                <button
+                  v-if="!onAir"
+                  class="ml-auto rounded border px-2 py-0.5"
+                  :disabled="!station || busy !== null"
+                  :title="t('draft.fetch_metar_tip')"
+                  @click.prevent="fetchMetar"
+                >
+                  {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
+                </button>
+              </span>
+              <textarea
+                v-if="!onAir"
+                v-model="sampleMetar"
+                rows="3"
+                class="rounded border px-2 py-1 font-mono text-xs"
+              />
+              <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
+                current?.metar || t("draft.no_metar")
               }}</pre>
-            </div>
-            <div v-if="station && station.voice_language !== 'en'">
-              <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
-              <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                shown.voice_zh
-              }}</pre>
-            </div>
-            <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
-            <details>
-              <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
-              <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-                shown.wire
-              }}</pre>
-            </details>
+            </label>
+
+            <template v-if="shown">
+              <div>
+                <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
+                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
+              </div>
+              <div>
+                <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
+                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
+                  shown.voice_en
+                }}</pre>
+              </div>
+              <div v-if="station && station.voice_language !== 'en'">
+                <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
+                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
+                  shown.voice_zh
+                }}</pre>
+              </div>
+              <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
+              <details>
+                <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
+                <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
+                  shown.wire
+                }}</pre>
+              </details>
+            </template>
           </template>
+          <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
         </aside>
       </div>
 
@@ -614,6 +618,24 @@ onUnmounted(() => window.clearInterval(timer));
         @cancel="asking = null"
       />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+      <StationDialog
+        v-if="station"
+        :open="asking === 'edit'"
+        :station="station"
+        :preset-name="presetName"
+        @close="asking = null"
+        @change="save"
+        @pick="presetName = $event"
+        @remove="removeStation"
+      />
+      <PresetDialog
+        v-if="editedPreset"
+        :open="asking === 'preset'"
+        :preset="editedPreset"
+        :chinese-shown="chineseShown"
+        @close="asking = null"
+        @change="save"
+      />
     </main>
   </StartupGate>
 </template>
