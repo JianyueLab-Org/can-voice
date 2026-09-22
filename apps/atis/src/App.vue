@@ -96,6 +96,12 @@ const onAir = computed(() => selected.value in live.value);
 const editedPreset = computed(() => station.value?.presets.find((p) => p.name === presetName.value));
 const chineseShown = computed(() => station.value?.voice_language !== "en");
 
+/** 字母行那句话。席位一定有字母，但在播那一份可能还没报上来。 */
+const letterText = computed(() => {
+  const letter = current.value?.letter ?? station.value?.letter;
+  return letter ? t("draft.letter", { letter }) : t("draft.letter_none");
+});
+
 /** 在播时看的是真正上线的那份，没上线时看预览。 */
 const shown = computed<Rendered | null>(() => (current.value ? current.value : preview.value));
 
@@ -519,11 +525,18 @@ onUnmounted(() => window.clearInterval(timer));
 
         <template #right>
           <!-- 稿子 -->
-          <aside class="flex flex-col gap-2 overflow-auto">
+          <aside class="flex min-h-0 flex-1 flex-col gap-2">
             <template v-if="station">
-              <div class="flex items-center gap-2">
-                <span class="text-xs font-semibold">{{ stateText(current) }}</span>
-                <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
+              <!-- 1. 预设行 -->
+              <div class="flex shrink-0 items-center gap-2">
+                <span class="text-xs opacity-60">{{ t("preset.label") }}</span>
+                <select
+                  v-model="presetName"
+                  class="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
+                  :title="t('draft.preset_tip')"
+                >
+                  <option v-for="p in station.presets" :key="p.name" :value="p.name">{{ p.name }}</option>
+                </select>
                 <button
                   class="rounded border px-2 py-1 text-xs"
                   :disabled="!editedPreset"
@@ -531,99 +544,89 @@ onUnmounted(() => window.clearInterval(timer));
                 >
                   {{ t("preset.edit") }}
                 </button>
-                <button
-                  v-if="!onAir"
-                  class="ml-auto rounded border px-3 py-1 text-xs"
-                  :disabled="!station"
-                  @click="start"
-                >
-                  {{ t("draft.start") }}
-                </button>
-                <template v-else>
-                  <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
-                       而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
-                       跑道变了就是另一份通播。 -->
-                  <select
-                    v-model="presetName"
-                    class="ml-auto rounded border px-2 py-1 text-xs"
-                    :title="t('draft.preset_tip')"
-                  >
-                    <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
-                  </select>
-                  <button
-                    class="rounded border px-2 py-1 text-xs"
-                    :title="t('draft.bump_tip')"
-                    @click="bumpLetter"
-                  >
-                    {{ t("draft.bump") }}
-                  </button>
-                  <button class="rounded border px-2 py-1 text-xs" @click="refresh">
-                    {{ t("draft.refresh") }}
-                  </button>
-                  <button class="rounded border px-2 py-1 text-xs" @click="stop">
-                    {{ t("draft.stop") }}
-                  </button>
-                </template>
               </div>
 
-              <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
-                   就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
-              <p
-                v-if="problems.length"
-                class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
-              >
-                {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
-              </p>
+              <!-- 2. 字母行 -->
+              <div class="flex shrink-0 items-center gap-2">
+                <span class="text-sm font-semibold">{{ letterText }}</span>
+                <span class="ml-auto"></span>
+                <button
+                  class="rounded border px-2 py-1 text-xs"
+                  :disabled="!onAir"
+                  :title="t('draft.bump_tip')"
+                  @click="bumpLetter"
+                >
+                  {{ t("draft.bump") }}
+                </button>
+                <button
+                  class="rounded border px-2 py-1 text-xs"
+                  :disabled="busy !== null"
+                  :title="onAir ? undefined : t('draft.fetch_metar_tip')"
+                  @click="onAir ? refresh() : fetchMetar()"
+                >
+                  {{ busy === "metar" ? t("busy.fetching") : onAir ? t("draft.refresh") : t("draft.fetch_metar") }}
+                </button>
+              </div>
 
-              <label class="flex flex-col gap-1">
-                <span class="flex items-center text-xs opacity-60">
-                  {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
-                  <button
-                    v-if="!onAir"
-                    class="ml-auto rounded border px-2 py-0.5"
-                    :disabled="!station || busy !== null"
-                    :title="t('draft.fetch_metar_tip')"
-                    @click.prevent="fetchMetar"
-                  >
-                    {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
-                  </button>
-                </span>
+              <!-- 3. METAR：在播看服务端那一份（只读），不在播是可以改的试算电码 -->
+              <label class="flex shrink-0 flex-col gap-1">
+                <span class="text-xs opacity-60">{{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}</span>
                 <textarea
                   v-if="!onAir"
                   v-model="sampleMetar"
-                  rows="3"
-                  class="rounded border px-2 py-1 font-mono text-xs"
+                  rows="2"
+                  class="w-full rounded border px-2 py-1 font-mono text-xs"
                 />
-                <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
+                <pre v-else class="w-full whitespace-pre-wrap rounded border px-2 py-1 font-mono text-xs">{{
                   current?.metar || t("draft.no_metar")
                 }}</pre>
               </label>
 
-              <template v-if="shown">
-                <div>
-                  <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
-                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
+              <!-- 4. 文字通播：固定 90px，can-audio 的 setFixedHeight(90) -->
+              <div class="flex shrink-0 flex-col gap-1">
+                <span class="text-xs font-semibold">{{ t("draft.text") }}</span>
+                <pre
+                  class="h-[90px] w-full overflow-auto whitespace-pre-wrap rounded border px-2 py-1 font-mono text-xs"
+                  >{{ shown?.text ?? "" }}</pre
+                >
+              </div>
+
+              <!-- 5. 语音稿：占满剩下的高度，装中英两份 -->
+              <div class="flex min-h-0 flex-1 flex-col gap-1">
+                <span class="shrink-0 text-xs font-semibold">{{ t("draft.voice") }}</span>
+                <div class="flex min-h-0 flex-1 flex-col gap-1 overflow-auto rounded border p-2">
+                  <span class="text-xs opacity-60">{{ t("draft.voice_en") }}</span>
+                  <p class="whitespace-pre-wrap text-xs">{{ shown?.voice_en ?? "" }}</p>
+                  <template v-if="chineseShown">
+                    <span class="mt-2 text-xs opacity-60">{{ t("draft.voice_zh") }}</span>
+                    <p class="whitespace-pre-wrap text-xs">{{ shown?.voice_zh ?? "" }}</p>
+                  </template>
                 </div>
-                <div>
-                  <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
-                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                    shown.voice_en
-                  }}</pre>
-                </div>
-                <div v-if="station && station.voice_language !== 'en'">
-                  <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
-                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                    shown.voice_zh
-                  }}</pre>
-                </div>
-                <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
-                <details>
-                  <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
-                  <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-                    shown.wire
-                  }}</pre>
-                </details>
-              </template>
+              </div>
+
+              <!-- 6. 播出行 -->
+              <div class="flex shrink-0 items-center gap-2">
+                <button
+                  class="rounded px-3 py-1 text-xs text-white"
+                  :style="{ background: onAir ? 'var(--can-muted)' : 'var(--can-on)' }"
+                  @click="onAir ? stop() : start()"
+                >
+                  {{ onAir ? t("draft.stop") : t("draft.start") }}
+                </button>
+                <span class="min-w-0 flex-1 truncate text-xs opacity-70">{{ stateText(current) }}</span>
+              </div>
+
+              <!-- 告警和 wire 转储：can-audio 没有，留在播出行下面 -->
+              <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
+                   就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
+              <p v-if="problems.length" class="shrink-0 text-xs" :style="{ color: 'var(--can-active)' }">
+                {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
+              </p>
+              <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
+              <details v-if="shown" class="shrink-0 text-xs">
+                <summary class="cursor-pointer opacity-60">{{ t("draft.wire") }}</summary>
+                <pre class="mt-1 whitespace-pre-wrap font-mono text-xs">{{ shown.wire }}</pre>
+              </details>
             </template>
             <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
           </aside>
