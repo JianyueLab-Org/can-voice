@@ -126,6 +126,13 @@ const attempted = ref(false);
 type Problem = { kind: "command"; error: unknown } | { kind: "frequency" };
 const error = ref<Problem | null>(null);
 
+/**
+ * 频率校验错误的序号。**同一句话连着报两次，prop 的值不变，Vue 不会重绘子组件**
+ * ——右上角那条就再也不出现了，而这一次改动把另外两个显示错误的地方都拿掉了。
+ * 递增一个计数器，让 Toast 盯着它而不是盯着那句话。
+ */
+const freqErrorSeq = ref(0);
+
 function problemText(p: Problem): string {
   switch (p.kind) {
     case "frequency":
@@ -270,6 +277,7 @@ async function addFrequency() {
   const khz = parseFreq(freqInput.value);
   if (khz === null) {
     error.value = { kind: "frequency" };
+    freqErrorSeq.value++;
     return;
   }
   error.value = null;
@@ -550,7 +558,10 @@ async function act(name: string, args: Record<string, unknown>) {
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">
         <SettingsPanel :cid="cid" />
       </SettingsDialog>
-      <Toast :message="error?.kind === 'frequency' ? problemText(error) : null" />
+      <Toast
+        :message="error?.kind === 'frequency' ? problemText(error) : null"
+        :seq="freqErrorSeq"
+      />
     </main>
   </StartupGate>
 </template>
