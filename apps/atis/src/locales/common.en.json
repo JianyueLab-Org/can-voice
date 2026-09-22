@@ -55,6 +55,7 @@
     "download": "Download",
     "skip": "Skip this version",
     "checking": "Checking for updates…",
+    "current": "No update available.",
     "downloading": "Downloading the new version…",
     "downloading_sized": "Downloading the new version… {done} / {total}",
     "installing": "Installing. It will restart itself when done…"

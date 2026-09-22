@@ -55,6 +55,7 @@
     "download": "下载",
     "skip": "跳过这一版",
     "checking": "正在检查更新…",
+    "current": "没有可用的更新。",
     "downloading": "正在下载新版本…",
     "downloading_sized": "正在下载新版本… {done} / {total}",
     "installing": "正在安装，装完会自己重启…"

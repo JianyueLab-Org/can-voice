@@ -5,6 +5,7 @@ import Panel from "./components/Panel.vue";
 import StateToggle from "./components/StateToggle.vue";
 import StatusBar from "./components/StatusBar.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import Modal from "./components/Modal.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import TrafficList from "./components/TrafficList.vue";
@@ -23,6 +24,30 @@ import { attachPttKeys } from "./pttKeys";
 const showPrefs = ref(false);
 /** 飞行计划对话框开没开。只有菜单「文件 → 飞行计划…」开它。 */
 const showPlan = ref(false);
+/** 关于对话框开没开。只有菜单「帮助 → 关于」开它。 */
+const showAbout = ref(false);
+const version = ref("");
+const logPath = ref("");
+
+/**
+ * 「帮助 → 关于」。版本号和日志路径**打开时才读**，不在 `onMounted` 里读：
+ * `onMounted` 里一条 reject 的 invoke 会把它后面的 `setInterval` 和 PTT 绑定
+ * 一起带走，界面连上之后画一帧就不动了。
+ */
+async function openAbout() {
+  try {
+    version.value = await invoke<string>("app_version");
+  } catch {
+    version.value = "";
+  }
+  try {
+    logPath.value = (await invoke<string | null>("log_file")) ?? "";
+  } catch {
+    logPath.value = "";
+  }
+  showAbout.value = true;
+}
+
 /** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
 const compact = computed(() => appearance.value.compact);
 
@@ -82,16 +107,45 @@ const rxState = computed<"off" | "on" | "active">(() =>
  * 底栏中间那句话此刻在说什么。**存的是状态不是那句话**：存一句翻好的话，
  * 切了语言之后已经显示着的那一句不会跟着变（和 `error` 同一条规矩，见 `:34-38`）。
  *
- * `"update"` 由任务 9 的「帮助 → 检查更新」置上，那一任务还会再给它加一种取值。
+ * 两种取值都由「帮助 → 检查更新」置上：`"update"` 是正在查，`"no_update"` 是查完了
+ * 什么都没有——后一种自己会在几秒后收回去。
  */
-const transient = ref<"update" | null>(null);
+const transient = ref<"update" | "no_update" | null>(null);
 
 /** 底栏那句话。can-audio 空闲时说「就绪」，有事说那件事（`xpc/gui.py:200`）。 */
 const barStatus = computed(() => {
   if (transient.value === "update") return t("update.checking");
+  if (transient.value === "no_update") return t("update.current");
   if (talking.value) return t("chat.transmitting");
   return t("status.ready");
 });
+
+/**
+ * 「帮助 → 检查更新」。`UpdateBanner` 自己在挂载时查一次，所以这里换掉它的 `key`
+ * 让它重挂一次；自己这一趟 `check_update` 用来知道「查完了」，以及查到了没有。
+ *
+ * **查不到也要回一句。** 点了跟没点一样是最糟的形态。有新版时的反馈是卡片上方
+ * 那条横幅，没有就在底栏说「没有可用的更新。」，停 4 秒回到「就绪」。
+ *
+ * **正连着的时候一定查不到**，这是 Rust 侧刻意的（一个更新框盖在台面上比晚一次
+ * 更新糟得多），所以那句话说的是「没有可用的更新」而不是「已经是最新版本」。
+ */
+const updateNonce = ref(0);
+let updateClear: number | undefined;
+async function checkUpdate() {
+  window.clearTimeout(updateClear);
+  transient.value = "update";
+  updateNonce.value += 1;
+  let found = false;
+  try {
+    found = (await invoke<unknown>("check_update")) !== null;
+  } catch {
+    // 查不动就当没有更新——Rust 侧每条错误路径本来也返回「没有更新」。
+  }
+  transient.value = found ? null : "no_update";
+  // 停一会儿就收回去：底栏那句话讲的是此刻，不是一条留着的记录。
+  if (!found) updateClear = window.setTimeout(() => (transient.value = null), 4000);
+}
 
 /**
  * 无线电那一行右边那串数字。can-audio 的 `position_label`（`xpc/gui.py:532-535`）
@@ -198,11 +252,10 @@ async function refresh() {
       showPrefs.value = true;
       break;
     case "update":
+      void checkUpdate();
+      break;
     case "about":
-      // 任务 9（窗口几何、精简模式、最后两个菜单项、文档）接上。今天故意什么
-      // 都不做：`UpdateBanner` 自己持有查到的那一版，从这里再调一次
-      // `check_update` 它也看不见，那才是"看起来接上了其实没有"；关于框
-      // 今天整个不存在。
+      void openAbout();
       break;
     default:
       break;
@@ -229,6 +282,8 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   window.clearInterval(timer);
+  // 不清的话它会朝着一个已经拆掉的组件写值。
+  window.clearTimeout(updateClear);
   detachPtt?.();
 });
 
@@ -317,7 +372,9 @@ const send = () =>
         <WindowToggles class="ml-auto" @settings="showPrefs = true" />
       </header>
 
-      <UpdateBanner v-if="!compact" />
+      <!-- `key` 是「帮助 → 检查更新」那条路：横幅自己只在挂载时查一次，换掉 `key`
+           就是让它重挂一次，再查一次。 -->
+      <UpdateBanner v-if="!compact" :key="updateNonce" />
 
       <p v-if="error !== null" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
         {{ errorText(error) }}
@@ -622,6 +679,25 @@ const send = () =>
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">
         <PilotSettings :cid="cid" :csl="view?.csl" />
       </SettingsDialog>
+
+      <!-- `about.body` 里有 `\n`。`whitespace-pre-line` 让浏览器照着换行就够了，
+           **不要 `v-html`**：那句话里插着版本号和日志文件路径，都是从程序外面来的字符串。 -->
+      <Modal
+        :open="showAbout"
+        :title="t('about.title')"
+        width="w-[28rem]"
+        @close="showAbout = false"
+      >
+        <p class="whitespace-pre-line text-xs leading-relaxed">
+          {{
+            t("about.body", {
+              name: t("app.title"),
+              version,
+              log: logPath || t("about.no_log"),
+            })
+          }}
+        </p>
+      </Modal>
     </main>
   </StartupGate>
 </template>
