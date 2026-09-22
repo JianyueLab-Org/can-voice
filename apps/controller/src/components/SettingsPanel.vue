@@ -172,7 +172,7 @@ async function remove(i: number) {
 </script>
 
 <template>
-  <section class="flex flex-col gap-4 rounded border p-3 text-xs">
+  <section class="flex flex-col gap-4 text-xs">
     <div class="flex flex-col gap-2">
       <h2 class="font-semibold">{{ t("audio.title") }}</h2>
       <label class="flex items-center gap-2">

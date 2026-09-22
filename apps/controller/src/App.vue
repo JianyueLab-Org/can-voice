@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import Toast from "./components/Toast.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
@@ -143,7 +144,6 @@ const pressed = ref(false);
 /** 屏幕按钮按着。灯要立刻亮，不能等 200ms 那一拍快照。 */
 const holding = ref(false);
 const talking = computed(() => holding.value || pressed.value);
-const showSettings = ref(false);
 
 let timer: number | undefined;
 
@@ -212,7 +212,7 @@ const loginFailed = computed(() => error.value?.kind === "command");
  *
  * 和顶栏那句 `statusText` 分开：那一句讲链路，这一句讲刚刚发生了什么。
  */
-const barStatus = computed(() => (error.value ? problemText(error.value) : t("status.ready")));
+const barStatus = computed(() => t("status.ready"));
 
 /** 右边那句话。can-audio 值守时着绿，不值守说"只收不发"。 */
 const dutyText = computed(() =>
@@ -384,28 +384,28 @@ async function act(name: string, args: Record<string, unknown>) {
       class="flex h-screen w-full flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
     >
-      <header class="flex flex-wrap items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
-          <p class="flex items-center gap-2 truncate text-xs opacity-70">
-            <span
-              class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-              :style="{ background: connected ? '#28a745' : '#dc3545' }"
-            />
-            {{ statusText }}
-          </p>
-        </div>
-        <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
+      <!-- can-audio 的顺序（controller/gui.py:536-583）：灯、链路、会话、撑开、
+           置顶、精简、设置、断开。标题不在这里——旧版主页面没有标题，它在窗口
+           装饰和登录卡片上。 -->
+      <header class="flex flex-wrap items-center gap-2">
+        <span
+          class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+          :style="{ background: connected ? 'var(--can-on)' : 'var(--can-muted)' }"
+        />
+        <p class="truncate text-xs opacity-70">{{ statusText }}</p>
+        <p class="truncate text-xs font-semibold">{{ dutyText }}</p>
         <WindowToggles class="ml-auto" @settings="showPrefs = true" />
-        <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
-        <button v-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
+        <button v-if="!compact" class="rounded border px-3 py-1 text-xs" @click="disconnect">
           {{ t("login.disconnect") }}
         </button>
       </header>
 
       <UpdateBanner v-if="!compact" />
 
-      <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
+      <p
+        v-if="error?.kind === 'command'"
+        class="rounded border border-red-400 px-3 py-2 text-xs text-red-600"
+      >
         {{ problemText(error) }}
       </p>
 
@@ -464,28 +464,30 @@ async function act(name: string, args: Record<string, unknown>) {
         </span>
       </p>
 
+      <!-- can-audio 的比例（controller/gui.py:586-617）：频率 1、呼号 2、按钮定宽。
+           设置的入口不在这一行——旧版只有一个设置对话框。 -->
       <section v-if="!compact" class="flex items-center gap-2">
         <input
           v-model="freqInput"
           :placeholder="t('freq.hint')"
-          class="w-28 rounded border px-2 py-1"
+          class="min-w-[120px] max-w-[200px] flex-1 rounded border px-2 py-1"
           @keyup.enter="addFrequency"
         />
         <input
           v-model="callsignInput"
           :placeholder="t('freq.callsign_hint')"
-          class="w-40 rounded border px-2 py-1 font-mono uppercase"
+          class="min-w-[160px] max-w-[340px] flex-[2] rounded border px-2 py-1 font-mono uppercase"
           @keyup.enter="addFrequency"
         />
-        <button class="rounded border px-3 py-1" @click="addFrequency">
+        <button
+          class="shrink-0 rounded border px-3 py-1 font-semibold text-white"
+          :style="{ background: 'var(--can-theme)' }"
+          @click="addFrequency"
+        >
           {{ t("freq.add") }}
         </button>
-        <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
-          {{ showSettings ? t("panel.close") : t("panel.open") }}
-        </button>
+        <span class="flex-1" />
       </section>
-
-      <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
 
       <section class="flex min-h-0 flex-1 flex-col">
         <div class="flex flex-1 flex-wrap content-start gap-2 overflow-auto">
@@ -545,7 +547,10 @@ async function act(name: string, args: Record<string, unknown>) {
           </span>
         </span>
       </StatusBar>
-      <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+      <SettingsDialog :open="showPrefs" @close="showPrefs = false">
+        <SettingsPanel :cid="cid" />
+      </SettingsDialog>
+      <Toast :message="error?.kind === 'frequency' ? problemText(error) : null" />
     </main>
   </StartupGate>
 </template>
