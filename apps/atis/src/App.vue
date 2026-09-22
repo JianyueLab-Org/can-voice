@@ -10,7 +10,7 @@ import StationDialog from "./components/StationDialog.vue";
 import PresetDialog from "./components/PresetDialog.vue";
 import UpdateBanner from "./components/UpdateBanner.vue";
 import StartupGate from "./components/StartupGate.vue";
-import LogPanel from "./components/LogPanel.vue";
+import AiringPanel from "./components/AiringPanel.vue";
 import NameDialog from "./components/NameDialog.vue";
 import NetworkDialog from "./components/NetworkDialog.vue";
 import type {
@@ -54,8 +54,6 @@ const sampleMetar = ref("ZSPD 251300Z 09004MPS 9999 FEW030 SCT100 25/18 Q1013 NO
 const preview = ref<Rendered | null>(null);
 /** 模板里认不出来的变量。认不出的是**照字面念出去**的，所以要说出来。 */
 const problems = ref<string[]>([]);
-const refreshSecs = ref(300);
-const rating = ref(0);
 
 /** 导入 / 取配置之后给人看的结果。和 `error` 分开：这不是出错。 */
 const notice = ref<Notice | null>(null);
@@ -210,15 +208,6 @@ const switchPreset = (name: string) =>
 /** 手动推进一格字母。播错了、或者报文没变但场面条件变了，都靠它。 */
 const bumpLetter = () => guard(() => invoke("advance_letter", { callsign: selected.value }));
 
-/** 夹过的那个数要回填：填 5 之后界面上该看到 60。 */
-async function applyRefresh() {
-  refreshSecs.value = await invoke<number>("set_metar_refresh", {
-    secs: Math.round(refreshSecs.value),
-  });
-}
-
-const applyRating = () => invoke("set_rating", { rating: rating.value });
-
 const addProfile = (name: string) =>
   guard(async () => {
     asking.value = null;
@@ -318,10 +307,8 @@ watch(presetName, (name, was) => {
 
 // 上次用的 CAN 号预填。密码不存：它换的是一张短寿命的票。
 async function loadSettings() {
-  const s = await invoke<{ cid: string; metar_refresh_secs: number; rating: number }>("settings");
+  const s = await invoke<{ cid: string }>("settings");
   cid.value = s.cid;
-  refreshSecs.value = s.metar_refresh_secs;
-  rating.value = s.rating;
 }
 
 onMounted(async () => {
@@ -340,9 +327,8 @@ onUnmounted(() => window.clearInterval(timer));
       class="mx-auto flex h-screen max-w-6xl flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
     >
-      <header class="flex items-center gap-3">
+      <header class="flex shrink-0 items-center gap-2">
         <template v-if="!compact">
-          <h1 class="text-base font-semibold">{{ t("app.title") }}</h1>
           <select
             :value="profiles.active"
             class="rounded border px-2 py-1 text-xs"
@@ -367,22 +353,21 @@ onUnmounted(() => window.clearInterval(timer));
           >
             {{ t("profile.remove") }}
           </button>
-          <div class="ml-auto flex items-center gap-2">
-            <input
-              v-model="cid"
-              :placeholder="t('login.cid')"
-              class="w-24 rounded border px-2 py-1 text-xs"
-            />
-            <input
-              v-model="password"
-              type="password"
-              :placeholder="t('login.password')"
-              class="w-28 rounded border px-2 py-1 text-xs"
-            />
-          </div>
+          <span class="ml-auto text-xs opacity-60">{{ t("login.account") }}</span>
+          <input
+            v-model="cid"
+            :placeholder="t('login.cid')"
+            class="w-[110px] rounded border px-2 py-1 text-xs"
+          />
+          <input
+            v-model="password"
+            type="password"
+            :placeholder="t('login.password')"
+            class="w-[160px] rounded border px-2 py-1 text-xs"
+          />
         </template>
-        <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
-        <WindowToggles class="ml-auto" @settings="showPrefs = true" />
+        <!-- 精简时也在：藏掉的话精简之后就切不回来了。此处只剩设置——置顶和精简在左栏标题行。 -->
+        <WindowToggles class="ml-auto" :only="['settings']" @settings="showPrefs = true" />
       </header>
 
       <UpdateBanner v-if="!compact" />
@@ -472,54 +457,6 @@ onUnmounted(() => window.clearInterval(timer));
                 @change="importVatis"
               />
             </div>
-
-            <!-- 折叠着：平时不占地方。 -->
-            <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
-              <summary class="cursor-pointer opacity-70">{{ t("airing.title") }}</summary>
-              <div class="flex flex-col gap-2 pt-2">
-                <label class="flex items-center gap-2">
-                  <span class="opacity-60">{{ t("airing.refresh") }}</span>
-                  <input
-                    v-model.number="refreshSecs"
-                    type="number"
-                    min="60"
-                    max="3600"
-                    class="w-20 rounded border px-1 py-0.5"
-                    @change="applyRefresh"
-                  />
-                  <span class="opacity-60">{{ t("airing.seconds") }}</span>
-                </label>
-                <label class="flex items-center gap-2">
-                  <span class="opacity-60">{{ t("airing.rating") }}</span>
-                  <select
-                    v-model.number="rating"
-                    class="flex-1 rounded border px-1 py-0.5"
-                    @change="applyRating"
-                  >
-                    <!-- 自动是默认：写死观察员的话，一个 C1 开的通播在雷达图上
-                         显示成观察员，而管制席位上的同一个人是 C1。 -->
-                    <option :value="0">{{ t("airing.rating_auto") }}</option>
-                    <option :value="1">OBS</option>
-                    <option :value="2">S1</option>
-                    <option :value="3">S2</option>
-                    <option :value="4">S3</option>
-                    <option :value="5">C1</option>
-                    <option :value="7">C3</option>
-                    <option :value="8">I1</option>
-                    <option :value="10">I3</option>
-                    <option :value="11">SUP</option>
-                  </select>
-                </label>
-                <p class="opacity-50">{{ t("airing.rating_note") }}</p>
-              </div>
-            </details>
-
-            <details v-if="!compact" class="rounded border px-2 py-1 text-xs">
-              <summary class="cursor-pointer opacity-70">{{ t("log.title") }}</summary>
-              <div class="pt-2">
-                <LogPanel :cid="cid" />
-              </div>
-            </details>
           </div>
         </template>
 
@@ -655,7 +592,9 @@ onUnmounted(() => window.clearInterval(timer));
         @confirm="addStation"
         @cancel="asking = null"
       />
-      <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+      <SettingsDialog :open="showPrefs" @close="showPrefs = false">
+        <AiringPanel :cid="cid" />
+      </SettingsDialog>
       <StationDialog
         v-if="editingStation"
         :open="asking === 'edit'"
