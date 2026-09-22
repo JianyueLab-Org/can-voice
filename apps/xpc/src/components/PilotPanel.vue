@@ -6,11 +6,9 @@ import InstallWizard from "./InstallWizard.vue";
 import { t } from "../i18n";
 
 /// `cid` 是已经存下来的 CAN 号，寄日志时预填，省得再打一遍；
-/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来；
-/// `observer` 是观察员模式开着没有——观察员不上 FSD，拍发不了计划。
-const props = defineProps<{ cid?: string; csl?: CslView; observer?: boolean }>();
-import type { CslView, FlightPlan, Settings } from "../types";
-import { emptyFlightPlan } from "../types";
+/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来。
+const props = defineProps<{ cid?: string; csl?: CslView }>();
+import type { CslView, Settings } from "../types";
 
 interface BindingView {
   token: string;
@@ -18,13 +16,6 @@ interface BindingView {
   binding: unknown;
 }
 
-const tab = ref<"plan" | "settings">("plan");
-const plan = ref<FlightPlan>(emptyFlightPlan());
-/**
- * 上一次拍发的结果，`null` = 还没拍发过。**存的是哪一种结果不是那句话**：
- * 存成句子的话，切了语言那一行还停在旧语言上。
- */
-const filed = ref<"filed" | "offline" | null>(null);
 interface DeviceInfo {
   id: string;
   name: string;
@@ -70,7 +61,6 @@ onMounted(async () => {
   speaker.value = s.speaker_volume ?? 100;
   range.value = s.traffic_range_nm;
   cslDir.value = s.csl_dir;
-  plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
   await dropGoneDevices();
   deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
@@ -79,12 +69,6 @@ onUnmounted(() => {
   window.clearInterval(captureTimer);
   window.clearInterval(deviceTimer);
 });
-
-async function file() {
-  filed.value = (await invoke<boolean>("file_flight_plan", { plan: plan.value }))
-    ? "filed"
-    : "offline";
-}
 
 const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
@@ -205,68 +189,7 @@ async function remove(i: number) {
 
 <template>
   <section class="flex flex-col gap-3 rounded border p-3 text-xs">
-    <div class="flex gap-2">
-      <button class="rounded border px-2 py-1" :class="tab === 'plan' ? 'border-sky-500' : ''" @click="tab = 'plan'">
-        {{ t("plan.tab") }}
-      </button>
-      <button class="rounded border px-2 py-1" :class="tab === 'settings' ? 'border-sky-500' : ''" @click="tab = 'settings'">
-        {{ t("local.tab") }}
-      </button>
-    </div>
-
-    <div v-if="tab === 'plan'" class="grid grid-cols-4 gap-2">
-      <label class="flex flex-col gap-1">
-        <span class="opacity-60">{{ t("plan.rules") }}</span>
-        <select v-model="plan.rules" class="rounded border px-2 py-1">
-          <option value="I">{{ t("plan.rules_i") }}</option>
-          <option value="V">{{ t("plan.rules_v") }}</option>
-          <option value="Y">{{ t("plan.rules_y") }}</option>
-          <option value="Z">{{ t("plan.rules_z") }}</option>
-        </select>
-      </label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.aircraft") }}</span>
-        <input v-model="plan.aircraft" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_speed") }}</span>
-        <input v-model="plan.cruise_speed" placeholder="N0450" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_altitude") }}</span>
-        <input v-model="plan.cruise_altitude" placeholder="F350" class="rounded border px-2 py-1" /></label>
-
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure") }}</span>
-        <input v-model="plan.departure" placeholder="ZSPD" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.arrival") }}</span>
-        <input v-model="plan.arrival" placeholder="ZBAA" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.alternate") }}</span>
-        <input v-model="plan.alternate" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure_time") }}</span>
-        <input v-model="plan.departure_time" placeholder="1230" class="rounded border px-2 py-1" /></label>
-
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_hours") }}</span>
-        <input v-model="plan.enroute_hours" placeholder="02" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_minutes") }}</span>
-        <input v-model="plan.enroute_minutes" placeholder="15" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_hours") }}</span>
-        <input v-model="plan.fuel_hours" placeholder="04" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_minutes") }}</span>
-        <input v-model="plan.fuel_minutes" placeholder="00" class="rounded border px-2 py-1" /></label>
-
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.route") }}</span>
-        <input v-model="plan.route" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.remarks") }}</span>
-        <input v-model="plan.remarks" class="rounded border px-2 py-1" /></label>
-
-      <div class="col-span-4 flex items-center gap-2">
-        <!-- 观察员没有 FSD 连接，计划由机长那一端拍发。 -->
-        <button class="rounded border px-3 py-1" :disabled="props.observer" @click="file">
-          {{ t("plan.file") }}
-        </button>
-        <span v-if="props.observer" class="opacity-70">{{ t("plan.observer") }}</span>
-        <span v-else-if="filed" class="opacity-70">
-          {{ filed === "filed" ? t("plan.filed") : t("plan.offline") }}
-        </span>
-      </div>
-    </div>
-
-    <div v-else class="flex flex-col gap-3">
+    <div class="flex flex-col gap-3">
       <label class="flex items-center gap-2">
         <input v-model="inject" type="checkbox" @change="applyInject" />
         <span>{{ t("local.inject") }}</span>

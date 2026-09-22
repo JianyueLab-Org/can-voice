@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
@@ -10,13 +10,16 @@ import StartupGate from "./components/StartupGate.vue";
 import ChatLog from "./components/ChatLog.vue";
 import ControllerList from "./components/ControllerList.vue";
 import PilotPanel from "./components/PilotPanel.vue";
+import FlightPlanDialog from "./components/FlightPlanDialog.vue";
 import type { View } from "./types";
 import { mhz, khzText, xpdrText, voiceText, linkText, noticeText } from "./types";
-import { errorText, t } from "./i18n";
+import { errorText, language, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
 
 /** 设置对话框开没开。 */
 const showPrefs = ref(false);
+/** 飞行计划对话框开没开。只有菜单「文件 → 飞行计划…」开它。 */
+const showPlan = ref(false);
 /** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
 const compact = computed(() => appearance.value.compact);
 
@@ -80,9 +83,61 @@ function pttUp() {
   void invoke("set_transmitting", { on: false });
 }
 
+/**
+ * 把菜单上的八个字交给 Rust，整条菜单重建。
+ *
+ * **字典在这一侧**，Rust 一句文案都不持有（`can_voice_i18n` 的模块注释写明了
+ * 为什么：Rust 侧拼好一句中文交出去，切到英文之后那一句还是中文）。所以挂载时
+ * 一次、之后每次 `language` 变一次，菜单跟着语言当场换。
+ *
+ * **参数名是驼峰**：`flightPlan` / `openLog`。tauri 把命令参数按驼峰交给 serde，
+ * 写成下划线收不到，而报错长得像"前端漏传了一个字段"。
+ */
+async function pushMenu() {
+  try {
+    await invoke("set_menu", {
+      labels: {
+        file: t("menu.file"),
+        flightPlan: t("menu.flight_plan"),
+        settings: t("menu.settings"),
+        quit: t("menu.quit"),
+        help: t("menu.help"),
+        openLog: t("menu.open_log"),
+        update: t("menu.update"),
+        about: t("menu.about"),
+      },
+    });
+  } catch (e) {
+    error.value = e;
+  }
+}
+
+// `{ immediate: true }` 这一下就是"挂载时那一次"：setup 跑完紧接着就挂载，而
+// `invoke` 不要求组件已经挂上。不写 immediate 的话，不切语言就永远没有菜单。
+watch(language, () => void pushMenu(), { immediate: true });
+
 async function refresh() {
   view.value = await invoke<View>("view");
   pressed.value = await invoke<boolean>("ptt_pressed");
+  // 菜单那一项是**取走就没了**：上面这一次 `view` 已经把它从 Rust 侧清掉，
+  // 这一拍不处理就没有下一拍。
+  switch (view.value.menu) {
+    case "flight_plan":
+      showPlan.value = true;
+      break;
+    case "settings":
+      showPrefs.value = true;
+      break;
+    case "update":
+    case "about":
+      // 任务 9（窗口几何、精简模式、最后两个菜单项、文档）接上。今天故意什么
+      // 都不做：`UpdateBanner` 自己持有查到的那一版，从这里再调一次
+      // `check_update` 它也看不见，那才是"看起来接上了其实没有"；关于框
+      // 今天整个不存在。
+      break;
+    default:
+      break;
+  }
 }
 
 let detachPtt: (() => void) | undefined;
@@ -371,7 +426,7 @@ const send = () =>
         </div>
       </section>
 
-      <PilotPanel v-if="!compact" :cid="cid" :csl="view?.csl" :observer="observer" />
+      <PilotPanel v-if="!compact" :cid="cid" :csl="view?.csl" />
 
       <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
            飞行员看不见，而他会以为对方没理他。 -->
@@ -438,6 +493,7 @@ const send = () =>
           {{ t("chat.send") }}
         </button>
       </footer>
+      <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
     </main>
   </StartupGate>
