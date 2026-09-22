@@ -6,8 +6,9 @@ import { t } from "../i18n";
 /**
  * 设置对话框的外壳（#45）。
  *
- * **这个文件每个客户端一份，不再共用**：共有的三段在 SettingsCommon 里，
- * 各客户端自己那几段直接写在这里。
+ * 共有的三段在 SettingsCommon 里；各客户端自己那几段从 `<slot />` 进来，所以
+ * **四份至今逐字节相同**，也就登记在 `SHARED_FRONTEND` 上——改了一份忘了其余三份，
+ * CI 会失败。真到某个计划把它们改得不一样了，那时候再把那一行从清单上删掉。
  */
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();

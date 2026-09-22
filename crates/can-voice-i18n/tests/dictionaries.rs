@@ -738,7 +738,10 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
     ("appearance.ts", &["controller", "atis", "xpc", "msfs"]),
     ("i18n.ts", &["controller", "atis", "xpc", "msfs"]),
     ("main.ts", &["controller", "atis", "xpc", "msfs"]),
+    ("pttKeys.ts", &["controller", "xpc", "msfs"]),
     ("style.css", &["controller", "atis", "xpc", "msfs"]),
+    ("components/ChatLog.vue", &["xpc", "msfs"]),
+    ("components/ControllerList.vue", &["xpc", "msfs"]),
     (
         "components/LogPanel.vue",
         &["controller", "atis", "xpc", "msfs"],
@@ -747,12 +750,19 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
         "components/SettingsCommon.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
+    // 四份逐字节相同。各客户端自己那几段走 `<slot />`，所以"每个客户端一份"
+    // 和"四份一样"并不矛盾——真到某个计划把它们改得不一样了，那时候把这一行删掉。
+    (
+        "components/SettingsDialog.vue",
+        &["controller", "atis", "xpc", "msfs"],
+    ),
     (
         "components/StartupGate.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
     ("components/StateToggle.vue", &["controller"]),
     ("components/StatusBar.vue", &["controller"]),
+    ("components/TrafficList.vue", &["xpc", "msfs"]),
     (
         "components/UpdateBanner.vue",
         &["controller", "atis", "xpc", "msfs"],
