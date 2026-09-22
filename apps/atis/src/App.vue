@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
 import Splitter from "./components/Splitter.vue";
+import StationList from "./components/StationList.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
@@ -399,71 +400,72 @@ onUnmounted(() => window.clearInterval(timer));
 
       <Splitter v-model:width="paneWidth" :collapsed="compact">
         <template #left>
-          <!-- 席位列表 -->
-          <!-- 精简时只留席位列表：在播的哪几个、各自是哪个字母，就是值班时要盯的。 -->
-          <aside class="flex flex-col gap-1 overflow-auto">
-            <button
-              v-for="s in stations"
-              :key="callsignOf(s)"
-              class="flex items-center gap-2 rounded border px-2 py-1 text-left font-mono text-xs"
-              :class="callsignOf(s) === selected ? 'border-sky-500' : ''"
-              @click="selected = callsignOf(s)"
-            >
-              <span
-                class="h-2 w-2 shrink-0 rounded-full"
-                :class="live[callsignOf(s)]?.state === 'Online' ? 'bg-green-500' : 'bg-neutral-300'"
-              />
-              <span class="truncate">{{ callsignOf(s) }}</span>
-              <span v-if="live[callsignOf(s)]" class="ml-auto opacity-60">
-                {{ live[callsignOf(s)].letter }}
-              </span>
-            </button>
-            <button
-              v-if="!compact"
-              class="rounded border border-dashed px-2 py-1 text-xs"
-              @click="asking = 'station'"
-            >
-              {{ t("station.new") }}
-            </button>
-            <button class="rounded border px-2 py-1 text-xs" :disabled="!station" @click="asking = 'edit'">
-              {{ t("station.edit") }}
-            </button>
-            <details class="rounded border px-2 py-1 text-xs">
-              <summary class="cursor-pointer opacity-70">{{ t("import.title") }}</summary>
-              <div class="flex flex-col gap-1 pt-2">
-                <!-- 配置本身：席位、频率、构型预设、模板、中文用词。先看差异再并。 -->
-                <button
-                  class="rounded border px-2 py-1 text-left"
-                  :disabled="busy !== null"
-                  @click="checkNetwork"
-                >
-                  {{ busy === "network" ? t("busy.fetching") : t("import.network") }}
+          <div class="flex min-h-0 flex-1 flex-col gap-2">
+            <header class="flex shrink-0 items-center gap-2">
+              <h2 class="text-sm font-semibold">{{ t("station.list_title") }}</h2>
+              <WindowToggles class="ml-auto" :only="['on_top', 'compact']" />
+            </header>
+
+            <StationList
+              :stations="stations"
+              :live="live"
+              :selected="selected"
+              @pick="selected = $event"
+            />
+
+            <!-- 钉成固定高度：不钉的话它会和席位列表抢纵向空间，窗口一矮列表就没了
+                 （can-audio 的 `setSizePolicy(Preferred, Fixed)`，`atis/gui.py:368`）。 -->
+            <div v-if="!compact" class="flex shrink-0 flex-col gap-1">
+              <div class="flex gap-1">
+                <button class="flex-1 rounded border px-2 py-1 text-xs" @click="asking = 'station'">
+                  {{ t("station.new") }}
                 </button>
                 <button
-                  class="rounded border px-2 py-1 text-left"
-                  :disabled="busy !== null"
-                  @click="vatisFile?.click()"
+                  class="flex-1 rounded border px-2 py-1 text-xs"
+                  :disabled="!station"
+                  @click="asking = 'edit'"
                 >
-                  {{ busy === "vatis" ? t("busy.importing") : t("import.vatis") }}
+                  {{ t("station.edit") }}
                 </button>
-                <input
-                  ref="vatisFile"
-                  type="file"
-                  accept=".json,application/json"
-                  class="hidden"
-                  @change="importVatis"
-                />
-                <!-- 运行状态，不是配置：只省掉查机场和频率这一步。 -->
                 <button
-                  class="rounded border px-2 py-1 text-left"
-                  :disabled="busy !== null"
-                  :title="t('import.online_tip')"
-                  @click="importOnline"
+                  class="flex-1 rounded border px-2 py-1 text-xs"
+                  :disabled="!station"
+                  @click="removeStation"
                 >
-                  {{ busy === "online" ? t("busy.fetching") : t("import.online") }}
+                  {{ t("station.delete") }}
                 </button>
               </div>
-            </details>
+              <button
+                class="rounded border px-2 py-1 text-left text-xs"
+                :disabled="busy !== null"
+                :title="t('import.network_tip')"
+                @click="checkNetwork"
+              >
+                {{ busy === "network" ? t("busy.fetching") : t("import.network") }}
+              </button>
+              <button
+                class="rounded border px-2 py-1 text-left text-xs"
+                :disabled="busy !== null"
+                :title="t('import.online_tip')"
+                @click="importOnline"
+              >
+                {{ busy === "online" ? t("busy.fetching") : t("import.online") }}
+              </button>
+              <button
+                class="rounded border px-2 py-1 text-left text-xs"
+                :disabled="busy !== null"
+                @click="vatisFile?.click()"
+              >
+                {{ busy === "vatis" ? t("busy.importing") : t("import.vatis") }}
+              </button>
+              <input
+                ref="vatisFile"
+                type="file"
+                accept=".json,application/json"
+                class="hidden"
+                @change="importVatis"
+              />
+            </div>
 
             <!-- 折叠着：平时不占地方。 -->
             <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
@@ -512,7 +514,7 @@ onUnmounted(() => window.clearInterval(timer));
                 <LogPanel :cid="cid" />
               </div>
             </details>
-          </aside>
+          </div>
         </template>
 
         <template #right>

@@ -29,6 +29,7 @@
     "rename_title": "改配置的名字"
   },
   "station": {
+    "list_title": "通播席位",
     "new": "新建",
     "new_title": "新席位",
     "new_placeholder": "机场四字码，例如 ZSPD",

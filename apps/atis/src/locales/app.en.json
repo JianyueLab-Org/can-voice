@@ -29,6 +29,7 @@
     "rename_title": "Rename the profile"
   },
   "station": {
+    "list_title": "ATIS Positions",
     "new": "New",
     "new_title": "New station",
     "new_placeholder": "Four-letter airport code, e.g. ZSPD",
