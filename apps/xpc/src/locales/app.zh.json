@@ -5,15 +5,41 @@
     "offline": "还没上线",
     "not_xplane": "这个目录不像 X-Plane 装的地方（里面没有 Resources/plugins）",
     "plugin_dir": "建不了 {path}：{detail}",
-    "plugin_write": "写不进 {path}：{detail}"
+    "plugin_write": "写不进 {path}：{detail}",
+    "menu": "菜单建不起来：{detail}"
   },
   "app": {
     "title": "X-Plane 飞行客户端"
   },
+  "menu": {
+    "file": "文件",
+    "flight_plan": "飞行计划…",
+    "settings": "设置…",
+    "quit": "退出",
+    "help": "帮助",
+    "open_log": "打开日志目录",
+    "update": "检查更新",
+    "about": "关于"
+  },
+  "connect": { "title": "连接" },
+  "messages": { "title": "消息" },
+  "controllers": { "hint": "双击一个席位，把它填进收件人。" },
+  "radio": {
+    "title": "无线电",
+    "com1": "COM1  {frequency}",
+    "com1_none": "COM1  ---.---",
+    "traffic": "他机 {count}"
+  },
+  "about": {
+    "title": "关于",
+    "body": "{name} {version}\n\nCerulean Aviation Network 的 X-Plane 飞行员客户端。\n语音走 Mumble，网络走 FSD，飞行数据从 X-Plane 的 UDP 取。\n\n日志：{log}",
+    "no_log": "（未写入文件）"
+  },
   "status": {
     "plugin": "插件",
     "observing": "观察员（不上网络）",
-    "no_mouse_ptt": "本系统不支持鼠标侧键作 PTT"
+    "no_mouse_ptt": "本系统不支持鼠标侧键作 PTT",
+    "ready": "就绪"
   },
   "fsd": {
     "connecting": "FSD 连接中…",

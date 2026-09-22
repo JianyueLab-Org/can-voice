@@ -5,15 +5,41 @@
     "offline": "Not connected yet",
     "not_xplane": "This directory does not look like an X-Plane installation (it has no Resources/plugins)",
     "plugin_dir": "Could not create {path}: {detail}",
-    "plugin_write": "Could not write {path}: {detail}"
+    "plugin_write": "Could not write {path}: {detail}",
+    "menu": "Could not build the menu: {detail}"
   },
   "app": {
     "title": "X-Plane Pilot Client"
   },
+  "menu": {
+    "file": "File",
+    "flight_plan": "Flight plan…",
+    "settings": "Settings…",
+    "quit": "Quit",
+    "help": "Help",
+    "open_log": "Open the log folder",
+    "update": "Check for updates",
+    "about": "About"
+  },
+  "connect": { "title": "Connection" },
+  "messages": { "title": "Messages" },
+  "controllers": { "hint": "Double-click a position to put it in the recipient box." },
+  "radio": {
+    "title": "Radio",
+    "com1": "COM1  {frequency}",
+    "com1_none": "COM1  ---.---",
+    "traffic": "Traffic {count}"
+  },
+  "about": {
+    "title": "About",
+    "body": "{name} {version}\n\nThe X-Plane pilot client for the Cerulean Aviation Network.\nVoice over Mumble, network over FSD, flight data over X-Plane's UDP link.\n\nLog: {log}",
+    "no_log": "(not written to a file)"
+  },
   "status": {
     "plugin": "Plugin",
     "observing": "Observer (not on the network)",
-    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system"
+    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system",
+    "ready": "Ready"
   },
   "fsd": {
     "connecting": "FSD connecting…",
