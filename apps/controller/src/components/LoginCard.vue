@@ -46,8 +46,13 @@ function submit() {
 </script>
 
 <template>
-  <div class="flex h-full flex-col items-center justify-center gap-2">
-    <div class="flex w-[340px] flex-col gap-3 rounded-lg border px-6 py-5">
+  <!-- `flex-1 min-h-0`，不是 `h-full`：顶上还有一排窗口开关和更新横幅，
+       写死 100% 高的话这张卡会把它们顶出窗口。 -->
+  <div class="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-auto">
+    <!-- `max-w-full`：窗口可以比这张卡窄——存着的精简模式在启动时就应用上去了
+         （`src-tauri/src/lib.rs` 的 setup），于是登录页会出现在一个 248px 的窗口里，
+         固定 340px 会横向溢出到看不见按钮。 -->
+    <div class="flex w-[340px] max-w-full flex-col gap-3 rounded-lg border px-6 py-5">
       <h1 class="text-center text-base font-semibold">{{ t("app.title") }}</h1>
       <input
         v-model="cid"

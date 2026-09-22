@@ -6,6 +6,7 @@
     "connected": "Connected",
     "connecting": "Connecting…",
     "reconnecting": "Reconnecting…",
+    "session": "Session {cid}",
     "evicted": "This account signed in elsewhere; voice disconnected"
   },
   "ended": {
@@ -37,10 +38,6 @@
     "on": "Staffing {callsign}",
     "observer": "Not staffing · RX only",
     "staffing": "Staffing {callsign}"
-  },
-  "panel": {
-    "open": "Audio & PTT",
-    "close": "Hide"
   },
   "online": {
     "title": "Online controllers",
