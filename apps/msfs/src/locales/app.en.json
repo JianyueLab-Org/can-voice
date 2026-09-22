@@ -140,7 +140,6 @@
     "audio": "Audio",
     "network": "Network",
     "traffic": "Traffic",
-    "tab": "Local setup",
     "inject": "Inject traffic into the simulator",
     "inject_note": "When off, you have the sky to yourself; voice is unaffected",
     "microphone": "Microphone",
