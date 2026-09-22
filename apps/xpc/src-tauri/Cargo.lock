@@ -5963,7 +5963,7 @@ dependencies = [
 
 [[package]]
 name = "xpc-for-can"
-version = "27.0.3"
+version = "27.0.4"
 dependencies = [
  "can-voice-app",
  "can-voice-autoupdate",

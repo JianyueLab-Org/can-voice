@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "atis-for-can"
-version = "27.0.3"
+version = "27.0.4"
 dependencies = [
  "can-voice-atis",
  "can-voice-autoupdate",
