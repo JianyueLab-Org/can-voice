@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
+import Panel from "./components/Panel.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
@@ -243,41 +244,7 @@ const send = () =>
       class="mx-auto flex h-screen max-w-5xl flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
     >
-      <header class="flex flex-wrap items-center gap-3">
-        <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
-        <!-- 模拟器连没连上要一眼看得见：没连上时下面所有数字都是空的，
-             而"空的"和"零"在座舱里是两件事。 -->
-        <span
-          class="flex items-center gap-1 rounded border px-2 py-0.5 text-xs"
-          :class="view?.sim_connected ? 'border-green-500' : 'border-neutral-300 opacity-60'"
-        >
-          <span
-            class="h-2 w-2 rounded-full"
-            :class="view?.sim_connected ? 'bg-green-500' : 'bg-neutral-300'"
-          />
-          X-Plane
-        </span>
-        <!-- 插件是另一件事。X-Plane 那盏灯只代表 UDP 数据源：没装插件的人
-             连得上、说得了话，而天上一架飞机都没有。 -->
-        <span
-          class="flex items-center gap-1 rounded border px-2 py-0.5 text-xs"
-          :class="view?.plugin ? 'border-green-500' : 'border-neutral-300 opacity-60'"
-        >
-          <span
-            class="h-2 w-2 rounded-full"
-            :class="view?.plugin ? 'bg-green-500' : 'bg-neutral-300'"
-          />
-          {{ t("status.plugin") }}
-          <span v-if="view?.plugin" class="opacity-60">{{ view.plugin.drawn }}</span>
-        </span>
-        <span v-if="observing" class="text-xs opacity-70">{{ t("status.observing") }}</span>
-        <span v-else-if="online" class="text-xs opacity-70">{{ linkText(view?.link) }}</span>
-        <!-- 语音是另一条链路。不显示的话，被顶号或者声卡打不开时飞行员戴着耳机
-             等人回话，而两边都不知道他听不见。 -->
-        <span class="text-xs opacity-70">· {{ voiceText(view?.voice) }}</span>
-        <span v-if="!mouseSupported && !compact" class="text-xs opacity-60">
-          {{ t("status.no_mouse_ptt") }}
-        </span>
+      <header class="flex items-center gap-2">
         <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
         <WindowToggles class="ml-auto" @settings="showPrefs = true" />
       </header>
@@ -300,6 +267,17 @@ const send = () =>
         {{ noticeText(n) }}
       </p>
 
+      <!-- 插件是另一件事。X-Plane 那盏灯只代表 UDP 数据源：没装插件的人
+           连得上、说得了话，而天上一架飞机都没有。 -->
+      <p class="flex items-center gap-1 text-xs opacity-70">
+        <span
+          class="h-2 w-2 shrink-0 rounded-full"
+          :style="{ background: view?.plugin ? 'var(--can-on)' : 'var(--can-idle)' }"
+        />
+        {{ t("status.plugin") }}
+        <span v-if="view?.plugin" class="opacity-60">{{ view.plugin.drawn }}</span>
+      </p>
+
       <!-- 观察员不上 FSD，天上本来就不会有他机：插件装没装和他无关，别拿这两条吓他。 -->
       <p
         v-if="!observer && view?.plugin && !view.plugin.version_ok"
@@ -314,67 +292,115 @@ const send = () =>
         {{ t("plugin.not_heard") }}
       </p>
 
-      <section v-if="!online" class="grid grid-cols-5 gap-2">
-        <!-- 右座用。两个人要用各自的账号：同一个成员号第二次登录会把第一条顶掉。 -->
-        <label class="col-span-5 flex flex-wrap items-center gap-2 text-xs">
-          <input v-model="observer" type="checkbox" @change="toggleObserver" />
-          {{ t("login.observer_mode") }}
-          <span class="opacity-60">{{ t("login.observer_note") }}</span>
-        </label>
-        <input v-model="cid" :placeholder="t('login.cid')" class="rounded border px-2 py-1 text-xs" />
-        <input
-          v-model="password"
-          type="password"
-          :placeholder="t('login.password')"
-          class="rounded border px-2 py-1 text-xs"
-        />
-        <!-- 观察员填的是机长的呼号：语音服务端按那架飞机的位置给他算距离。 -->
-        <input
-          v-if="observer"
-          v-model="follow"
-          :placeholder="t('login.follow')"
-          :title="t('login.follow_tip')"
-          class="rounded border px-2 py-1 font-mono text-xs uppercase"
-        />
-        <input
-          v-else
-          v-model="callsign"
-          :placeholder="t('login.callsign')"
-          class="rounded border px-2 py-1 font-mono text-xs uppercase"
-        />
-        <input
-          v-model="aircraft"
-          :disabled="observer"
-          :placeholder="t('login.aircraft')"
-          class="rounded border px-2 py-1 text-xs"
-        />
-        <input
-          v-model="realName"
-          :disabled="observer"
-          :placeholder="t('login.real_name')"
-          class="rounded border px-2 py-1 text-xs"
-        />
-        <button
-          :disabled="busy"
-          class="col-span-5 rounded border px-3 py-1 text-xs"
-          @click="connect"
-        >
-          {{ t("login.connect") }}
-        </button>
-      </section>
+      <p v-if="!mouseSupported && !compact" class="rounded border px-3 py-2 text-xs opacity-60">
+        {{ t("status.no_mouse_ptt") }}
+      </p>
 
-      <section v-else class="flex items-center gap-2">
-        <!-- 识别是 FSD 的事，观察员没有那条连接。 -->
-        <button v-if="!observing" class="rounded border px-3 py-1 text-xs" @click="ident">
-          {{ t("session.ident") }}
-        </button>
-        <span v-else class="text-xs opacity-70">
-          {{ t("session.following") }} <span class="font-mono">{{ view?.observer?.follow }}</span>
-        </span>
-        <button class="rounded border px-3 py-1 text-xs" @click="disconnect">
-          {{ t("session.disconnect") }}
-        </button>
-      </section>
+      <Panel :title="t('connect.title')">
+        <!-- can-audio 的网格顺序（xpc/gui.py:251-263）：呼号 · CID · 密码 · 机型 · 连接。
+             follow 和姓名是 can-voice 多出来的两格，留在同一行。 -->
+        <div class="grid grid-cols-7 gap-2">
+          <!-- 观察员填的是机长的呼号：语音服务端按那架飞机的位置给他算距离。 -->
+          <input
+            v-if="observer"
+            v-model="follow"
+            :disabled="online"
+            :placeholder="t('login.follow')"
+            :title="t('login.follow_tip')"
+            class="rounded border px-2 py-1 font-mono text-xs uppercase"
+          />
+          <input
+            v-else
+            v-model="callsign"
+            :disabled="online"
+            :placeholder="t('login.callsign')"
+            class="rounded border px-2 py-1 font-mono text-xs uppercase"
+          />
+          <input
+            v-model="cid"
+            :disabled="online"
+            :placeholder="t('login.cid')"
+            class="rounded border px-2 py-1 text-xs"
+          />
+          <input
+            v-model="password"
+            type="password"
+            :disabled="online"
+            :placeholder="t('login.password')"
+            class="rounded border px-2 py-1 text-xs"
+          />
+          <input
+            v-model="aircraft"
+            :disabled="observer || online"
+            :placeholder="t('login.aircraft')"
+            class="rounded border px-2 py-1 text-xs"
+          />
+          <input
+            v-model="realName"
+            :disabled="observer || online"
+            :placeholder="t('login.real_name')"
+            class="rounded border px-2 py-1 text-xs"
+          />
+          <div class="col-span-2 flex flex-wrap items-center gap-2">
+            <button
+              v-if="!online"
+              :disabled="busy"
+              class="min-w-[110px] rounded border px-3 py-1 text-xs"
+              @click="connect"
+            >
+              {{ t("login.connect") }}
+            </button>
+            <template v-else>
+              <button
+                :disabled="busy"
+                class="min-w-[110px] rounded border px-3 py-1 text-xs"
+                @click="disconnect"
+              >
+                {{ t("session.disconnect") }}
+              </button>
+              <span v-if="observing" class="text-xs opacity-70">
+                {{ t("session.following") }}
+                <span class="font-mono">{{ view?.observer?.follow }}</span>
+              </span>
+            </template>
+          </div>
+        </div>
+
+        <!-- can-audio 把三格状态文案排在网格第二行（xpc/gui.py:265-270）：模拟器、FSD、语音。
+             页头那三个 pill 就是搬到这里来的。三格自带名字：FSD 和语音那两句译文本来就以
+             它们的名字开头，第一格里 `X-Plane` 是拉丁字面量。
+             **插件那盏灯不在这三格里**：它跟着版本不符和没听到那两条横幅留在卡片上方，
+             因为这一格说的是 UDP 数据源通不通，而插件说的是天上画不画得出他机——
+             没装插件的人这一格是绿的。别把两盏灯并回一格。 -->
+        <div class="grid grid-cols-3 gap-2 text-xs">
+          <span class="flex items-center gap-1 opacity-70">
+            <!-- 模拟器连没连上要一眼看得见：没连上时下面所有数字都是空的，
+                 而"空的"和"零"在座舱里是两件事。 -->
+            <span
+              class="h-2 w-2 shrink-0 rounded-full"
+              :style="{ background: view?.sim_connected ? 'var(--can-on)' : 'var(--can-idle)' }"
+            />
+            X-Plane
+          </span>
+          <span class="truncate opacity-70">
+            {{ observing ? t("status.observing") : linkText(view?.link) }}
+          </span>
+          <!-- 语音是另一条链路。不显示的话，被顶号或者声卡打不开时飞行员戴着耳机
+               等人回话，而两边都不知道他听不见。 -->
+          <span class="truncate opacity-70">{{ voiceText(view?.voice) }}</span>
+        </div>
+
+        <!-- 观察员开关排在状态文案下面，和 can-audio 一样（xpc/gui.py:277-287）：
+             它决定这一次连接会不会在网络上多出一架飞机，是每次点「连接」之前该看一眼的事。 -->
+        <div class="flex flex-wrap items-start gap-2 text-xs">
+          <!-- 右座用。两个人要用各自的账号：同一个成员号第二次登录会把第一条顶掉。 -->
+          <label class="flex shrink-0 items-center gap-2">
+            <input v-model="observer" type="checkbox" :disabled="online" @change="toggleObserver" />
+            {{ t("login.observer_mode") }}
+          </label>
+          <p class="min-w-0 flex-1 opacity-60">{{ t("login.observer_note") }}</p>
+        </div>
+      </Panel>
 
       <!-- 观察员的频率。正常上网络时频率只跟 COM1 走，界面上没有第二个框；观察员是
            例外——右座的人未必开着模拟器，开着的那台也未必调在机长那个频率上。
