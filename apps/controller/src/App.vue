@@ -13,7 +13,6 @@ import StatusBar from "./components/StatusBar.vue";
 import LoginCard from "./components/LoginCard.vue";
 import { errorText, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
-import { getVersion } from "@tauri-apps/api/app";
 
 type LinkState = "Connecting" | "Online" | "Reconnecting" | "Offline" | "Evicted";
 type Ended = "Offline" | "Evicted" | { Refused: string | { Other: string } };
@@ -112,8 +111,10 @@ const compact = computed(() => appearance.value.compact);
 
 const cid = ref("");
 const busy = ref(false);
-/** 版本号，登录页那行。Tauri 从 tauri.conf.json 读，不用再开一个命令。 */
+/** 版本号，登录页那行。读的是 Rust 侧 `app_version` 命令，和日志、User-Agent 同一个常量。 */
 const version = ref("");
+/** 真的按过一次连接没有。区分"还没试"和"链路正在连"，登录页那行字要分开说。 */
+const attempted = ref(false);
 
 /**
  * 要显示的那条错误。
@@ -159,7 +160,11 @@ onMounted(async () => {
   void loadAppearance();
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
   cid.value = (await invoke<{ cid: string }>("settings")).cid;
-  version.value = await getVersion();
+  try {
+    version.value = await invoke<string>("app_version");
+  } catch {
+    // 版本号显示不出来不该拖垮轮询：下面这几行不能因为这一句失败而不跑。
+  }
   await refresh();
   timer = window.setInterval(refresh, 200);
   detachPtt = attachPttKeys();
@@ -198,7 +203,7 @@ const statusText = computed(() => {
  */
 const loginStatus = computed(() => {
   if (error.value?.kind === "command") return problemText(error.value);
-  return snap.value ? statusText.value : t("login.idle");
+  return attempted.value && snap.value ? statusText.value : t("login.idle");
 });
 const loginFailed = computed(() => error.value?.kind === "command");
 
@@ -229,6 +234,7 @@ function endedText(ended: Ended | null): string {
 }
 
 async function connect(enteredCid: string, enteredPassword: string) {
+  attempted.value = true;
   error.value = null;
   busy.value = true;
   try {

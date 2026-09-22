@@ -683,6 +683,16 @@ fn audio_devices() -> serde_json::Value {
     })
 }
 
+/// 当前版本号。登录页那行字用它。
+///
+/// **不用 `@tauri-apps/api/app` 的 getVersion**：那是插件命令，要 `core:app` 权限，
+/// 而这四个端的 capabilities 只给了 `updater:default`。自定义命令不走 ACL，
+/// 而且这里读的是和日志、User-Agent 同一个常量，版本号对得上。
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 // ——— 更新检查 ———
 
 /// 查一次有没有新版。
@@ -954,6 +964,7 @@ pub fn run() {
             test_mic,
             ptt_bindings,
             keyboard_ptt_supported,
+            app_version,
         ])
         .run(context)
         .expect("error while running audio-for-can");

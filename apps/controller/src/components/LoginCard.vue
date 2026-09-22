@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { t } from "../i18n";
 
 /**
@@ -27,6 +27,15 @@ const emit = defineEmits<{ connect: [cid: string, password: string] }>();
 
 const cid = ref(props.cid);
 const password = ref("");
+
+watch(
+  () => props.cid,
+  (v) => {
+    // 只在用户还没动过这一格时填：settings 那一趟比 StartupGate 慢，
+    // 填晚了也不能把人正在打的字盖掉。
+    if (!cid.value) cid.value = v;
+  },
+);
 
 function submit() {
   if (props.busy) return;
