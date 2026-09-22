@@ -96,7 +96,6 @@
   "lists": {
     "traffic": "Nearby traffic ({count})",
     "controllers": "Online ATC ({count})",
-    "messages": "Text messages",
     "no_traffic": "No other aircraft nearby",
     "no_controllers": "No ATC online nearby",
     "no_messages": "No text messages yet"

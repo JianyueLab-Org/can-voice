@@ -373,8 +373,13 @@ const send = () =>
       </header>
 
       <!-- `key` 是「帮助 → 检查更新」那条路：横幅自己只在挂载时查一次，换掉 `key`
-           就是让它重挂一次，再查一次。 -->
-      <UpdateBanner v-if="!compact" :key="updateNonce" />
+           就是让它重挂一次，再查一次。
+
+           精简时也让它挂上去，条件是有人真的点过一次「检查更新」（`updateNonce > 0`）。
+           菜单在精简模式下照样点得到，横幅和底栏又是 `checkUpdate` 仅有的两块画布，
+           两块都藏起来就成了「点了跟没点一样」。挂上去不等于看得见：没查到新版时
+           `UpdateBanner` 的 `latest` 是 `null`，它什么都不画，精简的版面不受影响。 -->
+      <UpdateBanner v-if="!compact || updateNonce > 0" :key="updateNonce" />
 
       <p v-if="error !== null" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
         {{ errorText(error) }}
@@ -421,7 +426,12 @@ const send = () =>
         {{ t("status.no_mouse_ptt") }}
       </p>
 
-      <Panel :title="t('connect.title')">
+      <!-- 精简时收起来：`COMPACT_SIZE`（`src-tauri/src/lib.rs`）那 460×340 算的就是
+           「消息」加「无线电」两张卡片，这张漏了 `v-if` 只是没补上。
+           **代价是真的**——断开按钮只长在这张卡片上，所以精简模式下连不上也断不开。
+           这一条是认下的：`WindowToggles` 里那颗「简」一直在，退出精简就是一下；而精简
+           本来就是飞起来以后才切进去的形态，连和断都发生在切进去之前。 -->
+      <Panel v-if="!compact" :title="t('connect.title')">
         <!-- can-audio 的网格顺序（xpc/gui.py:251-263）：呼号 · CID · 密码 · 机型 · 连接。
              follow 和姓名是 can-voice 多出来的两格，留在同一行。 -->
         <div class="grid grid-cols-7 gap-2">
@@ -672,8 +682,13 @@ const send = () =>
            **不传 `pttTitle`**，所以这条栏上不画 PTT——那颗按钮在上面那一行里。
            也**不接 `@down` / `@up`**：`StatusBar` 卸载时会补发一次 `up` 当保险
            （`StatusBar.vue:54`），而 xpc 的 PTT 不在这条栏上，拆这条栏不该松开麦克风。
-           `talking` 仍然要传，它是必填属性。 -->
-      <StatusBar v-if="!compact" :talking="talking" :status="barStatus" />
+           `talking` 仍然要传，它是必填属性。
+
+           精简时仍然留一条缝：`transient` 不为 `null`，就是此刻有一句瞬时状态要说。
+           实际只有「检查更新」会在精简模式下点出瞬时状态，而「没有可用的更新。」这句
+           只有这条栏说得出口——藏掉它，那条菜单在精简模式下就成了空操作。话说完
+           （4 秒后 `transient` 回到 `null`）这条栏自己退场，版面还是精简的样子。 -->
+      <StatusBar v-if="!compact || transient !== null" :talking="talking" :status="barStatus" />
 
       <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">

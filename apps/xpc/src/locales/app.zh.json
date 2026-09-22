@@ -96,7 +96,6 @@
   "lists": {
     "traffic": "附近的飞机（{count}）",
     "controllers": "在线席位（{count}）",
-    "messages": "文字消息",
     "no_traffic": "附近没有其他飞机",
     "no_controllers": "附近没有在线席位",
     "no_messages": "还没有文字消息"
