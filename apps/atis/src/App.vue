@@ -82,13 +82,18 @@ const station = computed(() => stations.value.find((s) => callsignOf(s) === sele
  * 查到，这里的 watch 跟着自动指到新对象，不用另外写重新指向的代码。
  */
 const editingStation = ref<Station | undefined>(undefined);
-watch(
-  station,
-  (s) => {
-    if (s) editingStation.value = s;
-  },
-  { immediate: true },
-);
+watch(station, (s) => {
+  if (s) {
+    editingStation.value = s;
+  } else if (editingStation.value && !stations.value.includes(editingStation.value)) {
+    // 按 `selected` 查不到分两种情况：打字打到一半、派生呼号暂时对不上——这时
+    // `editingStation` 指的对象还在 `stations` 数组里，原样留着，等 `save()` 把
+    // `selected` 指到新呼号就会自然查到。真正的情况是这个位置已经不在当前
+    // `stations` 里了（切换了配置、或者这个位置被删掉了），这时候才清掉，
+    // 不然对话框会挂着一个属于别的配置的对象继续可编辑。
+    editingStation.value = undefined;
+  }
+});
 const current = computed<Live | undefined>(() => live.value[selected.value]);
 const onAir = computed(() => selected.value in live.value);
 const editedPreset = computed(() => station.value?.presets.find((p) => p.name === presetName.value));
@@ -229,7 +234,13 @@ const removeProfile = () =>
     await invoke("remove_profile", { name: profiles.value.active });
   });
 
-const pickProfile = (name: string) => guard(() => invoke("select_profile", { name }));
+const pickProfile = (name: string) =>
+  guard(async () => {
+    // 切配置就把开着的对话框关掉：模态没有焦点陷阱，键盘能直接跳到这个下拉框，
+    // 不清掉的话对话框会带着上一个配置的位置继续开着，改一下就存进新配置里。
+    asking.value = null;
+    await invoke("select_profile", { name });
+  });
 
 /** 跑一个外部请求：清掉上一次的提示、按钮变灰、失败了说出为什么。 */
 async function fetching(kind: NonNullable<typeof busy.value>, fn: () => Promise<void>) {
@@ -327,46 +338,47 @@ onUnmounted(() => window.clearInterval(timer));
       class="mx-auto flex h-screen max-w-6xl flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
     >
-      <header class="flex shrink-0 items-center gap-2">
-        <template v-if="!compact">
-          <select
-            :value="profiles.active"
-            class="rounded border px-2 py-1 text-xs"
-            @change="pickProfile(($event.target as HTMLSelectElement).value)"
-          >
-            <option v-for="n in profiles.names" :key="n">{{ n }}</option>
-          </select>
-          <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">
-            {{ t("profile.new") }}
-          </button>
-          <button
-            class="rounded border px-2 py-1 text-xs"
-            :disabled="!profiles.active"
-            @click="asking = 'rename'"
-          >
-            {{ t("profile.rename") }}
-          </button>
-          <button
-            class="rounded border px-2 py-1 text-xs"
-            :disabled="profiles.names.length < 2"
-            @click="removeProfile"
-          >
-            {{ t("profile.remove") }}
-          </button>
-          <span class="ml-auto text-xs opacity-60">{{ t("login.account") }}</span>
-          <input
-            v-model="cid"
-            :placeholder="t('login.cid')"
-            class="w-[110px] rounded border px-2 py-1 text-xs"
-          />
-          <input
-            v-model="password"
-            type="password"
-            :placeholder="t('login.password')"
-            class="w-[160px] rounded border px-2 py-1 text-xs"
-          />
-        </template>
-        <!-- 精简时也在：藏掉的话精简之后就切不回来了。此处只剩设置——置顶和精简在左栏标题行。 -->
+      <!-- 精简时两个分支都是假：账号行藏在 !compact 里，WindowToggles 只给了
+           settings 一个钮，而它自己在精简模式下也不画。整个头就不挂，省下一份
+           flex gap——320px 高的窗口里这一条不是小事。置顶和精简两个钮不在这，
+           在左栏标题行，精简模式下切回来走的是那条路。 -->
+      <header v-if="!compact" class="flex shrink-0 items-center gap-2">
+        <select
+          :value="profiles.active"
+          class="rounded border px-2 py-1 text-xs"
+          @change="pickProfile(($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="n in profiles.names" :key="n">{{ n }}</option>
+        </select>
+        <button class="rounded border px-2 py-1 text-xs" @click="asking = 'profile'">
+          {{ t("profile.new") }}
+        </button>
+        <button
+          class="rounded border px-2 py-1 text-xs"
+          :disabled="!profiles.active"
+          @click="asking = 'rename'"
+        >
+          {{ t("profile.rename") }}
+        </button>
+        <button
+          class="rounded border px-2 py-1 text-xs"
+          :disabled="profiles.names.length < 2"
+          @click="removeProfile"
+        >
+          {{ t("profile.remove") }}
+        </button>
+        <span class="ml-auto text-xs opacity-60">{{ t("login.account") }}</span>
+        <input
+          v-model="cid"
+          :placeholder="t('login.cid')"
+          class="w-[110px] rounded border px-2 py-1 text-xs"
+        />
+        <input
+          v-model="password"
+          type="password"
+          :placeholder="t('login.password')"
+          class="w-[160px] rounded border px-2 py-1 text-xs"
+        />
         <WindowToggles class="ml-auto" :only="['settings']" @settings="showPrefs = true" />
       </header>
 
@@ -600,6 +612,7 @@ onUnmounted(() => window.clearInterval(timer));
         :open="asking === 'edit'"
         :station="editingStation"
         :preset-name="presetName"
+        :error="error"
         @close="asking = null"
         @change="save"
         @pick="presetName = $event"
@@ -610,6 +623,7 @@ onUnmounted(() => window.clearInterval(timer));
         :open="asking === 'preset'"
         :preset="editedPreset"
         :chinese-shown="chineseShown"
+        :error="error"
         @close="asking = null"
         @change="save"
       />

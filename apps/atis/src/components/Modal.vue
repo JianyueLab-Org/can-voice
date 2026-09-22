@@ -25,10 +25,11 @@ watch(
   },
 );
 
-// 遮罩点击和底部关闭钮都先让输入框失焦，原生 blur 补一次 `change`，编辑才落盘。
-// Esc 直接销毁子树，浏览器不会为一个已经不在 DOM 里的输入框补发 `change`——
-// 所以这里要在 emit 之前手动 blur 一次，把还没提交的编辑先逼出来。
-function closeOnEscape() {
+// 三条关闭路径（遮罩点击、「关闭」钮、Esc）都先手动 blur 当前焦点元素再 emit
+// `close`，编辑才保证落盘。遮罩点击和「关闭」钮原先指望浏览器点击时自己把输入框
+// 失焦、补一次原生 `change`——这只是假设，没有验证过。`Esc` 会直接销毁子树，
+// 浏览器不会为一个已经不在 DOM 里的输入框补发 `change`，所以三条路径统一走这里。
+function close() {
   (document.activeElement as HTMLElement | null)?.blur();
   emit("close");
 }
@@ -38,21 +39,21 @@ function closeOnEscape() {
   <div
     v-if="open"
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-3"
-    @click.self="emit('close')"
+    @click.self="close"
   >
     <div
       ref="box"
       tabindex="-1"
       class="flex max-h-full flex-col gap-4 overflow-auto rounded border bg-white p-4 text-sm outline-none"
       :class="width ?? 'w-[44rem]'"
-      @keyup.escape="closeOnEscape"
+      @keyup.escape="close"
     >
       <h2 class="font-semibold">{{ title }}</h2>
 
       <slot />
 
       <div class="flex justify-end">
-        <button class="rounded border px-3 py-1 text-xs" @click="emit('close')">
+        <button class="rounded border px-3 py-1 text-xs" @click="close">
           {{ t("common.close") }}
         </button>
       </div>

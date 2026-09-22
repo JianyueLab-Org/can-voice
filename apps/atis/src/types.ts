@@ -90,8 +90,11 @@ const QNH = /\b(?:Q\d{3,4}|A\d{4})\b/;
 /**
  * 席位列表里的那一行：`ZSPD  J  09004MPS  Q1013`。
  *
- * 没上线（`live` 是 undefined）就只有机场和字母——can-audio 的 `metar=None` 那条路
- * （`atis/script.py:98`）。圆点不在这里，颜色要按状态画，归组件。
+ * 没上线（`live` 是 undefined）就只有机场和字母：这个函数读的是 `live.metar`，
+ * 而 `live` 只在真正播出时才有（`live.value[callsign]`），不在播就没有 METAR
+ * 可读——can-audio 不是这样，它是不管播没播都留着每个席位一份 METAR。这里的
+ * 差异是有意的，`docs/manual-test.md` 4.6 记着这条摘要该长什么样。圆点不在
+ * 这里，颜色要按状态画，归组件。
  */
 export function stationSummary(s: Station, live: Live | undefined): string {
   const marker = s.atis_type === "departure" ? " D" : s.atis_type === "arrival" ? " A" : "";
