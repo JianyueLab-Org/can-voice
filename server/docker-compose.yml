@@ -67,6 +67,13 @@ services:
       CAN_API_ORIGIN: "${CAN_API_ORIGIN:-https://api.ceruleanavi.net}"
       # **连的是外面那个地址，不是 can-voice:64738。** 票是按域名签的，
       # 而且这样机队走的路和成员完全一样——它连不上的时候，成员也连不上。
+      #
+      # 一个例外，在 .env 里覆盖：机队和语音服务端同机，而这台机器的 NAT 不做
+      # UDP 回环。那时外面的成员连得上，机队却每一轮都是
+      # `voice: connection: timed out`，而服务端日志里连一条握手都没有——包根本
+      # 没到。改 CAN_VOICE_SERVER 指到内网，CAN_VOICE_SERVER_NAME 保持公网域名：
+      # 证书按后者校验，票和地址无关。代价是上面那条"机队连不上等于成员连不上"
+      # 不再成立。
       CAN_VOICE_SERVER: "${CAN_VOICE_SERVER:-audio.ceruleanavi.net:64738}"
       CAN_VOICE_SERVER_NAME: "${CAN_VOICE_SERVER_NAME:-audio.ceruleanavi.net}"
       CAN_FSD_DATAFEED: "${CAN_FSD_DATAFEED:-https://data.ceruleanavi.net/v1/data.json}"
