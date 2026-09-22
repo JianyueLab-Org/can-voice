@@ -526,8 +526,9 @@ async function act(name: string, args: Record<string, unknown>) {
         </div>
 
         <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
-        <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
-          <p class="text-xs opacity-60">{{ t("online.title") }}</p>
+        <!-- can-audio 把标题和药丸放在同一行（controller/gui.py:636-647）。 -->
+        <div v-if="connected && !compact" class="mt-2 flex items-center gap-2 border-t pt-2">
+          <p class="shrink-0 text-xs opacity-60">{{ t("online.title") }}</p>
           <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
         </div>
       </section>

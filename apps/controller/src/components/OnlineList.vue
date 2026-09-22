@@ -31,13 +31,14 @@ const rows = computed(() =>
 </script>
 
 <template>
-  <div class="flex flex-wrap items-center gap-1">
-    <!-- 已经加过的画灰而不是藏起来：藏起来的话，"没人在线"和"都已经加过了"
-         在界面上长得一模一样。 -->
+  <div class="flex min-w-0 flex-wrap items-center gap-1">
+    <!-- can-audio 的 PillPushButton（controller/gui.py:889-934）：只显示呼号，
+         高 24px，频率进 tooltip。已经加过的画灰而不是藏起来——藏起来的话，
+         "没人在线"和"都已经加过了"在界面上长得一模一样。 -->
     <button
       v-for="p in rows"
       :key="`${p.callsign}-${p.freq_khz}`"
-      class="rounded border px-2 py-0.5 font-mono text-xs disabled:opacity-40"
+      class="h-6 shrink-0 rounded-full border px-3 font-mono text-xs disabled:opacity-40"
       :disabled="p.already"
       :title="
         p.already
@@ -47,7 +48,6 @@ const rows = computed(() =>
       @click="$emit('add', p.freq_khz, p.callsign)"
     >
       {{ p.callsign }}
-      <span class="opacity-60">{{ mhz(p.freq_khz) }}</span>
     </button>
     <p v-if="!rows.length" class="text-xs opacity-50">{{ t("online.none") }}</p>
   </div>
