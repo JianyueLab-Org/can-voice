@@ -456,27 +456,54 @@ const send = () =>
            飞行员看不见，而他会以为对方没理他。 -->
       <!-- 精简时只留文字消息：管制员打的字飞行员必须看得见，附近的飞机和在线席位
            是参考，不是值班时要盯的东西。 -->
-      <section class="grid min-h-0 flex-1 gap-3" :class="compact ? '' : 'md:grid-cols-2'">
-        <div v-if="!compact" class="flex min-h-0 flex-col gap-2">
-          <p class="text-xs opacity-60">
-            {{ t("lists.traffic", { count: view?.traffic.length ?? 0 }) }}
-          </p>
-          <TrafficList :traffic="view?.traffic ?? []" />
-        </div>
-        <div class="flex min-h-0 flex-col gap-2">
-          <p v-if="!compact" class="text-xs opacity-60">
-            {{ t("lists.controllers", { count: view?.controllers.length ?? 0 }) }}
-          </p>
-          <!-- 点一行就把那个席位填进收件人框。 -->
+      <section class="flex min-h-0 flex-1 gap-3">
+        <Panel :title="t('messages.title')" class="min-h-0 flex-[3]">
+          <ChatLog class="min-h-0 flex-1" :messages="view?.messages ?? []" @reply="setRecipient" />
+          <!-- can-audio 的发送行（xpc/gui.py:307-320）：收件人最大 240、正文撑开、发送。 -->
+          <div class="flex items-center gap-2">
+            <input
+              v-if="!compact"
+              v-model="recipient"
+              :placeholder="t('chat.recipient')"
+              class="min-w-0 max-w-[240px] flex-1 rounded border px-2 py-1 text-xs"
+            />
+            <!-- .wallop 在 Rust 侧翻成发往督导，不跟着这个收件人框走。 -->
+            <!-- 文字消息走 FSD，观察员没有那条连接，管制员的字只到机长那边。 -->
+            <input
+              v-model="message"
+              :placeholder="observing ? t('chat.observer_no_text') : t('chat.message')"
+              class="min-w-0 flex-[2] rounded border px-2 py-1 text-xs"
+              :disabled="!connected"
+              @keyup.enter="send"
+            />
+            <button class="rounded border px-3 py-1 text-xs" :disabled="!connected" @click="send">
+              {{ t("chat.send") }}
+            </button>
+          </div>
+        </Panel>
+
+        <Panel
+          v-if="!compact"
+          :title="t('lists.controllers', { count: view?.controllers.length ?? 0 })"
+          class="min-h-0 flex-1"
+        >
           <ControllerList
-            v-if="!compact"
-            class="max-h-28 shrink-0"
+            class="min-h-0 flex-1"
             :controllers="view?.controllers ?? []"
             @reply="setRecipient"
           />
-          <p v-if="!compact" class="text-xs opacity-60">{{ t("lists.messages") }}</p>
-          <ChatLog :messages="view?.messages ?? []" @reply="setRecipient" />
-        </div>
+          <!-- can-audio 在列表下面放一条换行提示（xpc/gui.py:329-332）：
+               单击就填收件人这件事，界面上不说没人会去试。 -->
+          <p class="text-xs opacity-60">{{ t("controllers.hint") }}</p>
+        </Panel>
+
+        <Panel
+          v-if="!compact"
+          :title="t('lists.traffic', { count: view?.traffic.length ?? 0 })"
+          class="min-h-0 flex-1"
+        >
+          <TrafficList class="min-h-0 flex-1" :traffic="view?.traffic ?? []" />
+        </Panel>
       </section>
 
       <footer class="flex items-center gap-2 border-t" :class="compact ? 'pt-2' : 'pt-3'">
@@ -497,24 +524,6 @@ const send = () =>
           @pointercancel="pttUp"
         >
           {{ t("chat.push_to_talk") }}
-        </button>
-        <input
-          v-if="!compact"
-          v-model="recipient"
-          :placeholder="t('chat.recipient')"
-          class="w-40 rounded border px-2 py-1 text-xs"
-        />
-        <!-- .wallop 在 Rust 侧翻成发往督导，不跟着这个收件人框走。 -->
-        <!-- 文字消息走 FSD，观察员没有那条连接，管制员的字只到机长那边。 -->
-        <input
-          v-model="message"
-          :placeholder="observing ? t('chat.observer_no_text') : t('chat.message')"
-          class="min-w-0 flex-1 rounded border px-2 py-1 text-xs"
-          :disabled="!connected"
-          @keyup.enter="send"
-        />
-        <button class="rounded border px-3 py-1 text-xs" :disabled="!connected" @click="send">
-          {{ t("chat.send") }}
         </button>
       </footer>
       <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />

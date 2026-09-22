@@ -23,7 +23,7 @@
   },
   "connect": { "title": "连接" },
   "messages": { "title": "消息" },
-  "controllers": { "hint": "双击一个席位，把它填进收件人。" },
+  "controllers": { "hint": "点一个席位，把它填进收件人。" },
   "radio": {
     "title": "无线电",
     "com1": "COM1  {frequency}",

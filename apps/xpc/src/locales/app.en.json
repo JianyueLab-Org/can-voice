@@ -23,7 +23,7 @@
   },
   "connect": { "title": "Connection" },
   "messages": { "title": "Messages" },
-  "controllers": { "hint": "Double-click a position to put it in the recipient box." },
+  "controllers": { "hint": "Click a position to put it in the recipient box." },
   "radio": {
     "title": "Radio",
     "com1": "COM1  {frequency}",
