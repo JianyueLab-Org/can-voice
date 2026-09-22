@@ -683,6 +683,16 @@ fn audio_devices() -> serde_json::Value {
     })
 }
 
+/// 当前版本号。登录页那行字用它。
+///
+/// **不用 `@tauri-apps/api/app` 的 getVersion**：那是插件命令，要 `core:app` 权限，
+/// 而这四个端的 capabilities 只给了 `updater:default`。自定义命令不走 ACL，
+/// 而且这里读的是和日志、User-Agent 同一个常量，版本号对得上。
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 // ——— 更新检查 ———
 
 /// 查一次有没有新版。
@@ -796,11 +806,13 @@ async fn send_log(
 
 // ——— 设置对话框、置顶、精简（#45）———
 
-/// 精简模式下窗口最小能缩到多小。
-const COMPACT_MIN: (f64, f64) = (440.0, 180.0);
+/// 精简模式下窗口最小能缩到多小。can-audio 的 `CARD_WIDTH + 2*6 + 4` × `CARD_HEIGHT + 70`
+/// （`controller/gui.py:672-718`）：正好一列卡片，加上顶栏。
+const COMPACT_MIN: (f64, f64) = (248.0, 186.0);
 /// 按下"精简"那一刻缩成多大。**不缩的话**，东西藏起来了窗口却还是那么大，
 /// 人还得自己去拖——而这个开关存在的全部理由就是一下子压到雷达屏的角落里。
-const COMPACT_SIZE: (f64, f64) = (460.0, 320.0);
+/// 旧版缩到的就是最小尺寸本身，这里跟着它。
+const COMPACT_SIZE: (f64, f64) = (248.0, 186.0);
 
 /// 把外观里和窗口有关的两样落到窗口上。
 ///
@@ -954,6 +966,7 @@ pub fn run() {
             test_mic,
             ptt_bindings,
             keyboard_ptt_supported,
+            app_version,
         ])
         .run(context)
         .expect("error while running audio-for-can");

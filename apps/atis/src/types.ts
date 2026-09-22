@@ -78,6 +78,35 @@ export function callsignOf(s: Station): string {
 }
 
 /**
+ * METAR 里的风组和气压组。can-audio 那边是解析过的 METAR 对象
+ * （`atis/script.py:99`），这边只有原文，所以现抓两组。
+ *
+ * **抓不到就不显示**——和 can-audio 的 `if text:` 一样。列表那一行是给人扫一眼的，
+ * 宁可少两段，不能显示一段错的。
+ */
+const WIND = /\b(?:VRB|\d{3})\d{2,3}(?:G\d{2,3})?(?:MPS|KT|KMH)\b/;
+const QNH = /\b(?:Q\d{3,4}|A\d{4})\b/;
+
+/**
+ * 席位列表里的那一行：`ZSPD  J  09004MPS  Q1013`。
+ *
+ * 没上线（`live` 是 undefined）就只有机场和字母：这个函数读的是 `live.metar`，
+ * 而 `live` 只在真正播出时才有（`live.value[callsign]`），不在播就没有 METAR
+ * 可读——can-audio 不是这样，它是不管播没播都留着每个席位一份 METAR。这里的
+ * 差异是有意的，`docs/manual-test.md` 4.6 记着这条摘要该长什么样。圆点不在
+ * 这里，颜色要按状态画，归组件。
+ */
+export function stationSummary(s: Station, live: Live | undefined): string {
+  const marker = s.atis_type === "departure" ? " D" : s.atis_type === "arrival" ? " A" : "";
+  const parts = [s.identifier + marker, live?.letter ?? s.letter];
+  for (const pattern of [WIND, QNH]) {
+    const found = (live?.metar ?? "").match(pattern);
+    if (found) parts.push(found[0]);
+  }
+  return parts.join("  ");
+}
+
+/**
  * 一条连接此刻该对人说什么。
  *
  * **在渲染时调**（#29）：Rust 给的是状态码，翻译在这里现翻，切了语言跟着变。

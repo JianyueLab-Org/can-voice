@@ -41,8 +41,10 @@
   "window": {
     "on_top": "置顶",
     "on_top_tip": "窗口置顶：压在雷达屏或模拟器上面，不被别的窗口盖住",
+    "on_top_short": "顶",
     "compact": "精简",
     "compact_tip": "精简模式：只留值班时要盯的东西，窗口可以缩到很小",
+    "compact_short": "简",
     "settings": "设置",
     "settings_tip": "主题、语言、服务器地址、调试日志"
   },

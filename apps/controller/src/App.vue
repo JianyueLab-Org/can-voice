@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
+import Toast from "./components/Toast.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
 import RadioRow from "./components/RadioRow.vue";
@@ -9,6 +10,8 @@ import UpdateBanner from "./components/UpdateBanner.vue";
 import StartupGate from "./components/StartupGate.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import OnlineList from "./components/OnlineList.vue";
+import StatusBar from "./components/StatusBar.vue";
+import LoginCard from "./components/LoginCard.vue";
 import { errorText, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
 
@@ -108,8 +111,11 @@ const showPrefs = ref(false);
 const compact = computed(() => appearance.value.compact);
 
 const cid = ref("");
-const password = ref("");
 const busy = ref(false);
+/** 版本号，登录页那行。读的是 Rust 侧 `app_version` 命令，和日志、User-Agent 同一个常量。 */
+const version = ref("");
+/** 真的按过一次连接没有。区分"还没试"和"链路正在连"，登录页那行字要分开说。 */
+const attempted = ref(false);
 
 /**
  * 要显示的那条错误。
@@ -119,6 +125,25 @@ const busy = ref(false);
  */
 type Problem = { kind: "command"; error: unknown } | { kind: "frequency" };
 const error = ref<Problem | null>(null);
+
+/**
+ * 报错的序号。**同一句话连着报两次，prop 的值不变，Vue 不会重绘子组件**
+ * ——右上角那条就再也不出现了，而这一次改动把另外两个显示错误的地方都拿掉了。
+ * 递增一个计数器，让 Toast 盯着它而不是盯着那句话。
+ */
+const errorSeq = ref(0);
+
+/**
+ * 报一条错。
+ *
+ * **台面这一页只有右上角那一个报错出口。** 登录页有它自己那行状态文案，
+ * 台面上就只剩这一条 4 秒自动消失的提示：连上之后再挂一条不会自己消失的横条，
+ * 值班的人得腾出手去关它。
+ */
+function report(p: Problem) {
+  error.value = p;
+  errorSeq.value++;
+}
 
 function problemText(p: Problem): string {
   switch (p.kind) {
@@ -138,7 +163,6 @@ const pressed = ref(false);
 /** 屏幕按钮按着。灯要立刻亮，不能等 200ms 那一拍快照。 */
 const holding = ref(false);
 const talking = computed(() => holding.value || pressed.value);
-const showSettings = ref(false);
 
 let timer: number | undefined;
 
@@ -155,6 +179,11 @@ onMounted(async () => {
   void loadAppearance();
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
   cid.value = (await invoke<{ cid: string }>("settings")).cid;
+  try {
+    version.value = await invoke<string>("app_version");
+  } catch {
+    // 版本号显示不出来不该拖垮轮询：下面这几行不能因为这一句失败而不跑。
+  }
   await refresh();
   timer = window.setInterval(refresh, 200);
   detachPtt = attachPttKeys();
@@ -164,7 +193,35 @@ onUnmounted(() => {
   detachPtt?.();
 });
 
+/** 此刻是不是真的在线。**只给"就在这一秒"的地方用**，别拿它切页面，见 `signedIn`。 */
 const connected = computed(() => snap.value?.link === "Online");
+
+/**
+ * 这一场会话上过线没有——**登录页和台面是按它切的，不是按 `connected`**。
+ *
+ * `Reconnecting` 是网络抖一下就会进的正常状态（`can-voice-client/src/pump.rs`），
+ * 后端刻意让台面活着穿过它（`can-voice-app/src/snapshot.rs` 只清 `receiving`）。
+ * 拿 `connected` 切页的话，值班时抖那么一下，卡片栈、在线条、值守横幅和屏幕上
+ * 那颗 PTT 会一起换成一张密码卡——而 Wayland 上那颗按钮是唯一能发话的路径
+ * （见 StatusBar.vue），等于在手上有飞机的时候悄悄拿走发射能力；人在那里按
+ * 「连接」，还会在重连途中再发一次 connect。
+ *
+ * 回登录页只有三条路：还没连过、自己点了断开、以及 `Offline` / `Evicted` 这两个
+ * 终态——链路自己放弃了，台面已经没有意义。
+ */
+const signedIn = ref(false);
+watch(
+  () => snap.value?.link,
+  (link) => {
+    if (link === "Online") signedIn.value = true;
+    else if (link === "Offline" || link === "Evicted") {
+      // 从台面退回登录页时丢掉那条报错：它讲的是刚才那一场里的某个命令，
+      // 而登录页那行状态文案会把它当成"这一次连接失败的原因"。
+      if (signedIn.value) error.value = null;
+      signedIn.value = false;
+    }
+  },
+);
 
 /** 三种终态要说三句不同的话。 */
 const statusText = computed(() => {
@@ -185,6 +242,43 @@ const statusText = computed(() => {
   }
 });
 
+/**
+ * 登录页那行字。没连上时说链路状态，连接失败时说失败的原因。
+ *
+ * `statusText` 在 Offline 时已经会把 `ended` 说成人话，所以这里只需要在
+ * 命令本身失败时盖掉它。
+ */
+const loginStatus = computed(() => {
+  if (error.value?.kind === "command") return problemText(error.value);
+  return attempted.value && snap.value ? statusText.value : t("login.idle");
+});
+const loginFailed = computed(() => error.value?.kind === "command");
+
+/**
+ * 底栏中间那句话。can-audio 的状态栏空闲时说"就绪"，有事说那件事。
+ *
+ * 和顶栏那句 `statusText` 分开：那一句讲链路，这一句讲刚刚发生了什么。
+ */
+const barStatus = computed(() => t("status.ready"));
+
+/**
+ * 顶栏那句会话文案（spec §4 的「会话文案」）。can-audio 放的是
+ * `用户名 · 服务器`（`controller/gui.py:1066`），这里说的是同一件事：哪个账号在线。
+ *
+ * **和底栏那句值守文案是两句话**：这一句讲会话，那一句讲在不在席位上。
+ * 两处都画值守文案的话，同一句中文会同时出现在右上角和右下角。
+ */
+const sessionText = computed(() =>
+  cid.value ? t("link.session", { cid: cid.value }) : t("login.idle"),
+);
+
+/** 右边那句话。can-audio 值守时着绿，不值守说"只收不发"。 */
+const dutyText = computed(() =>
+  onDuty.value
+    ? t("duty.staffing", { callsign: feed.value?.duty.callsign ?? "" })
+    : t("duty.observer"),
+);
+
 function endedText(ended: Ended | null): string {
   if (!ended || ended === "Offline") return t("ended.offline");
   if (ended === "Evicted") return t("ended.evicted");
@@ -197,22 +291,25 @@ function endedText(ended: Ended | null): string {
   return t("ended.refused");
 }
 
-async function connect() {
+async function connect(enteredCid: string, enteredPassword: string) {
+  attempted.value = true;
   error.value = null;
   busy.value = true;
   try {
-    await invoke("connect", { cid: cid.value, password: password.value });
-    // 密码用过就丢：它只需要换一张 60 秒的票，之后重连带的是票不是密码。
-    password.value = "";
+    await invoke("connect", { cid: enteredCid, password: enteredPassword });
+    cid.value = enteredCid;
     await refresh();
   } catch (e) {
-    error.value = { kind: "command", error: e };
+    report({ kind: "command", error: e });
   } finally {
     busy.value = false;
   }
 }
 
 async function disconnect() {
+  // 自己点的断开是回登录页的那三条路之一，立刻切，不等下一拍快照。
+  signedIn.value = false;
+  error.value = null;
   await invoke("disconnect");
   await refresh();
 }
@@ -233,15 +330,14 @@ function parseFreq(raw: string): number | null {
 async function addFrequency() {
   const khz = parseFreq(freqInput.value);
   if (khz === null) {
-    error.value = { kind: "frequency" };
+    report({ kind: "frequency" });
     return;
   }
   error.value = null;
   freqInput.value = "";
   const callsign = callsignInput.value.trim();
   callsignInput.value = "";
-  await invoke("add_frequency", { freqKhz: khz, callsign: callsign || null });
-  await refresh();
+  await act("add_frequency", { freqKhz: khz, callsign: callsign || null });
 }
 
 /** 从在线一览点过来的，把呼号一起带上。 */
@@ -255,12 +351,17 @@ const locked = (khz: number) => feed.value?.duty.freq_khz === khz;
 /** 画灰与否照着台面的真相，不自己推：推出来的那份迟早和它对不上。 */
 const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
 
-function pttDown(e: PointerEvent) {
+/**
+ * 屏幕上那颗 PTT。**两头都写成幂等的**：指针捕获在 StatusBar 里，而那条栏被拆掉
+ * 时（切精简）它会补发一次松手，重复的那一次不该再发一趟命令。
+ */
+function pttDown() {
+  if (holding.value) return;
   holding.value = true;
-  (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
   void invoke("set_transmitting", { on: true });
 }
 function pttUp() {
+  if (!holding.value) return;
   holding.value = false;
   void invoke("set_transmitting", { on: false });
 }
@@ -322,56 +423,77 @@ const deniedPairs = computed(() =>
   ),
 );
 
+/**
+ * 发一条命令再刷一次快照。
+ *
+ * **失败要说出来。** 台面上每一个开关都走这里，而 `invoke` 失败原来是一个没人
+ * 接的 Promise：`set_switch` 被拒时界面什么都不说，开关自己弹回去，看起来像点
+ * 空了一下。
+ */
 async function act(name: string, args: Record<string, unknown>) {
-  await invoke(name, args);
+  try {
+    await invoke(name, args);
+  } catch (e) {
+    report({ kind: "command", error: e });
+  }
   await refresh();
 }
 </script>
 
 <template>
   <StartupGate>
+    <!-- 登录页也要有置顶/精简/设置这一排，而且留白也要跟着精简缩。
+         端点、PTT、日志这三块都在设置对话框里：装了 msi 的人改地址、发日志，
+         都是在还没连上的时候要做的事，把它们关在登录之后等于关在门里
+         （SettingsCommon.vue 开头那段）。精简开关留着，才有路从 248×186 出来
+         ——Rust 侧启动时就把存着的 compact 应用上去了（lib.rs 的 setup）。 -->
+    <main
+      v-if="!signedIn"
+      class="flex h-screen w-full flex-col text-sm"
+      :class="compact ? 'gap-1 p-1.5' : 'gap-3 p-5'"
+    >
+      <header class="flex items-center gap-2">
+        <WindowToggles class="ml-auto" @settings="showPrefs = true" />
+      </header>
+      <UpdateBanner v-if="!compact" />
+      <LoginCard
+        :cid="cid"
+        :status="loginStatus"
+        :failed="loginFailed"
+        :busy="busy"
+        :version="version"
+        @connect="connect"
+      />
+    </main>
+
     <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
     <main
+      v-else
       class="flex h-screen w-full flex-col text-sm"
-      :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
+      :class="compact ? 'gap-1 p-1.5' : 'gap-4 p-5'"
     >
-      <header class="flex flex-wrap items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h1 v-if="!compact" class="text-base font-semibold">{{ t("app.title") }}</h1>
-          <p class="flex items-center gap-2 truncate text-xs opacity-70">
-            <span
-              class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-              :style="{ background: connected ? '#28a745' : '#dc3545' }"
-            />
-            {{ statusText }}
-          </p>
-        </div>
-        <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
+      <!-- can-audio 的顺序（controller/gui.py:536-583）：灯、链路、会话、撑开、
+           置顶、精简、设置、断开。标题不在这里——旧版主页面没有标题，它在窗口
+           装饰和登录卡片上。 -->
+      <!-- **不换行。** 精简时这一条要在 186px 的窗口里装下灯、两颗 30×26 的按钮，
+           而 `truncate` 碰上 `flex-wrap` 会先换行再截断——换行的那一行把卡片挤出
+           窗口。改成不换行、文案那两格 `min-w-0` 允许收缩，挤不下时截断。 -->
+      <header class="flex items-center gap-2">
+        <!-- 灯此刻是真的两色：页面按「这一场上过线没有」切，所以重连时这里是台面，
+             灯照着 `connected` 转红，`statusText` 说「重连中…」。 -->
+        <span
+          class="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
+          :style="{ background: connected ? 'var(--can-on)' : 'var(--can-muted)' }"
+        />
+        <p v-if="!compact" class="min-w-0 truncate text-xs opacity-70">{{ statusText }}</p>
+        <p v-if="!compact" class="min-w-0 truncate text-xs font-semibold">{{ sessionText }}</p>
         <WindowToggles class="ml-auto" @settings="showPrefs = true" />
-        <div v-if="!connected" class="flex items-center gap-2">
-          <input v-model="cid" :placeholder="t('login.cid')" class="w-24 rounded border px-2 py-1" />
-          <input
-            v-model="password"
-            type="password"
-            :placeholder="t('login.password')"
-            class="w-32 rounded border px-2 py-1"
-            @keyup.enter="connect"
-          />
-          <button :disabled="busy" class="rounded border px-3 py-1" @click="connect">
-            {{ t("login.connect") }}
-          </button>
-        </div>
-        <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
-        <button v-else-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
+        <button v-if="!compact" class="rounded border px-3 py-1 text-xs" @click="disconnect">
           {{ t("login.disconnect") }}
         </button>
       </header>
 
       <UpdateBanner v-if="!compact" />
-
-      <p v-if="error" class="rounded border border-red-400 px-3 py-2 text-xs text-red-600">
-        {{ problemText(error) }}
-      </p>
 
       <!-- 服务端说的话。不显示的话，"能连上、状态绿、说话没人听见"就是全部症状。 -->
       <p
@@ -405,7 +527,9 @@ async function act(name: string, args: Record<string, unknown>) {
         {{ t("radio.tx_at_limit", { max: txBudget.max_tx }) }}
       </p>
 
-      <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。 -->
+      <!-- 在不在席位上。这件事此前界面上完全没有，而它决定了能不能发射。
+           `connected` 这个条件是活的：重连途中这一页还在，而那时 `feed` 说的是
+           上一拍的席位，报「你不在席位上」只会把人吓一跳。链路回来再说。 -->
       <p
         v-if="connected && !onDuty"
         class="rounded border px-3 py-2 text-xs"
@@ -428,28 +552,30 @@ async function act(name: string, args: Record<string, unknown>) {
         </span>
       </p>
 
+      <!-- can-audio 的比例（controller/gui.py:586-617）：频率 1、呼号 2、按钮定宽。
+           设置的入口不在这一行——旧版只有一个设置对话框。 -->
       <section v-if="!compact" class="flex items-center gap-2">
         <input
           v-model="freqInput"
           :placeholder="t('freq.hint')"
-          class="w-28 rounded border px-2 py-1"
+          class="min-w-[120px] max-w-[200px] flex-1 rounded border px-2 py-1"
           @keyup.enter="addFrequency"
         />
         <input
           v-model="callsignInput"
           :placeholder="t('freq.callsign_hint')"
-          class="w-40 rounded border px-2 py-1 font-mono uppercase"
+          class="min-w-[160px] max-w-[340px] flex-[2] rounded border px-2 py-1 font-mono uppercase"
           @keyup.enter="addFrequency"
         />
-        <button class="rounded border px-3 py-1" @click="addFrequency">
+        <button
+          class="shrink-0 rounded border px-3 py-1 font-semibold text-white"
+          :style="{ background: 'var(--can-theme)' }"
+          @click="addFrequency"
+        >
           {{ t("freq.add") }}
         </button>
-        <button class="ml-auto rounded border px-3 py-1" @click="showSettings = !showSettings">
-          {{ showSettings ? t("panel.close") : t("panel.open") }}
-        </button>
+        <span class="flex-1" />
       </section>
-
-      <SettingsPanel v-if="showSettings && !compact" :cid="cid" />
 
       <section class="flex min-h-0 flex-1 flex-col">
         <div class="flex flex-1 flex-wrap content-start gap-2 overflow-auto">
@@ -474,44 +600,35 @@ async function act(name: string, args: Record<string, unknown>) {
             :max-tx="txBudget?.max_tx ?? null"
             @remove="act('remove_frequency', { freqKhz: r.freq_khz })"
           />
-          <p v-if="!radios.length" class="w-full py-6 text-center text-xs opacity-50">
+          <!-- 空栈提示在精简模式下没有意义（can-audio `gui.py:688` 同样藏它）：
+               那个窗口里除了卡片什么都不该有。 -->
+          <p
+            v-if="!radios.length && !compact"
+            class="w-full py-6 text-center text-xs opacity-50"
+          >
             {{ t("freq.empty") }}
           </p>
         </div>
 
         <!-- 在线一览。没有它的话，加一个别人的频率要先去别的地方查他在守什么。 -->
-        <div v-if="connected && !compact" class="mt-2 flex flex-col gap-1 border-t pt-2">
-          <p class="text-xs opacity-60">{{ t("online.title") }}</p>
+        <!-- can-audio 把标题和药丸放在同一行（controller/gui.py:636-647）。 -->
+        <div v-if="connected && !compact" class="mt-2 flex items-center gap-2 border-t pt-2">
+          <p class="shrink-0 text-xs opacity-60">{{ t("online.title") }}</p>
           <OnlineList :online="feed?.online ?? []" :tuned="tuned" @add="addOnline" />
         </div>
       </section>
 
-      <footer
+      <StatusBar
         v-if="!compact"
-        class="flex items-center justify-between gap-3 border-t pt-3 text-xs"
+        :talking="talking"
+        :status="barStatus"
+        :duty="dutyText"
+        :duty-on="connected && onDuty"
+        :ptt-title="t('ptt.hold_tip')"
+        @down="pttDown"
+        @up="pttUp"
       >
-        <button
-          class="flex items-center gap-2"
-          :title="t('ptt.hold_tip')"
-          @pointerdown="pttDown"
-          @pointerup="pttUp"
-          @pointercancel="pttUp"
-        >
-          <span
-            class="inline-block h-3 w-3 rounded-full"
-            :style="{ background: talking ? '#c7861d' : '#8b90a4' }"
-          />
-          <span
-            class="text-xs"
-            :class="talking ? 'font-bold' : 'opacity-60'"
-            :style="talking ? { color: '#c7861d' } : {}"
-          >PTT</span>
-        </button>
-        <span class="opacity-70">
-          <template v-if="connected && onDuty">{{ t("duty.staffing", { callsign: feed?.duty.callsign ?? "" }) }}</template>
-          <template v-else-if="connected">{{ t("duty.observer") }}</template>
-        </span>
-        <span v-if="snap?.health && !compact" class="opacity-60">
+        <span v-if="snap?.health" class="shrink-0 opacity-60">
           {{
             t("health.summary", {
               rtt: snap.health.rtt_ms,
@@ -523,8 +640,15 @@ async function act(name: string, args: Record<string, unknown>) {
             {{ t("health.unparsable", { count: snap.health.unparsable }) }}
           </span>
         </span>
-      </footer>
-      <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+      </StatusBar>
+      <!-- 台面这一页唯一的报错出口：频率填错、开关被拒，都走这一条。 -->
+      <Toast :message="error ? problemText(error) : null" :seq="errorSeq" />
     </main>
+
+    <!-- 两页共用的一张对话框。**摆在两个 main 外面**：它是 `fixed` 覆盖层，
+         位置和哪一页无关，而端点、日志这两块恰恰是没连上时才要用的。 -->
+    <SettingsDialog :open="showPrefs" @close="showPrefs = false">
+      <SettingsPanel :cid="cid" />
+    </SettingsDialog>
   </StartupGate>
 </template>

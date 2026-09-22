@@ -6,6 +6,7 @@
     "connected": "Connected",
     "connecting": "Connecting…",
     "reconnecting": "Reconnecting…",
+    "session": "Session {cid}",
     "evicted": "This account signed in elsewhere; voice disconnected"
   },
   "ended": {
@@ -20,7 +21,8 @@
     "cid": "CAN ID",
     "password": "Password",
     "connect": "Connect",
-    "disconnect": "Disconnect"
+    "disconnect": "Disconnect",
+    "idle": "Not connected"
   },
   "freq": {
     "out_of_band": "Frequency must be between 118.000 and 136.975",
@@ -36,10 +38,6 @@
     "on": "Staffing {callsign}",
     "observer": "Not staffing · RX only",
     "staffing": "Staffing {callsign}"
-  },
-  "panel": {
-    "open": "Audio & PTT",
-    "close": "Hide"
   },
   "online": {
     "title": "Online controllers",
@@ -104,5 +102,8 @@
     "record": "Record a binding",
     "wayland": "This system is running Wayland, which does not let ordinary programs listen for global keys, so keyboard PTT will not work. Use a joystick instead, or run under an X11 session.",
     "no_mouse": "Mouse side buttons are not supported as PTT on this system; use the keyboard or a joystick."
+  },
+  "status": {
+    "ready": "Ready"
   }
 }

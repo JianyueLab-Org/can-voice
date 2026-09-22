@@ -20,7 +20,7 @@
    */
   html.dark {
     color-scheme: dark;
-    background-color: #2c2f45;
+    background-color: var(--can-window);
     color: #e6e8f0;
   }
 
@@ -33,6 +33,26 @@
   html.dark ::before,
   html.dark ::after {
     border-color: rgb(230 232 240 / 0.18);
+  }
+}
+
+@layer base {
+  /*
+   * can-audio 那套语义色，对应它逐字节相同的 controller/theme.py。
+   *
+   * **明暗两套主题下相同**：三态开关的"关 / 开 / 正在响"在旧版里也不随主题变，
+   * 它讲的是电台的状态，不是背景的深浅。界面上再要一个颜色的人在这里加一行，
+   * 不要在组件里写字面量——`every_app_declares_the_can_audio_palette` 看着这张表。
+   */
+  :root {
+    --can-off: #436384;
+    --can-on: #28a745;
+    --can-active: #c7861d;
+    --can-muted: #dc3545;
+    --can-theme: #5eb1bf;
+    --can-idle: #8b90a4;
+    --can-surface: #252839;
+    --can-window: #2c2f45;
   }
 }
 
@@ -59,7 +79,7 @@
     color: #7dd3fc;
   }
   .dark .bg-white {
-    background-color: #252839;
+    background-color: var(--can-surface);
   }
   .dark .bg-red-50 {
     background-color: rgb(220 53 69 / 0.15);

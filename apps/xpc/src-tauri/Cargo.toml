@@ -1,6 +1,6 @@
 [package]
 name = "xpc-for-can"
-version = "27.0.3"
+version = "27.0.4"
 edition = "2021"
 rust-version = "1.80"
 description = "Cerulean Aviation Network X-Plane 飞行客户端"

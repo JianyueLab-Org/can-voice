@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import PresetEditor from "./PresetEditor.vue";
 import { t } from "../i18n";
 import type { Station } from "../types";
 import { callsignOf } from "../types";
@@ -173,12 +172,5 @@ function removePreset() {
         {{ t("station.remove_preset") }}
       </button>
     </div>
-
-    <PresetEditor
-      v-if="preset"
-      :preset="preset"
-      :chinese-shown="chineseShown"
-      @change="$emit('change')"
-    />
   </section>
 </template>

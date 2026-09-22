@@ -4,7 +4,8 @@
   },
   "login": {
     "cid": "CAN ID",
-    "password": "Password"
+    "password": "Password",
+    "account": "Account"
   },
   "dialog": {
     "cancel": "Cancel",
@@ -28,7 +29,8 @@
     "rename_title": "Rename the profile"
   },
   "station": {
-    "new": "+ New station",
+    "list_title": "ATIS Positions",
+    "new": "New",
     "new_title": "New station",
     "new_placeholder": "Four-letter airport code, e.g. ZSPD",
     "pick": "Pick a station on the left, or create one",
@@ -51,7 +53,11 @@
     "chinese_runway_hint": "三五左",
     "presets": "Preset",
     "add_preset": "Add",
-    "remove_preset": "Delete"
+    "remove_preset": "Delete",
+    "edit": "Edit",
+    "delete": "Delete",
+    "title": "Position settings",
+    "none": "No positions yet"
   },
   "preset": {
     "new_name": "Preset {n}",
@@ -60,7 +66,10 @@
     "transition_level": "Transition level (TL)",
     "closing": "Closing (leave blank for the built-in one)",
     "chinese_runway": "Chinese runway (leave blank for the station's)",
-    "chinese_extra": "Chinese additional remarks"
+    "chinese_extra": "Chinese additional remarks",
+    "label": "Preset",
+    "edit": "Edit preset",
+    "title": "Preset “{name}”"
   },
   "import": {
     "title": "Import",
@@ -81,7 +90,8 @@
       "notam_definitions": "predefined NOTAM phrases",
       "atis_voice": "voice recording settings",
       "external_generator": "external generator"
-    }
+    },
+    "network_tip": "Pull the network-wide ATIS configuration from can: positions, frequencies, runway presets, templates and Chinese readback wording. Positions you already have are left alone by default; you can choose to overwrite them."
   },
   "merge": {
     "added": "Added {count}: {list}",
@@ -130,7 +140,10 @@
     "text": "Text ATIS (what pilots read)",
     "voice_en": "English voice script",
     "voice_zh": "Chinese voice script",
-    "wire": "What goes to FSD"
+    "wire": "What goes to FSD",
+    "letter": "Information {letter}",
+    "letter_none": "Information --",
+    "voice": "Voice script"
   },
   "state": {
     "not_online": "Not online",

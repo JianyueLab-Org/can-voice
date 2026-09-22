@@ -4,7 +4,8 @@
   },
   "login": {
     "cid": "CAN 号",
-    "password": "密码"
+    "password": "密码",
+    "account": "账号"
   },
   "dialog": {
     "cancel": "取消",
@@ -28,7 +29,8 @@
     "rename_title": "改配置的名字"
   },
   "station": {
-    "new": "+ 新席位",
+    "list_title": "通播席位",
+    "new": "新建",
     "new_title": "新席位",
     "new_placeholder": "机场四字码，例如 ZSPD",
     "pick": "左边挑一个席位，或者新建一个",
@@ -51,7 +53,11 @@
     "chinese_runway_hint": "三五左",
     "presets": "构型",
     "add_preset": "新增",
-    "remove_preset": "删除"
+    "remove_preset": "删除",
+    "edit": "编辑",
+    "delete": "删除",
+    "title": "席位设置",
+    "none": "还没有席位"
   },
   "preset": {
     "new_name": "构型 {n}",
@@ -60,7 +66,10 @@
     "transition_level": "过渡高度层（TL）",
     "closing": "收尾语（留空用内置那句）",
     "chinese_runway": "中文跑道（留空用席位那个）",
-    "chinese_extra": "中文附加说明"
+    "chinese_extra": "中文附加说明",
+    "label": "构型",
+    "edit": "编辑构型",
+    "title": "构型「{name}」"
   },
   "import": {
     "title": "导入",
@@ -81,7 +90,8 @@
       "notam_definitions": "预置的 NOTAM 短语库",
       "atis_voice": "语音录制设置",
       "external_generator": "外部生成器"
-    }
+    },
+    "network_tip": "从 can 取全网通播配置：席位、频率、跑道构型预设、模板和中文播报用词。本地已有的席位默认不动，可以选择用网络版覆盖。"
   },
   "merge": {
     "added": "新增 {count} 个：{list}",
@@ -130,7 +140,10 @@
     "text": "文字通播（飞行员读的）",
     "voice_en": "英文语音稿",
     "voice_zh": "中文语音稿",
-    "wire": "发上 FSD 的那一份"
+    "wire": "发上 FSD 的那一份",
+    "letter": "情报字母：{letter}",
+    "letter_none": "情报字母：--",
+    "voice": "语音稿"
   },
   "state": {
     "not_online": "未上线",

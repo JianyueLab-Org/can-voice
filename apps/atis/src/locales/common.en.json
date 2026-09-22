@@ -41,8 +41,10 @@
   "window": {
     "on_top": "Pin",
     "on_top_tip": "Always on top: stay above the radar screen or simulator instead of being covered by other windows",
+    "on_top_short": "Top",
     "compact": "Compact",
     "compact_tip": "Compact mode: keep only what you watch while on duty, so the window can shrink right down",
+    "compact_short": "Min",
     "settings": "Settings",
     "settings_tip": "Theme, language, server addresses, debug log"
   },

@@ -6,6 +6,7 @@
     "connected": "已连接",
     "connecting": "连接中…",
     "reconnecting": "重连中…",
+    "session": "会话 {cid}",
     "evicted": "这个账号在别处登录了，语音已断开"
   },
   "ended": {
@@ -20,7 +21,8 @@
     "cid": "CAN 号",
     "password": "密码",
     "connect": "连接",
-    "disconnect": "断开"
+    "disconnect": "断开",
+    "idle": "未连接"
   },
   "freq": {
     "out_of_band": "频率要在 118.000 – 136.975 之间",
@@ -36,10 +38,6 @@
     "on": "在席位 {callsign}",
     "observer": "未上席位 · 只收不发",
     "staffing": "值守 {callsign}"
-  },
-  "panel": {
-    "open": "音频与 PTT",
-    "close": "收起"
   },
   "online": {
     "title": "在线席位",
@@ -104,5 +102,8 @@
     "record": "录制一个绑定",
     "wayland": "本系统是 Wayland，普通程序不允许监听全局按键，键盘 PTT 不会响。请改用手柄，或者在 X11 会话下使用。",
     "no_mouse": "本系统不支持鼠标侧键作 PTT，请用键盘或手柄。"
+  },
+  "status": {
+    "ready": "就绪"
   }
 }
