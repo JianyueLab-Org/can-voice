@@ -16,22 +16,28 @@ defineEmits<{ settings: [] }>();
 <template>
   <div class="flex shrink-0 items-center gap-1 text-xs">
     <button
-      class="rounded border px-2 py-0.5"
-      :class="appearance.always_on_top ? 'border-sky-500' : 'opacity-60'"
+      class="rounded border"
+      :class="[
+        appearance.compact ? 'h-[26px] w-[30px]' : 'px-2 py-0.5',
+        appearance.always_on_top ? 'border-sky-500' : 'opacity-60',
+      ]"
       :aria-pressed="appearance.always_on_top"
       :title="t('window.on_top_tip')"
       @click="setAppearance({ always_on_top: !appearance.always_on_top })"
     >
-      {{ t("window.on_top") }}
+      {{ appearance.compact ? t("window.on_top_short") : t("window.on_top") }}
     </button>
     <button
-      class="rounded border px-2 py-0.5"
-      :class="appearance.compact ? 'border-sky-500' : 'opacity-60'"
+      class="rounded border"
+      :class="[
+        appearance.compact ? 'h-[26px] w-[30px]' : 'px-2 py-0.5',
+        appearance.compact ? 'border-sky-500' : 'opacity-60',
+      ]"
       :aria-pressed="appearance.compact"
       :title="t('window.compact_tip')"
       @click="setAppearance({ compact: !appearance.compact })"
     >
-      {{ t("window.compact") }}
+      {{ appearance.compact ? t("window.compact_short") : t("window.compact") }}
     </button>
     <!-- 精简时收起：窄窗口里它占的是值班要看的地方。退出精简就回来。 -->
     <button

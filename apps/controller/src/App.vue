@@ -390,7 +390,7 @@ async function act(name: string, args: Record<string, unknown>) {
     <main
       v-else
       class="flex h-screen w-full flex-col text-sm"
-      :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
+      :class="compact ? 'gap-1 p-1.5' : 'gap-4 p-5'"
     >
       <!-- can-audio 的顺序（controller/gui.py:536-583）：灯、链路、会话、撑开、
            置顶、精简、设置、断开。标题不在这里——旧版主页面没有标题，它在窗口

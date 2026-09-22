@@ -15,8 +15,8 @@
         "title": "audio-for-can",
         "width": 720,
         "height": 560,
-        "minWidth": 520,
-        "minHeight": 360
+        "minWidth": 620,
+        "minHeight": 480
       }
     ],
     "security": {
