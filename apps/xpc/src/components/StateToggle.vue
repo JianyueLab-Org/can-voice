@@ -9,8 +9,7 @@
  *
  * 边框是填充色压暗到 71%（旧版 `fill.darker(140)`）。
  *
- * 用到它的客户端：controller、xpc。msfs 的 TX / RX 色块在计划 4 里接上。
- * 逐字节相同的一份。
+ * 用到它的客户端：controller、xpc、msfs。逐字节相同的一份。
  */
 const props = defineProps<{
   label: string;

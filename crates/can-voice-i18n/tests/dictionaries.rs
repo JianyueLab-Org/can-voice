@@ -742,11 +742,13 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
     ("style.css", &["controller", "atis", "xpc", "msfs"]),
     ("components/ChatLog.vue", &["xpc", "msfs"]),
     ("components/ControllerList.vue", &["xpc", "msfs"]),
+    ("components/FlightPlanDialog.vue", &["xpc", "msfs"]),
     (
         "components/LogPanel.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
-    ("components/Modal.vue", &["atis", "xpc"]),
+    ("components/Modal.vue", &["atis", "xpc", "msfs"]),
+    ("components/Panel.vue", &["xpc", "msfs"]),
     (
         "components/SettingsCommon.vue",
         &["controller", "atis", "xpc", "msfs"],
@@ -761,8 +763,8 @@ const SHARED_FRONTEND: &[(&str, &[&str])] = &[
         "components/StartupGate.vue",
         &["controller", "atis", "xpc", "msfs"],
     ),
-    ("components/StateToggle.vue", &["controller", "xpc"]),
-    ("components/StatusBar.vue", &["controller", "xpc"]),
+    ("components/StateToggle.vue", &["controller", "xpc", "msfs"]),
+    ("components/StatusBar.vue", &["controller", "xpc", "msfs"]),
     ("components/TrafficList.vue", &["xpc", "msfs"]),
     (
         "components/UpdateBanner.vue",

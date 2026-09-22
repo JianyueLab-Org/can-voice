@@ -5,8 +5,8 @@ import { t } from "../i18n";
 /**
  * 通用模态外壳。`SettingsDialog` 的骨架，加一个宽度属性和一个标题。
  *
- * 用到它的客户端：atis、xpc。**登记在 `SHARED_FRONTEND` 上**——两份不登记的副本
- * 会无声地漂开。msfs 的飞行计划对话框在计划 4 里接上。
+ * 用到它的客户端：atis、xpc、msfs。**登记在 `SHARED_FRONTEND` 上**——不登记的
+ * 副本会无声地漂开。
  */
 const props = defineProps<{ open: boolean; title: string; width?: string }>();
 const emit = defineEmits<{ close: [] }>();
