@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import WindowToggles from "./components/WindowToggles.vue";
+import Splitter from "./components/Splitter.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import { appearance, loadAppearance } from "./appearance";
 import { invoke } from "@tauri-apps/api/core";
@@ -27,6 +28,13 @@ import { errorText, t, type Key, type Message } from "./i18n";
 const showPrefs = ref(false);
 /** 精简模式：只留值班时要盯的东西。开关在 WindowToggles 里，真相在设置文件里。 */
 const compact = computed(() => appearance.value.compact);
+/** 左栏宽度。**只活在会话里**，和 can-audio 一样不写进设置文件。 */
+const paneWidth = ref(260);
+// 退出精简时回到 260，和 can-audio 的 `splitter.setSizes([260, 640])` 同一个动作
+// （`atis/gui.py:513`）：精简里左栏被拉成整个窗口宽，出来之后不重置就是一栏顶天。
+watch(compact, (on) => {
+  if (!on) paneWidth.value = 260;
+});
 
 const profiles = ref<{ names: string[]; active: string }>({ names: [], active: "" });
 const stations = ref<Station[]>([]);
@@ -389,232 +397,236 @@ onUnmounted(() => window.clearInterval(timer));
         </button>
       </div>
 
-      <div class="flex min-h-0 flex-1 gap-4">
-        <!-- 席位列表 -->
-        <!-- 精简时只留席位列表：在播的哪几个、各自是哪个字母，就是值班时要盯的。 -->
-        <aside class="flex flex-col gap-1 overflow-auto" :class="compact ? 'flex-1' : 'w-52'">
-          <button
-            v-for="s in stations"
-            :key="callsignOf(s)"
-            class="flex items-center gap-2 rounded border px-2 py-1 text-left font-mono text-xs"
-            :class="callsignOf(s) === selected ? 'border-sky-500' : ''"
-            @click="selected = callsignOf(s)"
-          >
-            <span
-              class="h-2 w-2 shrink-0 rounded-full"
-              :class="live[callsignOf(s)]?.state === 'Online' ? 'bg-green-500' : 'bg-neutral-300'"
-            />
-            <span class="truncate">{{ callsignOf(s) }}</span>
-            <span v-if="live[callsignOf(s)]" class="ml-auto opacity-60">
-              {{ live[callsignOf(s)].letter }}
-            </span>
-          </button>
-          <button
-            v-if="!compact"
-            class="rounded border border-dashed px-2 py-1 text-xs"
-            @click="asking = 'station'"
-          >
-            {{ t("station.new") }}
-          </button>
-          <button class="rounded border px-2 py-1 text-xs" :disabled="!station" @click="asking = 'edit'">
-            {{ t("station.edit") }}
-          </button>
-          <details class="rounded border px-2 py-1 text-xs">
-            <summary class="cursor-pointer opacity-70">{{ t("import.title") }}</summary>
-            <div class="flex flex-col gap-1 pt-2">
-              <!-- 配置本身：席位、频率、构型预设、模板、中文用词。先看差异再并。 -->
-              <button
-                class="rounded border px-2 py-1 text-left"
-                :disabled="busy !== null"
-                @click="checkNetwork"
-              >
-                {{ busy === "network" ? t("busy.fetching") : t("import.network") }}
-              </button>
-              <button
-                class="rounded border px-2 py-1 text-left"
-                :disabled="busy !== null"
-                @click="vatisFile?.click()"
-              >
-                {{ busy === "vatis" ? t("busy.importing") : t("import.vatis") }}
-              </button>
-              <input
-                ref="vatisFile"
-                type="file"
-                accept=".json,application/json"
-                class="hidden"
-                @change="importVatis"
+      <Splitter v-model:width="paneWidth" :collapsed="compact">
+        <template #left>
+          <!-- 席位列表 -->
+          <!-- 精简时只留席位列表：在播的哪几个、各自是哪个字母，就是值班时要盯的。 -->
+          <aside class="flex flex-col gap-1 overflow-auto">
+            <button
+              v-for="s in stations"
+              :key="callsignOf(s)"
+              class="flex items-center gap-2 rounded border px-2 py-1 text-left font-mono text-xs"
+              :class="callsignOf(s) === selected ? 'border-sky-500' : ''"
+              @click="selected = callsignOf(s)"
+            >
+              <span
+                class="h-2 w-2 shrink-0 rounded-full"
+                :class="live[callsignOf(s)]?.state === 'Online' ? 'bg-green-500' : 'bg-neutral-300'"
               />
-              <!-- 运行状态，不是配置：只省掉查机场和频率这一步。 -->
-              <button
-                class="rounded border px-2 py-1 text-left"
-                :disabled="busy !== null"
-                :title="t('import.online_tip')"
-                @click="importOnline"
-              >
-                {{ busy === "online" ? t("busy.fetching") : t("import.online") }}
-              </button>
-            </div>
-          </details>
-
-          <!-- 折叠着：平时不占地方。 -->
-          <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
-            <summary class="cursor-pointer opacity-70">{{ t("airing.title") }}</summary>
-            <div class="flex flex-col gap-2 pt-2">
-              <label class="flex items-center gap-2">
-                <span class="opacity-60">{{ t("airing.refresh") }}</span>
+              <span class="truncate">{{ callsignOf(s) }}</span>
+              <span v-if="live[callsignOf(s)]" class="ml-auto opacity-60">
+                {{ live[callsignOf(s)].letter }}
+              </span>
+            </button>
+            <button
+              v-if="!compact"
+              class="rounded border border-dashed px-2 py-1 text-xs"
+              @click="asking = 'station'"
+            >
+              {{ t("station.new") }}
+            </button>
+            <button class="rounded border px-2 py-1 text-xs" :disabled="!station" @click="asking = 'edit'">
+              {{ t("station.edit") }}
+            </button>
+            <details class="rounded border px-2 py-1 text-xs">
+              <summary class="cursor-pointer opacity-70">{{ t("import.title") }}</summary>
+              <div class="flex flex-col gap-1 pt-2">
+                <!-- 配置本身：席位、频率、构型预设、模板、中文用词。先看差异再并。 -->
+                <button
+                  class="rounded border px-2 py-1 text-left"
+                  :disabled="busy !== null"
+                  @click="checkNetwork"
+                >
+                  {{ busy === "network" ? t("busy.fetching") : t("import.network") }}
+                </button>
+                <button
+                  class="rounded border px-2 py-1 text-left"
+                  :disabled="busy !== null"
+                  @click="vatisFile?.click()"
+                >
+                  {{ busy === "vatis" ? t("busy.importing") : t("import.vatis") }}
+                </button>
                 <input
-                  v-model.number="refreshSecs"
-                  type="number"
-                  min="60"
-                  max="3600"
-                  class="w-20 rounded border px-1 py-0.5"
-                  @change="applyRefresh"
+                  ref="vatisFile"
+                  type="file"
+                  accept=".json,application/json"
+                  class="hidden"
+                  @change="importVatis"
                 />
-                <span class="opacity-60">{{ t("airing.seconds") }}</span>
-              </label>
-              <label class="flex items-center gap-2">
-                <span class="opacity-60">{{ t("airing.rating") }}</span>
-                <select
-                  v-model.number="rating"
-                  class="flex-1 rounded border px-1 py-0.5"
-                  @change="applyRating"
+                <!-- 运行状态，不是配置：只省掉查机场和频率这一步。 -->
+                <button
+                  class="rounded border px-2 py-1 text-left"
+                  :disabled="busy !== null"
+                  :title="t('import.online_tip')"
+                  @click="importOnline"
                 >
-                  <!-- 自动是默认：写死观察员的话，一个 C1 开的通播在雷达图上
-                       显示成观察员，而管制席位上的同一个人是 C1。 -->
-                  <option :value="0">{{ t("airing.rating_auto") }}</option>
-                  <option :value="1">OBS</option>
-                  <option :value="2">S1</option>
-                  <option :value="3">S2</option>
-                  <option :value="4">S3</option>
-                  <option :value="5">C1</option>
-                  <option :value="7">C3</option>
-                  <option :value="8">I1</option>
-                  <option :value="10">I3</option>
-                  <option :value="11">SUP</option>
-                </select>
-              </label>
-              <p class="opacity-50">{{ t("airing.rating_note") }}</p>
-            </div>
-          </details>
+                  {{ busy === "online" ? t("busy.fetching") : t("import.online") }}
+                </button>
+              </div>
+            </details>
 
-          <details v-if="!compact" class="rounded border px-2 py-1 text-xs">
-            <summary class="cursor-pointer opacity-70">{{ t("log.title") }}</summary>
-            <div class="pt-2">
-              <LogPanel :cid="cid" />
-            </div>
-          </details>
-        </aside>
+            <!-- 折叠着：平时不占地方。 -->
+            <details v-if="!compact" class="mt-auto rounded border px-2 py-1 text-xs">
+              <summary class="cursor-pointer opacity-70">{{ t("airing.title") }}</summary>
+              <div class="flex flex-col gap-2 pt-2">
+                <label class="flex items-center gap-2">
+                  <span class="opacity-60">{{ t("airing.refresh") }}</span>
+                  <input
+                    v-model.number="refreshSecs"
+                    type="number"
+                    min="60"
+                    max="3600"
+                    class="w-20 rounded border px-1 py-0.5"
+                    @change="applyRefresh"
+                  />
+                  <span class="opacity-60">{{ t("airing.seconds") }}</span>
+                </label>
+                <label class="flex items-center gap-2">
+                  <span class="opacity-60">{{ t("airing.rating") }}</span>
+                  <select
+                    v-model.number="rating"
+                    class="flex-1 rounded border px-1 py-0.5"
+                    @change="applyRating"
+                  >
+                    <!-- 自动是默认：写死观察员的话，一个 C1 开的通播在雷达图上
+                         显示成观察员，而管制席位上的同一个人是 C1。 -->
+                    <option :value="0">{{ t("airing.rating_auto") }}</option>
+                    <option :value="1">OBS</option>
+                    <option :value="2">S1</option>
+                    <option :value="3">S2</option>
+                    <option :value="4">S3</option>
+                    <option :value="5">C1</option>
+                    <option :value="7">C3</option>
+                    <option :value="8">I1</option>
+                    <option :value="10">I3</option>
+                    <option :value="11">SUP</option>
+                  </select>
+                </label>
+                <p class="opacity-50">{{ t("airing.rating_note") }}</p>
+              </div>
+            </details>
 
-        <!-- 稿子 -->
-        <aside v-if="!compact" class="flex min-w-0 flex-1 flex-col gap-2 overflow-auto border-l pl-4">
-          <template v-if="station">
-            <div class="flex items-center gap-2">
-              <span class="text-xs font-semibold">{{ stateText(current) }}</span>
-              <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
-              <button
-                class="rounded border px-2 py-1 text-xs"
-                :disabled="!editedPreset"
-                @click="asking = 'preset'"
-              >
-                {{ t("preset.edit") }}
-              </button>
-              <button
-                v-if="!onAir"
-                class="ml-auto rounded border px-3 py-1 text-xs"
-                :disabled="!station"
-                @click="start"
-              >
-                {{ t("draft.start") }}
-              </button>
-              <template v-else>
-                <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
-                     而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
-                     跑道变了就是另一份通播。 -->
-                <select
-                  v-model="presetName"
-                  class="ml-auto rounded border px-2 py-1 text-xs"
-                  :title="t('draft.preset_tip')"
-                >
-                  <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
-                </select>
+            <details v-if="!compact" class="rounded border px-2 py-1 text-xs">
+              <summary class="cursor-pointer opacity-70">{{ t("log.title") }}</summary>
+              <div class="pt-2">
+                <LogPanel :cid="cid" />
+              </div>
+            </details>
+          </aside>
+        </template>
+
+        <template #right>
+          <!-- 稿子 -->
+          <aside class="flex flex-col gap-2 overflow-auto">
+            <template v-if="station">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-semibold">{{ stateText(current) }}</span>
+                <span v-if="current" class="font-mono text-xs opacity-60">{{ current.letter }}</span>
                 <button
                   class="rounded border px-2 py-1 text-xs"
-                  :title="t('draft.bump_tip')"
-                  @click="bumpLetter"
+                  :disabled="!editedPreset"
+                  @click="asking = 'preset'"
                 >
-                  {{ t("draft.bump") }}
+                  {{ t("preset.edit") }}
                 </button>
-                <button class="rounded border px-2 py-1 text-xs" @click="refresh">
-                  {{ t("draft.refresh") }}
-                </button>
-                <button class="rounded border px-2 py-1 text-xs" @click="stop">
-                  {{ t("draft.stop") }}
-                </button>
-              </template>
-            </div>
-
-            <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
-                 就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
-            <p
-              v-if="problems.length"
-              class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
-            >
-              {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
-            </p>
-
-            <label class="flex flex-col gap-1">
-              <span class="flex items-center text-xs opacity-60">
-                {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
                 <button
                   v-if="!onAir"
-                  class="ml-auto rounded border px-2 py-0.5"
-                  :disabled="!station || busy !== null"
-                  :title="t('draft.fetch_metar_tip')"
-                  @click.prevent="fetchMetar"
+                  class="ml-auto rounded border px-3 py-1 text-xs"
+                  :disabled="!station"
+                  @click="start"
                 >
-                  {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
+                  {{ t("draft.start") }}
                 </button>
-              </span>
-              <textarea
-                v-if="!onAir"
-                v-model="sampleMetar"
-                rows="3"
-                class="rounded border px-2 py-1 font-mono text-xs"
-              />
-              <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-                current?.metar || t("draft.no_metar")
-              }}</pre>
-            </label>
+                <template v-else>
+                  <!-- 在播时也能换构型：停掉重上的那几十秒里飞行员查不到通播，
+                       而那恰恰是管制员正忙着换跑道的时候。换构型连带推进字母——
+                       跑道变了就是另一份通播。 -->
+                  <select
+                    v-model="presetName"
+                    class="ml-auto rounded border px-2 py-1 text-xs"
+                    :title="t('draft.preset_tip')"
+                  >
+                    <option v-for="p in station?.presets ?? []" :key="p.name">{{ p.name }}</option>
+                  </select>
+                  <button
+                    class="rounded border px-2 py-1 text-xs"
+                    :title="t('draft.bump_tip')"
+                    @click="bumpLetter"
+                  >
+                    {{ t("draft.bump") }}
+                  </button>
+                  <button class="rounded border px-2 py-1 text-xs" @click="refresh">
+                    {{ t("draft.refresh") }}
+                  </button>
+                  <button class="rounded border px-2 py-1 text-xs" @click="stop">
+                    {{ t("draft.stop") }}
+                  </button>
+                </template>
+              </div>
 
-            <template v-if="shown">
-              <div>
-                <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
-                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
-              </div>
-              <div>
-                <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
-                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                  shown.voice_en
+              <!-- 认不出的变量是照字面念出去的：`[RWY]` 打成 `[RUNWAY]`，飞行员听到的
+                   就是一句 "runway" 后面跟着中括号里那个词，而稿子看起来一切正常。 -->
+              <p
+                v-if="problems.length"
+                class="rounded border border-amber-400 px-2 py-1 text-xs text-amber-700"
+              >
+                {{ t("draft.unknown_variables", { list: problems.join(t("common.separator.list")) }) }}
+              </p>
+
+              <label class="flex flex-col gap-1">
+                <span class="flex items-center text-xs opacity-60">
+                  {{ onAir ? t("draft.metar_live") : t("draft.metar_sample") }}
+                  <button
+                    v-if="!onAir"
+                    class="ml-auto rounded border px-2 py-0.5"
+                    :disabled="!station || busy !== null"
+                    :title="t('draft.fetch_metar_tip')"
+                    @click.prevent="fetchMetar"
+                  >
+                    {{ busy === "metar" ? t("busy.fetching") : t("draft.fetch_metar") }}
+                  </button>
+                </span>
+                <textarea
+                  v-if="!onAir"
+                  v-model="sampleMetar"
+                  rows="3"
+                  class="rounded border px-2 py-1 font-mono text-xs"
+                />
+                <pre v-else class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
+                  current?.metar || t("draft.no_metar")
                 }}</pre>
-              </div>
-              <div v-if="station && station.voice_language !== 'en'">
-                <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
-                <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
-                  shown.voice_zh
-                }}</pre>
-              </div>
-              <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
-              <details>
-                <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
-                <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
-                  shown.wire
-                }}</pre>
-              </details>
+              </label>
+
+              <template v-if="shown">
+                <div>
+                  <p class="text-xs opacity-60">{{ t("draft.text") }}</p>
+                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{ shown.text }}</pre>
+                </div>
+                <div>
+                  <p class="text-xs opacity-60">{{ t("draft.voice_en") }}</p>
+                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
+                    shown.voice_en
+                  }}</pre>
+                </div>
+                <div v-if="station && station.voice_language !== 'en'">
+                  <p class="text-xs opacity-60">{{ t("draft.voice_zh") }}</p>
+                  <pre class="rounded border px-2 py-1 text-xs whitespace-pre-wrap">{{
+                    shown.voice_zh
+                  }}</pre>
+                </div>
+                <!-- 声音归服务端机队。这一支只做稿子，所以要让人看见线上那份长什么样。 -->
+                <details>
+                  <summary class="cursor-pointer text-xs opacity-60">{{ t("draft.wire") }}</summary>
+                  <pre class="rounded border px-2 py-1 font-mono text-xs whitespace-pre-wrap">{{
+                    shown.wire
+                  }}</pre>
+                </details>
+              </template>
             </template>
-          </template>
-          <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
-        </aside>
-      </div>
+            <p v-else class="py-8 text-center text-xs opacity-50">{{ t("station.pick") }}</p>
+          </aside>
+        </template>
+      </Splitter>
 
       <NameDialog
         :open="asking === 'profile'"
