@@ -684,11 +684,27 @@ const send = () =>
            （`StatusBar.vue:54`），而 xpc 的 PTT 不在这条栏上，拆这条栏不该松开麦克风。
            `talking` 仍然要传，它是必填属性。
 
-           精简时仍然留一条缝：`transient` 不为 `null`，就是此刻有一句瞬时状态要说。
-           实际只有「检查更新」会在精简模式下点出瞬时状态，而「没有可用的更新。」这句
-           只有这条栏说得出口——藏掉它，那条菜单在精简模式下就成了空操作。话说完
-           （4 秒后 `transient` 回到 `null`）这条栏自己退场，版面还是精简的样子。 -->
-      <StatusBar v-if="!compact || transient !== null" :talking="talking" :status="barStatus" />
+           **精简时这条栏也一直在**，插槽里补上三格状态文案。连接卡片在精简模式下
+           收了起来（见它那里的注释），而它把「模拟器通没通、FSD 在不在线、语音是
+           不是好的」一并带走了——换布局之前这三句在页头，而页头不随精简收起。
+           飞起来之后唯一要盯的就是这三件事，不在这里接住就是退步。
+           顺带，「检查更新」在精简模式下也就有地方说话了：藏掉这条栏，那条菜单
+           在精简模式下是空操作。 -->
+      <StatusBar :talking="talking" :status="barStatus">
+        <span v-if="compact" class="flex shrink-0 items-center gap-2 opacity-70">
+          <span class="flex items-center gap-1">
+            <span
+              class="h-2 w-2 shrink-0 rounded-full"
+              :style="{ background: view?.sim_connected ? 'var(--can-on)' : 'var(--can-idle)' }"
+            />
+            X-Plane
+          </span>
+          <span class="truncate">
+            {{ observing ? t("status.observing") : linkText(view?.link) }}
+          </span>
+          <span class="truncate">{{ voiceText(view?.voice) }}</span>
+        </span>
+      </StatusBar>
 
       <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">
