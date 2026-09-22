@@ -141,7 +141,9 @@
     "observer": "观察员不上网络，飞行计划由机长拍发"
   },
   "local": {
-    "tab": "本机",
+    "audio": "音频",
+    "network": "网络",
+    "traffic": "他机",
     "inject": "把他机注入模拟器",
     "inject_note": "关掉之后天上就只剩自己，语音不受影响",
     "microphone": "麦克风",
@@ -182,8 +184,8 @@
     "no_mouse": "本系统不支持鼠标侧键作 PTT。"
   },
   "plugin": {
-    "version_mismatch": "X-Plane 插件的协议版本是 {version}，和本客户端对不上。它会丢掉每一帧，天上不会有任何飞机——到下面「本机 → X-Plane 他机插件」点一下重新安装。",
-    "not_heard": "没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——到下面「本机 → X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。",
+    "version_mismatch": "X-Plane 插件的协议版本是 {version}，和本客户端对不上。它会丢掉每一帧，天上不会有任何飞机——打开设置，到「他机」页上的「X-Plane 他机插件」点一下重新安装。",
+    "not_heard": "没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——打开设置，到「他机」页上的「X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。",
     "title": "X-Plane 他机插件",
     "why": "没有它，语音和上线都正常，但天上一架别人的飞机都不会出现。",
     "state": {

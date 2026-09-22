@@ -5,10 +5,29 @@ import LogPanel from "./LogPanel.vue";
 import InstallWizard from "./InstallWizard.vue";
 import { t } from "../i18n";
 
+/**
+ * 设置对话框里 xpc 自己那几段：音频 / 网络 / 他机三页（spec §6）。
+ *
+ * **它整个挂在 `SettingsDialog` 的 `v-if="open"` 里面**，每次打开都是新挂一次，
+ * 关掉就销毁。所以 `onMounted` 就是「打开的时候读一遍」，`onUnmounted` 就是
+ * 「关掉的时候停掉」——不要改成 watch，外层 `v-if` 已经决定了生命周期，再套一层
+ * 只会多一条走不到的路（`SettingsCommon` 那条 `{ immediate: true }` 是因为它读的
+ * 是自己的属性，不是自己的挂载）。管制端的 `SettingsPanel.vue` 是同一个形状。
+ *
+ * 「网络」那一页只有寄日志：服务器地址那几格在 `SettingsCommon` 里，就在这个枢轴
+ * 的正上方；真实姓名和连不连在主界面的连接卡片上。
+ *
+ * 只有 xpc 有这个文件，所以不进 `SHARED_FRONTEND`。**哪天 msfs 也要一个，
+ * 那时候把它登记进去**——两份不登记的副本会无声地漂开。
+ */
+
 /// `cid` 是已经存下来的 CAN 号，寄日志时预填，省得再打一遍；
 /// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来。
 const props = defineProps<{ cid?: string; csl?: CslView }>();
 import type { CslView, Settings } from "../types";
+
+/** 枢轴停在哪一页。默认音频，和 can-audio 的 `setCurrentItem("audio")` 一样。 */
+const page = ref<"audio" | "network" | "traffic">("audio");
 
 interface BindingView {
   token: string;
@@ -68,6 +87,10 @@ onMounted(async () => {
 onUnmounted(() => {
   window.clearInterval(captureTimer);
   window.clearInterval(deviceTimer);
+  // 关掉对话框就销毁这个组件，所以「录到一半」是关得掉的——而清掉那个 150 ms
+  // 轮询并不会让 Rust 侧退出录制。不取消的话，对话框关着的时候按下的键会留在
+  // 那里，下次一点「录制」立刻抓到它。
+  if (capturing.value) void invoke("cancel_ptt_capture");
 });
 
 const applyDevices = () =>
@@ -188,14 +211,22 @@ async function remove(i: number) {
 </script>
 
 <template>
-  <section class="flex flex-col gap-3 rounded border p-3 text-xs">
-    <div class="flex flex-col gap-3">
-      <label class="flex items-center gap-2">
-        <input v-model="inject" type="checkbox" @change="applyInject" />
-        <span>{{ t("local.inject") }}</span>
-        <span class="opacity-60">{{ t("local.inject_note") }}</span>
-      </label>
+  <section class="flex flex-col gap-3 text-xs">
+    <!-- 枢轴就是 `PilotPanel` 那个页签的写法：一个 ref、几个按钮、v-if/v-else。
+         三页值不上一个分页组件。 -->
+    <div class="flex gap-2">
+      <button class="rounded border px-2 py-1" :class="page === 'audio' ? 'border-sky-500' : ''" @click="page = 'audio'">
+        {{ t("local.audio") }}
+      </button>
+      <button class="rounded border px-2 py-1" :class="page === 'network' ? 'border-sky-500' : ''" @click="page = 'network'">
+        {{ t("local.network") }}
+      </button>
+      <button class="rounded border px-2 py-1" :class="page === 'traffic' ? 'border-sky-500' : ''" @click="page = 'traffic'">
+        {{ t("local.traffic") }}
+      </button>
+    </div>
 
+    <div v-if="page === 'audio'" class="flex flex-col gap-3">
       <label class="flex items-center gap-2">
         <span class="w-16 opacity-70">{{ t("local.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
@@ -229,6 +260,37 @@ async function remove(i: number) {
         <span class="w-16 shrink-0 opacity-70">{{ t("local.speaker_volume") }}</span>
         <input type="range" min="0" max="200" step="1" v-model.number="speaker" class="flex-1" @change="applyVolume" />
         <span class="w-10 text-right font-mono">{{ speaker }}%</span>
+      </label>
+
+      <div class="flex flex-col gap-2">
+        <span class="font-semibold">{{ t("ptt.title") }}</span>
+        <ul v-if="bindings.length" class="flex flex-col gap-1">
+          <li v-for="(b, i) in bindings" :key="i" class="flex items-center gap-2 rounded border px-2 py-1">
+            <span class="font-mono">{{ b.token || "…" }}</span>
+            <span v-if="b.unresolved" class="text-red-600">{{ t("ptt.unresolved") }}</span>
+            <button class="ml-auto rounded border px-2" @click="remove(i)">{{ t("ptt.remove") }}</button>
+          </li>
+        </ul>
+        <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
+        <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
+          {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
+        </button>
+        <p v-if="!keyboardOk" class="text-red-600">
+          {{ t("ptt.wayland") }}
+        </p>
+        <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
+      </div>
+    </div>
+
+    <div v-else-if="page === 'network'" class="flex flex-col gap-3">
+      <LogPanel :cid="props.cid" />
+    </div>
+
+    <div v-else class="flex flex-col gap-3">
+      <label class="flex items-center gap-2">
+        <input v-model="inject" type="checkbox" @change="applyInject" />
+        <span>{{ t("local.inject") }}</span>
+        <span class="opacity-60">{{ t("local.inject_note") }}</span>
       </label>
 
       <label class="flex items-center gap-2">
@@ -295,28 +357,7 @@ async function remove(i: number) {
         </span>
       </p>
 
-      <div class="flex flex-col gap-2">
-        <span class="font-semibold">{{ t("ptt.title") }}</span>
-        <ul v-if="bindings.length" class="flex flex-col gap-1">
-          <li v-for="(b, i) in bindings" :key="i" class="flex items-center gap-2 rounded border px-2 py-1">
-            <span class="font-mono">{{ b.token || "…" }}</span>
-            <span v-if="b.unresolved" class="text-red-600">{{ t("ptt.unresolved") }}</span>
-            <button class="ml-auto rounded border px-2" @click="remove(i)">{{ t("ptt.remove") }}</button>
-          </li>
-        </ul>
-        <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
-        <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
-          {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
-        </button>
-        <p v-if="!keyboardOk" class="text-red-600">
-          {{ t("ptt.wayland") }}
-        </p>
-        <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
-      </div>
-
       <InstallWizard />
-
-      <LogPanel :cid="props.cid" />
     </div>
   </section>
 </template>

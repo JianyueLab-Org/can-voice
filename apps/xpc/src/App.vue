@@ -9,7 +9,7 @@ import UpdateBanner from "./components/UpdateBanner.vue";
 import StartupGate from "./components/StartupGate.vue";
 import ChatLog from "./components/ChatLog.vue";
 import ControllerList from "./components/ControllerList.vue";
-import PilotPanel from "./components/PilotPanel.vue";
+import PilotSettings from "./components/PilotSettings.vue";
 import FlightPlanDialog from "./components/FlightPlanDialog.vue";
 import type { View } from "./types";
 import { mhz, khzText, xpdrText, voiceText, linkText, noticeText } from "./types";
@@ -426,8 +426,6 @@ const send = () =>
         </div>
       </section>
 
-      <PilotPanel v-if="!compact" :cid="cid" :csl="view?.csl" />
-
       <!-- 左边是天上的，右边是网上的。文字消息此前整块不存在：管制员打字
            飞行员看不见，而他会以为对方没理他。 -->
       <!-- 精简时只留文字消息：管制员打的字飞行员必须看得见，附近的飞机和在线席位
@@ -494,7 +492,9 @@ const send = () =>
         </button>
       </footer>
       <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
-      <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
+      <SettingsDialog :open="showPrefs" @close="showPrefs = false">
+        <PilotSettings :cid="cid" :csl="view?.csl" />
+      </SettingsDialog>
     </main>
   </StartupGate>
 </template>
