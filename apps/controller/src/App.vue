@@ -10,8 +10,10 @@ import StartupGate from "./components/StartupGate.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import OnlineList from "./components/OnlineList.vue";
 import StatusBar from "./components/StatusBar.vue";
+import LoginCard from "./components/LoginCard.vue";
 import { errorText, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
+import { getVersion } from "@tauri-apps/api/app";
 
 type LinkState = "Connecting" | "Online" | "Reconnecting" | "Offline" | "Evicted";
 type Ended = "Offline" | "Evicted" | { Refused: string | { Other: string } };
@@ -109,8 +111,9 @@ const showPrefs = ref(false);
 const compact = computed(() => appearance.value.compact);
 
 const cid = ref("");
-const password = ref("");
 const busy = ref(false);
+/** 版本号，登录页那行。Tauri 从 tauri.conf.json 读，不用再开一个命令。 */
+const version = ref("");
 
 /**
  * 要显示的那条错误。
@@ -156,6 +159,7 @@ onMounted(async () => {
   void loadAppearance();
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
   cid.value = (await invoke<{ cid: string }>("settings")).cid;
+  version.value = await getVersion();
   await refresh();
   timer = window.setInterval(refresh, 200);
   detachPtt = attachPttKeys();
@@ -187,6 +191,18 @@ const statusText = computed(() => {
 });
 
 /**
+ * 登录页那行字。没连上时说链路状态，连接失败时说失败的原因。
+ *
+ * `statusText` 在 Offline 时已经会把 `ended` 说成人话，所以这里只需要在
+ * 命令本身失败时盖掉它。
+ */
+const loginStatus = computed(() => {
+  if (error.value?.kind === "command") return problemText(error.value);
+  return snap.value ? statusText.value : t("login.idle");
+});
+const loginFailed = computed(() => error.value?.kind === "command");
+
+/**
  * 底栏中间那句话。can-audio 的状态栏空闲时说"就绪"，有事说那件事。
  *
  * 和顶栏那句 `statusText` 分开：那一句讲链路，这一句讲刚刚发生了什么。
@@ -212,13 +228,12 @@ function endedText(ended: Ended | null): string {
   return t("ended.refused");
 }
 
-async function connect() {
+async function connect(enteredCid: string, enteredPassword: string) {
   error.value = null;
   busy.value = true;
   try {
-    await invoke("connect", { cid: cid.value, password: password.value });
-    // 密码用过就丢：它只需要换一张 60 秒的票，之后重连带的是票不是密码。
-    password.value = "";
+    await invoke("connect", { cid: enteredCid, password: enteredPassword });
+    cid.value = enteredCid;
     await refresh();
   } catch (e) {
     error.value = { kind: "command", error: e };
@@ -345,8 +360,21 @@ async function act(name: string, args: Record<string, unknown>) {
 
 <template>
   <StartupGate>
+    <main v-if="!connected" class="flex h-screen w-full flex-col gap-3 p-5 text-sm">
+      <UpdateBanner />
+      <LoginCard
+        :cid="cid"
+        :status="loginStatus"
+        :failed="loginFailed"
+        :busy="busy"
+        :version="version"
+        @connect="connect"
+      />
+    </main>
+
     <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
     <main
+      v-else
       class="flex h-screen w-full flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-4 p-5'"
     >
@@ -363,21 +391,8 @@ async function act(name: string, args: Record<string, unknown>) {
         </div>
         <!-- 连接状态、置顶、精简**精简时也都在**：藏掉的话精简之后就切不回来了。 -->
         <WindowToggles class="ml-auto" @settings="showPrefs = true" />
-        <div v-if="!connected" class="flex items-center gap-2">
-          <input v-model="cid" :placeholder="t('login.cid')" class="w-24 rounded border px-2 py-1" />
-          <input
-            v-model="password"
-            type="password"
-            :placeholder="t('login.password')"
-            class="w-32 rounded border px-2 py-1"
-            @keyup.enter="connect"
-          />
-          <button :disabled="busy" class="rounded border px-3 py-1" @click="connect">
-            {{ t("login.connect") }}
-          </button>
-        </div>
         <!-- 精简时收起断开：和旧版一样，精简就是在值班，那颗按钮在窄窗口里只会被误点。 -->
-        <button v-else-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
+        <button v-if="!compact" class="rounded border px-3 py-1" @click="disconnect">
           {{ t("login.disconnect") }}
         </button>
       </header>

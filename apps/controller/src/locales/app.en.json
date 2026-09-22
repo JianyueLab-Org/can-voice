@@ -20,7 +20,8 @@
     "cid": "CAN ID",
     "password": "Password",
     "connect": "Connect",
-    "disconnect": "Disconnect"
+    "disconnect": "Disconnect",
+    "idle": "Not connected"
   },
   "freq": {
     "out_of_band": "Frequency must be between 118.000 and 136.975",

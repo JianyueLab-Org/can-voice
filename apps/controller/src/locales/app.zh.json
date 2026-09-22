@@ -20,7 +20,8 @@
     "cid": "CAN 号",
     "password": "密码",
     "connect": "连接",
-    "disconnect": "断开"
+    "disconnect": "断开",
+    "idle": "未连接"
   },
   "freq": {
     "out_of_band": "频率要在 118.000 – 136.975 之间",
