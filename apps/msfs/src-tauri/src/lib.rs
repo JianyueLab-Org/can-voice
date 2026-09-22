@@ -355,6 +355,10 @@ pub struct App {
     /// 新旧两条一起改台面——一条跟手输的频率，一条跟 COM1——台面上就有两个
     /// 都开着发射的频率。
     pump: Mutex<Option<tokio::task::AbortHandle>>,
+    /// 菜单上刚点的那一项，等着前端下一拍取走。**不走 `emit`**：ACL 没给事件权限，
+    /// 而且 `.setup()` 跑的时候 webview 还没加载完自己的包，tauri 不会为还没起来的
+    /// 页面补发事件。
+    menu: Mutex<Option<MenuRequest>>,
 }
 
 impl App {
@@ -373,6 +377,7 @@ impl App {
                 &settings,
             ))),
             pump: Mutex::new(None),
+            menu: Mutex::new(None),
             store,
             inject: Arc::new(std::sync::atomic::AtomicBool::new(settings.inject)),
             settings: Mutex::new(settings),
@@ -474,6 +479,24 @@ impl Default for App {
     }
 }
 
+/// 菜单上那几项里，要前端去做的那几项。退出和打开日志目录在 Rust 里就地做完，
+/// 不从这里走。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MenuRequest {
+    FlightPlan,
+    Settings,
+    Update,
+    About,
+}
+
+const MENU_FLIGHT_PLAN: &str = "flight_plan";
+const MENU_SETTINGS: &str = "settings";
+const MENU_QUIT: &str = "quit";
+const MENU_OPEN_LOG: &str = "open_log";
+const MENU_UPDATE: &str = "update";
+const MENU_ABOUT: &str = "about";
+
 /// 界面读的一份快照。
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct View {
@@ -495,6 +518,8 @@ pub struct View {
     pub hangar: HangarView,
     /// 以观察员身份连着时的状况；没连、或者正常上着网是 `None`。
     pub observer: Option<ObserverView>,
+    /// 菜单上刚点的那一项。**读一次就没了**——见 `build_view`。
+    pub menu: Option<MenuRequest>,
 }
 
 /// 观察员那一侧的状况。
@@ -972,6 +997,9 @@ fn build_view(app: &App) -> View {
                 manual: manual.is_some(),
             }
         }),
+        // **取走并清掉。** 留着的话前端每一拍都会重新开一次对话框——250 ms 一次，
+        // 关都关不掉。
+        menu: app.menu.lock().expect("menu").take(),
     }
 }
 
@@ -1646,6 +1674,34 @@ fn log_file() -> Option<String> {
     can_voice_log::path().map(|p| p.display().to_string())
 }
 
+/// 日志目录。**不收参数**：路径自己从 `can_voice_log::path()` 算。
+///
+/// 收一个 `String` 再 spawn，等于把任意路径的执行权交给网页那一侧，而
+/// `can_voice_update::open_in_browser` 只放行 https 就是为了不做这件事。
+fn open_log_dir_inner() -> Result<(), Message> {
+    let file = can_voice_log::path().ok_or_else(|| Message::new("log.no_file"))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| Message::new("log.no_file"))?
+        .to_path_buf();
+    can_voice_update::open_folder(&dir)
+}
+
+#[tauri::command]
+fn open_log_dir() -> Result<(), Message> {
+    open_log_dir_inner()
+}
+
+/// 当前版本号。关于框那一行用它。
+///
+/// **不用 `@tauri-apps/api/app` 的 getVersion**：那是插件命令，要 `core:app` 权限，
+/// 而这四个端的 capabilities 只给了 `updater:default`。自定义命令不走 ACL，
+/// 而且这里读的是和日志、User-Agent 同一个常量，版本号对得上。
+#[tauri::command]
+fn app_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 /// 把日志寄回去。
 ///
 /// **要 CAN 号和密码**：can-api 的 `/api/v1/logs` 认的是这一对，不是会话。
@@ -1666,6 +1722,55 @@ async fn send_log(
         &password,
     )
     .await
+}
+
+// ——— 原生菜单 ———
+
+/// 菜单上的字。**从前端来。**
+///
+/// 字典在 webview 里（`can_voice_i18n` 的模块注释写明了为什么：Rust 侧拼好一句
+/// 中文交出去，切到英文之后那一句还是中文）。所以这里一句文案都不持有：前端挂载时
+/// 和每次切语言时各调一次，整条菜单重建，菜单跟着语言当场变。
+///
+/// 代价是最初几帧没有菜单。和这个程序里别处一样，是轮询式启动的正常样子。
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MenuLabels {
+    file: String,
+    flight_plan: String,
+    settings: String,
+    quit: String,
+    help: String,
+    open_log: String,
+    update: String,
+    about: String,
+}
+
+/// 建（或重建）整条菜单。
+#[tauri::command]
+fn set_menu(handle: tauri::AppHandle, labels: MenuLabels) -> Result<(), Message> {
+    use tauri::menu::{MenuBuilder, SubmenuBuilder};
+
+    let fail = |e: tauri::Error| Message::new("problem.menu").with("detail", e);
+
+    let file = SubmenuBuilder::new(&handle, labels.file)
+        .text(MENU_FLIGHT_PLAN, labels.flight_plan)
+        .text(MENU_SETTINGS, labels.settings)
+        .separator()
+        .text(MENU_QUIT, labels.quit)
+        .build()
+        .map_err(fail)?;
+    let help = SubmenuBuilder::new(&handle, labels.help)
+        .text(MENU_OPEN_LOG, labels.open_log)
+        .text(MENU_UPDATE, labels.update)
+        .text(MENU_ABOUT, labels.about)
+        .build()
+        .map_err(fail)?;
+    let menu = MenuBuilder::new(&handle)
+        .items(&[&file, &help])
+        .build()
+        .map_err(fail)?;
+    handle.set_menu(menu).map(|_| ()).map_err(fail)
 }
 
 // ——— 设置对话框、置顶、精简（#45）———
@@ -1785,6 +1890,32 @@ pub fn run() {
         builder = builder.plugin(can_voice_autoupdate::plugin());
     }
     builder
+        .on_menu_event(|handle, event| {
+            let request = match event.id().as_ref() {
+                MENU_FLIGHT_PLAN => Some(MenuRequest::FlightPlan),
+                MENU_SETTINGS => Some(MenuRequest::Settings),
+                MENU_UPDATE => Some(MenuRequest::Update),
+                MENU_ABOUT => Some(MenuRequest::About),
+                // 这两项不用惊动前端。
+                MENU_QUIT => {
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.close();
+                    }
+                    None
+                }
+                MENU_OPEN_LOG => {
+                    // 失败只记日志：菜单事件没有回程，这里 `?` 不出去。
+                    if let Err(e) = open_log_dir_inner() {
+                        tracing::warn!(error = %e, "could not open the log folder");
+                    }
+                    None
+                }
+                _ => None,
+            };
+            if let Some(request) = request {
+                *handle.state::<App>().menu.lock().expect("menu") = Some(request);
+            }
+        })
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
         .setup(|handle| {
             let app = handle.state::<App>();
@@ -1802,6 +1933,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             log_file,
+            open_log_dir,
+            app_version,
+            set_menu,
             set_appearance,
             set_endpoints,
             endpoint_fields,
@@ -1871,6 +2005,18 @@ mod tests {
         assert_eq!(v.link, Some(FsdState::Online));
         assert_eq!(v.reason, Some(Reason::Online));
     }
+    /// 菜单那一项是**取走就没了**。留着的话，前端每一拍都会重新开一次对话框——
+    /// 250 ms 一次，关都关不掉。
+    #[test]
+    fn a_menu_request_is_taken_once() {
+        let rt = tokio::runtime::Runtime::new().expect("rt");
+        let _guard = rt.enter();
+        let app = App::new();
+        *app.menu.lock().expect("menu") = Some(MenuRequest::Settings);
+        assert_eq!(build_view(&app).menu, Some(MenuRequest::Settings));
+        assert_eq!(build_view(&app).menu, None);
+    }
+
     use can_voice_fsd::pilot::XpdrMode;
 
     /// 管制员打的字要能到界面上，在线席位也是。
