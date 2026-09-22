@@ -1418,10 +1418,7 @@ fn wait_for_hangar(loading: &std::sync::atomic::AtomicBool) {
     let mut waited = false;
     loop {
         let elapsed = started.elapsed();
-        match policy.step(
-            loading.load(std::sync::atomic::Ordering::Relaxed),
-            elapsed,
-        ) {
+        match policy.step(loading.load(std::sync::atomic::Ordering::Relaxed), elapsed) {
             can_voice_sim::msfs_hangar::WaitStep::Ready => {
                 // 没等过就什么也不说：健康的日志不该多出一行。
                 if waited {
