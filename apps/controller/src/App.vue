@@ -9,6 +9,7 @@ import UpdateBanner from "./components/UpdateBanner.vue";
 import StartupGate from "./components/StartupGate.vue";
 import SettingsPanel from "./components/SettingsPanel.vue";
 import OnlineList from "./components/OnlineList.vue";
+import StatusBar from "./components/StatusBar.vue";
 import { errorText, t } from "./i18n";
 import { attachPttKeys } from "./pttKeys";
 
@@ -184,6 +185,20 @@ const statusText = computed(() => {
       return endedText(s.ended);
   }
 });
+
+/**
+ * 底栏中间那句话。can-audio 的状态栏空闲时说"就绪"，有事说那件事。
+ *
+ * 和顶栏那句 `statusText` 分开：那一句讲链路，这一句讲刚刚发生了什么。
+ */
+const barStatus = computed(() => (error.value ? problemText(error.value) : t("status.ready")));
+
+/** 右边那句话。can-audio 值守时着绿，不值守说"只收不发"。 */
+const dutyText = computed(() =>
+  onDuty.value
+    ? t("duty.staffing", { callsign: feed.value?.duty.callsign ?? "" })
+    : t("duty.observer"),
+);
 
 function endedText(ended: Ended | null): string {
   if (!ended || ended === "Offline") return t("ended.offline");
@@ -486,32 +501,16 @@ async function act(name: string, args: Record<string, unknown>) {
         </div>
       </section>
 
-      <footer
+      <StatusBar
         v-if="!compact"
-        class="flex items-center justify-between gap-3 border-t pt-3 text-xs"
+        :talking="talking"
+        :status="barStatus"
+        :duty="dutyText"
+        :duty-on="connected && onDuty"
+        @down="pttDown"
+        @up="pttUp"
       >
-        <button
-          class="flex items-center gap-2"
-          :title="t('ptt.hold_tip')"
-          @pointerdown="pttDown"
-          @pointerup="pttUp"
-          @pointercancel="pttUp"
-        >
-          <span
-            class="inline-block h-3 w-3 rounded-full"
-            :style="{ background: talking ? '#c7861d' : '#8b90a4' }"
-          />
-          <span
-            class="text-xs"
-            :class="talking ? 'font-bold' : 'opacity-60'"
-            :style="talking ? { color: '#c7861d' } : {}"
-          >PTT</span>
-        </button>
-        <span class="opacity-70">
-          <template v-if="connected && onDuty">{{ t("duty.staffing", { callsign: feed?.duty.callsign ?? "" }) }}</template>
-          <template v-else-if="connected">{{ t("duty.observer") }}</template>
-        </span>
-        <span v-if="snap?.health && !compact" class="opacity-60">
+        <span v-if="snap?.health" class="shrink-0 opacity-60">
           {{
             t("health.summary", {
               rtt: snap.health.rtt_ms,
@@ -523,7 +522,7 @@ async function act(name: string, args: Record<string, unknown>) {
             {{ t("health.unparsable", { count: snap.health.unparsable }) }}
           </span>
         </span>
-      </footer>
+      </StatusBar>
       <SettingsDialog :open="showPrefs" @close="showPrefs = false" />
     </main>
   </StartupGate>

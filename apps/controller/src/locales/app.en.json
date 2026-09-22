@@ -104,5 +104,8 @@
     "record": "Record a binding",
     "wayland": "This system is running Wayland, which does not let ordinary programs listen for global keys, so keyboard PTT will not work. Use a joystick instead, or run under an X11 session.",
     "no_mouse": "Mouse side buttons are not supported as PTT on this system; use the keyboard or a joystick."
+  },
+  "status": {
+    "ready": "Ready"
   }
 }
