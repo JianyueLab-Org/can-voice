@@ -38,7 +38,11 @@ func (s *Session) allowsTX(freq uint32, snap fsdfeed.Snapshot, degraded bool, no
 			return false
 		}
 		p, ok := snap.ByCallsign[s.Station]
-		return ok && p.CID == s.CID && p.IsATIS && p.FrequencyKHz == freq
+		// The ATIS voice account is intentionally separate from the FSD
+		// publisher account.  The signed station/callsign and frequency grant
+		// are the identity checks; requiring the CIDs to match rejects the
+		// normal dedicated-ATIS deployment.
+		return ok && p.Callsign == s.Station && p.IsATIS && p.FrequencyKHz == freq
 	default:
 		return false
 	}

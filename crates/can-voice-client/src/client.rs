@@ -312,8 +312,13 @@ impl VoiceClient {
     }
 
     /// 关闭。
-    pub async fn shutdown(self) {
+    pub fn request_shutdown(&self) {
         let _ = self.commands.send(Command::Shutdown);
+    }
+
+    /// 关闭。
+    pub async fn shutdown(self) {
+        self.request_shutdown();
     }
 }
 

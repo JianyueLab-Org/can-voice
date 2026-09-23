@@ -59,8 +59,8 @@ impl Error {
             Error::Rejected(status) => {
                 Message::new("error.token.rejected").with("status", status.as_u16())
             }
-            Error::ScopePending => Message::new("error.token.rejected").with("status", 403),
-            Error::AuthorityUnavailable => Message::new("error.token.rejected").with("status", 503),
+            Error::ScopePending => Message::new("error.token.scope_pending"),
+            Error::AuthorityUnavailable => Message::new("error.token.authority_unavailable"),
             Error::Http(e) => Message::new("error.token.unreachable").with("detail", e),
             Error::Voice(ClientError::Conn(ConnError::Refused(reason))) => match reason {
                 RefusedReason::TokenExpired => Message::new("error.voice.token_expired"),
@@ -333,6 +333,14 @@ mod tests {
     fn each_failure_tells_the_member_what_to_do_about_it() {
         let refused = |r| Error::Voice(ClientError::Conn(ConnError::Refused(r)));
         assert_eq!(Error::Credentials.message().key, "error.token.credentials");
+        assert_eq!(
+            Error::ScopePending.message().key,
+            "error.token.scope_pending"
+        );
+        assert_eq!(
+            Error::AuthorityUnavailable.message().key,
+            "error.token.authority_unavailable"
+        );
         assert_eq!(
             refused(RefusedReason::ProtoUnsupported).message().key,
             "error.voice.proto_unsupported"

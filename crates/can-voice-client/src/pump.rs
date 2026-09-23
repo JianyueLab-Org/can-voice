@@ -296,7 +296,7 @@ async fn pump(
                     let now = epoch.elapsed().as_millis() as i64;
                     rtt_ms = now.saturating_sub(p.t).clamp(0, u32::MAX as i64) as u32;
                 }
-                Some(Ok(Message::Notice(n))) => on_notice(subs, events, n),
+                Some(Ok(Message::Notice(n))) => on_notice(subs, events, &mut ptt, n),
                 Some(Ok(Message::Bye(b))) => {
                     // BYE **会丢**——真正丢不掉的是关闭码与原因串，它们和关闭
                     // 原子地一起送达。所以这里只记日志，处置交给 `drop_reason`。
@@ -497,6 +497,7 @@ fn on_ack(
 fn on_notice(
     subs: &mut SubscriptionState,
     events: &tokio::sync::broadcast::Sender<Event>,
+    ptt: &mut bool,
     n: control::Notice,
 ) {
     use can_voice_proto::control::notice_kind;
@@ -506,6 +507,7 @@ fn on_notice(
             reason: n.reason,
         });
     } else if n.kind == notice_kind::AUTHORITY_LOST {
+        *ptt = false;
         subs.revoke_tx();
         let _ = events.send(Event::SubscriptionAck {
             rx: subs.acknowledged().rx.clone(),
@@ -556,5 +558,25 @@ mod tests {
             }
             other => panic!("expected Health, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn authority_loss_releases_local_ptt_state() {
+        let (events, _rx) = tokio::sync::broadcast::channel(8);
+        let mut subs = SubscriptionState::new();
+        let mut ptt = true;
+        on_notice(
+            &mut subs,
+            &events,
+            &mut ptt,
+            can_voice_proto::control::Notice {
+                kind: can_voice_proto::control::notice_kind::AUTHORITY_LOST.into(),
+                freq: 118_000,
+                reason: "seat changed".into(),
+                session: 0,
+                cid: String::new(),
+            },
+        );
+        assert!(!ptt, "authority loss must force a local PTT release");
     }
 }

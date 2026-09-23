@@ -348,11 +348,23 @@ impl Inner {
     /// 这正是声明式 API 换来的东西。
     fn adopt(self: &Arc<Self>, client: VoiceClient) {
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.transmitting.store(false, Ordering::Relaxed);
+        let transmitting = self.transmitting.load(Ordering::Relaxed);
+        let old = self.client.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(old) = old {
+            // Close the previous session before exposing the replacement. This prevents
+            // scope changes and token renewals from leaving two active voice sessions.
+            old.request_shutdown();
+        }
         let events = client.events();
         if let Ok(mut slot) = self.client.lock() {
             *slot = Some(client);
+            if transmitting {
+                if let Some(current) = slot.as_ref() {
+                    current.set_transmitting(true);
+                }
+            }
         }
+        self.transmitting.store(transmitting, Ordering::Relaxed);
         tokio::spawn(supervise(self.clone(), events, generation));
         self.push_declaration();
         self.push_master();
@@ -365,6 +377,17 @@ impl Inner {
             if let Some(c) = c.as_ref() {
                 c.set_master_volume(mic, speaker);
             }
+        }
+    }
+
+    fn apply_event(&self, event: &Event) {
+        if let Event::Notice { kind, .. } = event {
+            if kind == can_voice_proto::control::notice_kind::AUTHORITY_LOST {
+                self.transmitting.store(false, Ordering::Relaxed);
+            }
+        }
+        if let Ok(mut snapshot) = self.snapshot.lock() {
+            snapshot.apply(event);
         }
     }
 
@@ -399,11 +422,11 @@ async fn supervise(
                 if inner.generation.load(Ordering::Relaxed) != generation {
                     return;
                 }
+                inner.apply_event(&e);
                 let ended = {
-                    let Ok(mut s) = inner.snapshot.lock() else {
+                    let Ok(s) = inner.snapshot.lock() else {
                         return;
                     };
-                    s.apply(&e);
                     s.ended.clone()
                 };
                 let Some(ended) = ended else { continue };
@@ -594,6 +617,18 @@ mod tests {
     fn ptt_does_not_light_without_a_client() {
         let b = Bridge::new();
         b.set_transmitting(true);
+        assert!(!b.transmitting());
+    }
+
+    #[test]
+    fn authority_loss_clears_bridge_transmitting_state() {
+        let b = Bridge::new();
+        b.inner.transmitting.store(true, Ordering::Relaxed);
+        b.inner.apply_event(&Event::Notice {
+            kind: can_voice_proto::control::notice_kind::AUTHORITY_LOST.into(),
+            freq_khz: 118_000,
+            reason: "seat changed".into(),
+        });
         assert!(!b.transmitting());
     }
 

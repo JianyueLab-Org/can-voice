@@ -64,7 +64,7 @@ services:
       # 这是类型层面的事实而不是纪律。
       # Accept the deployment name used by can-api as a fallback. Keep
       # ATIS_CID as the preferred name for backwards compatibility.
-      ATIS_CID: "${ATIS_CID:-${VOICE_ATIS_CID:-100}}"
+      ATIS_CID: "${ATIS_CID:-${VOICE_ATIS_CID:-}}"
       ATIS_PASSWORD: "${ATIS_PASSWORD}"
       CAN_API_ORIGIN: "${CAN_API_ORIGIN:-https://api.ceruleanavi.net}"
       # **连的是外面那个地址，不是 can-voice:64738。** 票是按域名签的，

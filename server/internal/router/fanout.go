@@ -222,6 +222,16 @@ func (r *Router) positions() (fsdfeed.Snapshot, bool) {
 	r.mu.RLock()
 	l := r.locator
 	r.mu.RUnlock()
+	return positionsFromLocator(l)
+}
+
+// positionsLocked is used when an authority decision must be made atomically
+// with a subscription mutation. The caller must hold r.mu.
+func (r *Router) positionsLocked() (fsdfeed.Snapshot, bool) {
+	return positionsFromLocator(r.locator)
+}
+
+func positionsFromLocator(l Locator) (fsdfeed.Snapshot, bool) {
 	if l == nil {
 		// 没装 Locator 等于永久降级：全部放行。启动顺序里 Fanout 完全
 		// 可能先于 SetLocator。

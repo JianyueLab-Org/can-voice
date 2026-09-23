@@ -133,7 +133,7 @@ pub struct Settings {
     #[serde(default)]
     pub observer: bool,
     /// Observer's own FSD callsign, separate from the pilot callsign.
-    #[serde(default)]
+    #[serde(default, alias = "follow")]
     pub observer_callsign: String,
     /// 观察员手输的频率（kHz）。`None` = 跟随本机 COM1。
     #[serde(default)]
@@ -2520,6 +2520,12 @@ mod tests {
         assert!(!s.observer);
         assert_eq!(s.observer_callsign, "");
         assert_eq!(s.observer_frequency, None);
+    }
+
+    #[test]
+    fn legacy_follow_is_migrated_to_observer_callsign() {
+        let s: Settings = serde_json::from_str(r#"{"follow":"CCA1501"}"#).expect("parse");
+        assert_eq!(s.observer_callsign, "CCA1501");
     }
 
     /// **观察员没有 FSD，`link` 永远是 `None`**，而前端的 `online` 原本全由它推导。

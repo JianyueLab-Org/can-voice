@@ -91,6 +91,11 @@ type Session struct {
 	// 拆连接，回调进去等于让它自己拆自己。
 	closeConn func()
 
+	// expiryTimer is stopped when the session is removed. Keeping one
+	// cancellable timer per live session preserves prompt expiry handling
+	// without accumulating callbacks for disconnected sessions.
+	expiryTimer *time.Timer
+
 	subs atomic.Pointer[subs]
 }
 

@@ -195,32 +195,75 @@ async fn a_drop_after_login_is_retried_and_then_gives_up() {
     assert_eq!(log.connections(), 3, "{:?}", log.lines());
 }
 
-/// **一次成功的重连把计数清零。**
+/// **稳定的重连把连续失败计数清零。**
 ///
-/// 计的是"连着失败几次"，不是"这条连接一辈子断过几次"。不清零的话，一个连了
-/// 八小时、中间抖过两次的席位会在第三次抖动时整个下线，而它其实一直好好的。
-///
-/// 这一条是时序上才成立的，纯函数测不到：让服务端一直"登录成功然后掐线"，
-/// 它就该一直重连下去，永远走不到 `Offline`。
+/// 第一条连接掉线后，第二条连接保持在线超过稳定窗口再掉线。若稳定连接没有
+/// 清掉前一次的失败计数，重连上限为 1 时会在第二条连接掉线后直接终止，根本
+/// 不会尝试第三条连接。
 #[tokio::test]
-async fn a_successful_reconnect_clears_the_counter() {
-    let (port, log) = fake_server(|s, l, _| serve(s, l, true, Some(4))).await;
-    let handle = client::connect(config(port));
+async fn a_stable_reconnect_clears_the_counter() {
+    let (port, log) = fake_server(|stream, log, n| async move {
+        if n == 0 {
+            serve(stream, log, true, Some(4)).await;
+            return;
+        }
+        if n == 1 {
+            let (read, mut write) = stream.into_split();
+            let mut lines = BufReader::new(read).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                log.lines.lock().expect("lock").push(line.clone());
+                if line.contains(":SERVER:CAPS") {
+                    let _ = write
+                        .write_all(b"$CRSERVER:ZSPD_ATIS:CAPS:ATCINFO=1\r\n")
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    return;
+                }
+            }
+            return;
+        }
+        serve(stream, log, false, Some(1)).await;
+    })
+    .await;
+    let mut cfg = config(port);
+    cfg.reconnect_limit = 1;
+    let handle = client::connect(cfg);
     let mut events = handle.events();
     wait_for(&mut events, |e| e.state == FsdState::Online, "online").await;
 
-    // 重连上限是 2，所以"不清零"的实现在第三次之后就会放弃。
-    // 等到连接数明显超过那个数，再看它有没有报终态。
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
-    while tokio::time::Instant::now() < deadline && log.connections() < 5 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(
-        log.connections() >= 5,
-        "it stopped reconnecting after {} tries",
-        log.connections()
-    );
-    handle.stop();
+    let gave_up = wait_for(
+        &mut events,
+        |e| e.state == FsdState::Offline,
+        "giving up after the stable reconnect",
+    )
+    .await;
+    assert_eq!(gave_up.reason, Reason::GaveUp { limit: 1 });
+    assert_eq!(log.connections(), 3, "{:?}", log.lines());
+}
+
+/// **登录成功后又在收发循环中掉线，也必须消耗重连预算。**
+///
+/// 如果 `attach` 在 `pump` 返回后仍回传 `Ok(())`，外层循环会把 `attempts`
+/// 清零。服务端每次都让登录成功、随后立刻掐线时，这条连接就会无限重连，
+/// `reconnect_limit` 永远不会生效。
+#[tokio::test]
+async fn a_pump_drop_consumes_the_reconnect_budget() {
+    let (port, log) = fake_server(|s, l, _| serve(s, l, true, Some(4))).await;
+    let mut cfg = config(port);
+    cfg.reconnect_limit = 2;
+    let handle = client::connect(cfg);
+    let mut events = handle.events();
+    wait_for(&mut events, |e| e.state == FsdState::Online, "online").await;
+
+    let gave_up = wait_for(
+        &mut events,
+        |e| e.state == FsdState::Offline,
+        "giving up after pump drops",
+    )
+    .await;
+    assert_eq!(gave_up.reason, Reason::GaveUp { limit: 2 });
+    // 初次连接 + 两次重连，不能无限重连。
+    assert_eq!(log.connections(), 3, "{:?}", log.lines());
 }
 
 /// 登录被拒时**说得出是哪一条**，而不是一句"连接失败"。

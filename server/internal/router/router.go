@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
-	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 )
 
 // Router 持有全部服务端状态。
@@ -142,11 +141,10 @@ func (r *Router) Add(o SessionOpts) *Session {
 		r.byCID[evictionKey(o.CID, o.Station)] = s.ID
 	}
 	r.sessions[s.ID] = s
-	r.mu.Unlock()
 	if o.Role != "" && !o.GrantExpires.IsZero() {
-		time.AfterFunc(time.Until(o.GrantExpires), r.ReconcileAuthority)
+		s.expiryTimer = time.AfterFunc(time.Until(o.GrantExpires), r.ReconcileAuthority)
 	}
-
+	r.mu.Unlock()
 	// 断连放在锁外：closeConn 是传输层的回调，它可能回头再调 router
 	// （比如它自己的 defer 里有 Remove），持锁调用就是自锁。
 	if evicted != nil {
@@ -176,6 +174,10 @@ func (r *Router) removeLocked(id SessionID) {
 	s, ok := r.sessions[id]
 	if !ok {
 		return
+	}
+	if s.expiryTimer != nil {
+		s.expiryTimer.Stop()
+		s.expiryTimer = nil
 	}
 	old := s.subs.Load()
 	for f := range old.rx {
@@ -258,8 +260,7 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	sub.TX, excessTX, unreportedTX = truncateDeclaration(sub.TX, limit)
 	sub.RX, excessRX, unreportedRX = truncateDeclaration(sub.RX, limit)
 
-	snap, degraded := r.positions()
-	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX, snap, degraded, time.Now())
+	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX, time.Now())
 	unreported += unreportedTX + unreportedRX
 	ack.RejectedTruncated = unreported > 0
 
@@ -279,9 +280,10 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 // 拆出来不是为了好看：调用方要在锁外记一条日志，而 `defer r.mu.Unlock()` 会
 // 让函数体里任何一句日志都落在锁内。把锁的范围变成一个函数，是这里唯一一种
 // 不依赖"defer 是 LIFO、所以这两条的注册顺序有讲究"这类细节的写法。
-func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32, snap fsdfeed.Snapshot, degraded bool, now time.Time) (control.SubAck, int) {
+func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32, now time.Time) (control.SubAck, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	snap, degraded := r.positionsLocked()
 
 	ack := control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}, RejectedXC: [][2]uint32{}}
 	s, ok := r.sessions[id]

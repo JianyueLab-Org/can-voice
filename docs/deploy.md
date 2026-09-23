@@ -73,7 +73,7 @@ cp .env.example .env
 |---|---|
 | `CAN_VOICE_DOMAIN` | 拼 `/etc/letsencrypt/live/<域名>/`，和 certbot 申请时一字不差 |
 | `CAN_VOICE_API_PUBKEY` | 上一步的公钥 |
-| `ATIS_CID` / `ATIS_PASSWORD` | 机队用的**真实成员账号**。不填则容器能起、通播是哑的。空串也算没填好（#69） |
+| `ATIS_CID` / `ATIS_PASSWORD` | 机队用的**真实成员账号**。不填或为空时 ATIS 容器直接退出。空串也算没填好（#69） |
 
 can-api 的 `VOICE_ATIS_CID` 必须与 can-voice 的 `ATIS_CID` 相同，才能签发通播席位的语音票。
 它可以与 FSD 中发布该席位的控制员 CID 不同；FSD 只需提供在线的呼号和频率。

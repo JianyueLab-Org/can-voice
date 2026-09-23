@@ -16,8 +16,8 @@
 //! 次数用尽后报 [`FsdState::Offline`] 并结束，调用方据此把这个席位整个收掉
 //! （语音也一起），而不是留一条谁也说不清状态的连接。
 //!
-//! **一次成功的重连把计数清零**——计的是"连着失败几次"，不是"这条连接一辈子
-//! 断过几次"，否则一个连了八小时、中间抖过两次的席位会在第三次抖动时整个下线。
+//! **一次稳定的重连把计数清零**——计的是"连着失败几次"，不是"这条连接一辈子
+//! 断过几次"。刚登录就掉线仍算一次失败，避免反复成功登录后立即断线时无限重连。
 //!
 //! # 错误在一个地方翻译成"重连中"
 //!
@@ -250,6 +250,20 @@ enum Handled {
     Fatal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PumpExit {
+    Dropped { stable: bool },
+    Stopped,
+}
+
+impl PumpExit {
+    fn dropped(since: tokio::time::Instant) -> Self {
+        Self::Dropped {
+            stable: since.elapsed() >= RECONNECT_DELAY,
+        }
+    }
+}
+
 impl<R: Role> Session<R> {
     fn emit(&self, state: FsdState, reason: Reason) {
         let state = if self.retryable && matches!(state, FsdState::Error | FsdState::Stopped) {
@@ -275,9 +289,16 @@ impl<R: Role> Session<R> {
 
         loop {
             match self.attach().await {
-                Ok(()) => {
-                    attempts = 0;
+                Ok(PumpExit::Stopped) => {
+                    self.retryable = false;
+                    self.emit(FsdState::Stopped, Reason::Stopped);
+                    return;
+                }
+                Ok(PumpExit::Dropped { stable }) => {
                     established_once = true;
+                    if stable {
+                        attempts = 0;
+                    }
                 }
                 Err(fatal) => {
                     if fatal {
@@ -351,7 +372,7 @@ impl<R: Role> Session<R> {
     }
 
     /// 连上、登录、跑收发循环。`Err(true)` 表示别再试了。
-    async fn attach(&mut self) -> Result<(), bool> {
+    async fn attach(&mut self) -> Result<PumpExit, bool> {
         self.emit(
             FsdState::Connecting,
             Reason::Connecting {
@@ -401,9 +422,11 @@ impl<R: Role> Session<R> {
         self.retryable = true;
         self.emit(FsdState::Online, Reason::Online);
 
-        self.pump(&mut lines, &mut write).await;
-        let _ = send(&mut write, &self.role.logoff_packet()).await;
-        Ok(())
+        let exit = self.pump(&mut lines, &mut write).await;
+        if matches!(exit, PumpExit::Stopped) {
+            let _ = send(&mut write, &self.role.logoff_packet()).await;
+        }
+        Ok(exit)
     }
 
     async fn await_login<S>(
@@ -453,9 +476,11 @@ impl<R: Role> Session<R> {
         &mut self,
         lines: &mut BoundedLines<S>,
         write: &mut tokio::net::tcp::OwnedWriteHalf,
-    ) where
+    ) -> PumpExit
+    where
         S: tokio::io::AsyncRead + Unpin,
     {
+        let started = tokio::time::Instant::now();
         loop {
             self.prune_metar_waiters();
             let expiry = self.next_metar_deadline();
@@ -468,13 +493,13 @@ impl<R: Role> Session<R> {
                     self.prune_metar_waiters();
                 }
                 _ = &mut tick => {
-                    if !self.run_tick(write).await { return; }
+                    if !self.run_tick(write).await { return PumpExit::dropped(started); }
                 }
                 got = self.cmd.recv() => match got {
-                    Some(Envelope::Stop) | None => { self.stopping = true; return; }
+                    Some(Envelope::Stop) | None => { self.stopping = true; return PumpExit::Stopped; }
                     Some(Envelope::Role(c)) => {
                         for p in self.role.on_command(c) {
-                            if send(write, &p).await.is_err() { return; }
+                            if send(write, &p).await.is_err() { return PumpExit::dropped(started); }
                         }
                     }
                     Some(Envelope::RequestMetar { icao, deadline, reply }) => {
@@ -496,16 +521,16 @@ impl<R: Role> Session<R> {
                         let raw = raw.trim();
                         if raw.is_empty() { continue; }
                         if matches!(self.handle(raw, write, true).await, Handled::Fatal) {
-                            return;
+                            return PumpExit::dropped(started);
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                         self.emit(FsdState::Error, Reason::Protocol(e.to_string()));
-                        return;
+                        return PumpExit::dropped(started);
                     }
                     Ok(None) | Err(_) => {
                         self.emit(FsdState::Error, Reason::Dropped);
-                        return;
+                        return PumpExit::dropped(started);
                     }
                 },
             }
