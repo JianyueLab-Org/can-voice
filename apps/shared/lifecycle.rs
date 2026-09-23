@@ -116,6 +116,13 @@ impl LifeGate {
     }
 }
 
+pub fn terminal_fsd(event: &FsdEvent) -> bool {
+    matches!(
+        (&event.state, &event.reason),
+        (FsdState::Stopped, Reason::Stopped) | (FsdState::Offline, Reason::GaveUp { .. })
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::LifeGate;
@@ -137,11 +144,4 @@ mod tests {
         gate.finish_stop(stopping);
         waiting.await.expect("second disconnect resumes");
     }
-}
-
-pub fn terminal_fsd(event: &FsdEvent) -> bool {
-    matches!(
-        (&event.state, &event.reason),
-        (FsdState::Stopped, Reason::Stopped) | (FsdState::Offline, Reason::GaveUp { .. })
-    )
 }

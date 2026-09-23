@@ -4,22 +4,108 @@
 //! `go run ./server/cmd/can-voice-e2e-fixture` 一条命令产出，见 `fixture_dir` 的注释。
 //! 没有夹具时跳过而不是失败——CI 之外的机器不该因为这个测试红。
 
+use std::io::Write;
+use std::net::TcpListener;
 use std::process::{Child, Command as Proc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-struct Server(Child);
+struct Server {
+    voice: Child,
+    _feed: FeedServer,
+}
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        let _ = self.voice.kill();
+        let _ = self.voice.wait();
     }
 }
 
-/// 夹具目录。仓库根下的 `target/e2e/`，里面应当有：
+struct FeedServer {
+    address: String,
+    stop: Arc<AtomicBool>,
+    requested: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    ready: mpsc::Receiver<()>,
+}
+
+impl FeedServer {
+    fn start() -> Self {
+        Self::start_with_gate(None)
+    }
+
+    fn start_with_gate(snapshot_gate: Option<mpsc::Receiver<()>>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test FSD feed");
+        let address = listener.local_addr().expect("feed address").to_string();
+        listener.set_nonblocking(true).expect("nonblocking feed");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let requested = Arc::new(AtomicBool::new(false));
+        let thread_requested = Arc::clone(&requested);
+        let (ready_tx, ready) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            const SNAPSHOT: &str = r#"{"pilots":[{"cid":"1000","callsign":"CCA100"},{"cid":"1001","callsign":"CCA101"}],"controllers":[],"atis":[]}"#;
+            const HEADERS: &str = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n\r\n";
+            let event = format!("event: snapshot\ndata: {SNAPSHOT}\n\n");
+            let mut snapshot_gate = snapshot_gate;
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        if stream.write_all(HEADERS.as_bytes()).is_ok() {
+                            thread_requested.store(true, Ordering::Release);
+                            let _ = ready_tx.send(());
+                            if let Some(gate) = snapshot_gate.take() {
+                                if gate.recv().is_err() {
+                                    break;
+                                }
+                            }
+                            stream
+                                .write_all(event.as_bytes())
+                                .expect("write test FSD snapshot");
+                        }
+                        while !thread_stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept test FSD feed: {err}"),
+                }
+            }
+        });
+        Self {
+            address,
+            stop,
+            requested,
+            thread: Some(thread),
+            ready,
+        }
+    }
+
+    fn wait_ready(&self) {
+        self.ready
+            .recv_timeout(Duration::from_secs(3))
+            .expect("voice server did not request the test FSD snapshot");
+    }
+}
+
+impl Drop for FeedServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("test FSD feed thread");
+        }
+    }
+}
+
+/// 夹具目录。仓库根下的 `.temp/e2e/`，里面应当有：
 ///
 /// ```text
-/// can-voice     服务端二进制  go build -o target/e2e/can-voice ./server/cmd/can-voice
+/// can-voice     服务端二进制  go build -o .temp/e2e/can-voice ./server/cmd/can-voice
 /// cert.pem key.pem           由 ca.der 签出的叶证书与私钥（服务端用）
 /// ca.der                     一次性的根证书（客户端当额外根证书用）
 /// api.pub  token.txt         Ed25519 公钥与一张签好的 token
@@ -27,37 +113,154 @@ impl Drop for Server {
 ///
 /// 后四项由 `go run ./server/cmd/can-voice-e2e-fixture` 一次产出。
 fn fixture_dir() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e")
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.temp/e2e")
 }
 
-fn start_server(port: u16) -> Option<(Server, String)> {
+async fn start_server(port: u16) -> Option<(Server, String)> {
     if std::env::var("CAN_VOICE_E2E").is_err() {
         eprintln!("skipping e2e: set CAN_VOICE_E2E=1 to run it");
         return None;
     }
+    start_server_with_feed(port, FeedServer::start()).await
+}
+
+async fn start_server_with_feed(port: u16, feed: FeedServer) -> Option<(Server, String)> {
     let dir = fixture_dir();
     let bin = dir.join("can-voice");
     if !bin.exists() {
         panic!(
             "CAN_VOICE_E2E is set but {} is missing — build it with\n  \
-             go build -o target/e2e/can-voice ./server/cmd/can-voice",
+             go build -o .temp/e2e/can-voice ./server/cmd/can-voice",
             bin.display()
         );
     }
+    let child = spawn_voice_server(port, &feed);
+    feed.wait_ready();
+    let server = Server {
+        voice: child,
+        _feed: feed,
+    };
+    let addr = format!("127.0.0.1:{port}");
+    wait_for_authorized_tx(&addr).await;
+    Some((server, addr))
+}
+
+fn spawn_voice_server(port: u16, feed: &FeedServer) -> Child {
+    let dir = fixture_dir();
     let pubkey = std::fs::read_to_string(dir.join("api.pub"))
         .expect("api.pub — run `go run ./server/cmd/can-voice-e2e-fixture`");
-    let child = Proc::new(&bin)
+    Proc::new(dir.join("can-voice"))
         .env("CAN_VOICE_ADDR", format!("127.0.0.1:{port}"))
         .env("CAN_VOICE_TLS_CERT", dir.join("cert.pem"))
         .env("CAN_VOICE_TLS_KEY", dir.join("key.pem"))
         .env("CAN_VOICE_API_PUBKEY", pubkey.trim())
-        // 射程过滤要 can-fsd 的 SSE；这里没有，服务端会降级为不过滤，
-        // 那正是我们要的——本测试测的是拼接，不是射程。
-        .env("CAN_VOICE_FSD_FEED", "http://127.0.0.1:1/nope")
+        .env(
+            "CAN_VOICE_FSD_FEED",
+            format!("http://{}/v1/events", feed.address),
+        )
         .spawn()
-        .expect("spawn the server");
-    std::thread::sleep(Duration::from_millis(700));
-    Some((Server(child), format!("127.0.0.1:{port}")))
+        .expect("spawn the server")
+}
+
+async fn wait_for_authorized_tx(addr: &str) {
+    let dir = fixture_dir();
+    let token = std::fs::read_to_string(dir.join("token.txt")).expect("token fixture");
+    let root = std::fs::read(dir.join("ca.der")).expect("ca.der fixture");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut last_result = String::from("no probe attempted");
+    while tokio::time::Instant::now() < deadline {
+        let cfg = cfg_for(addr, &token, &root);
+        match tokio::time::timeout(
+            Duration::from_millis(500),
+            can_voice_client::VoiceClient::connect(cfg),
+        )
+        .await
+        {
+            Ok(Ok(client)) => {
+                let mut events = client.events();
+                client.set_subscription(can_voice_proto::control::Sub {
+                    rx: vec![121_800],
+                    tx: vec![121_800],
+                    ..Default::default()
+                });
+                let ack = tokio::time::timeout(Duration::from_millis(500), async {
+                    loop {
+                        match events.recv().await {
+                            Ok(can_voice_client::Event::SubscriptionAck { tx, .. }) => break tx,
+                            Err(err) => panic!("read readiness probe ACK: {err}"),
+                            _ => {}
+                        }
+                    }
+                })
+                .await;
+                let accepted = matches!(&ack, Ok(tx) if tx == &[121_800]);
+                last_result = format!("subscription ACK: {ack:?}");
+                client.shutdown().await;
+                if accepted {
+                    return;
+                }
+            }
+            Ok(Err(err)) => last_result = format!("connect: {err}"),
+            Err(_) => last_result = String::from("connect timed out"),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("voice server never authorized signed pilot TX 121.800: {last_result}");
+}
+
+#[tokio::test]
+async fn server_start_waits_for_applied_feed_snapshot() {
+    if std::env::var("CAN_VOICE_E2E").is_err() {
+        return;
+    }
+    let (release, gate) = mpsc::channel();
+    let feed = FeedServer::start_with_gate(Some(gate));
+    let requested = Arc::clone(&feed.requested);
+    let mut start = tokio::spawn(async move { start_server_with_feed(64742, feed).await });
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !requested.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("voice server did not request snapshot");
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut start).await;
+    release.send(()).expect("release FSD snapshot");
+    assert!(
+        early.is_err(),
+        "server start returned before the FSD snapshot was applied"
+    );
+    let server = tokio::time::timeout(Duration::from_secs(5), start)
+        .await
+        .expect("server start after snapshot")
+        .expect("server start task")
+        .expect("E2E enabled");
+    drop(server);
+}
+
+#[tokio::test]
+async fn readiness_probe_retries_until_listener_starts() {
+    if std::env::var("CAN_VOICE_E2E").is_err() {
+        return;
+    }
+    let mut probe = tokio::spawn(async { wait_for_authorized_tx("127.0.0.1:64743").await });
+    let early = tokio::time::timeout(Duration::from_millis(700), &mut probe).await;
+    assert!(
+        early.is_err(),
+        "readiness probe stopped before the listener started"
+    );
+
+    let feed = FeedServer::start();
+    let child = spawn_voice_server(64743, &feed);
+    let server = Server {
+        voice: child,
+        _feed: feed,
+    };
+    tokio::time::timeout(Duration::from_secs(5), probe)
+        .await
+        .expect("probe after listener startup")
+        .expect("readiness probe task");
+    drop(server);
 }
 
 /// 连接，并且在"夹具过期了"这个情况下把话说清楚。
@@ -85,7 +288,7 @@ async fn connect_or_explain(cfg: can_voice_client::Config) -> can_voice_client::
 
 #[tokio::test]
 async fn a_client_can_hand_shake_subscribe_and_receive() {
-    let Some((_srv, addr)) = start_server(64738) else {
+    let Some((_srv, addr)) = start_server(64738).await else {
         return;
     };
     let dir = fixture_dir();
@@ -136,7 +339,7 @@ async fn a_client_can_hand_shake_subscribe_and_receive() {
 /// 没有理由的 Offline。这同时验证了握手真的在 `connect` 里等完了（M6）。
 #[tokio::test]
 async fn an_expired_token_is_refused_with_a_reason() {
-    let Some((_srv, addr)) = start_server(64739) else {
+    let Some((_srv, addr)) = start_server(64739).await else {
         return;
     };
     let dir = fixture_dir();
@@ -167,14 +370,13 @@ async fn an_expired_token_is_refused_with_a_reason() {
     );
 }
 
-/// 声明超过 `max_tx` 的频率，看服务端真的拒掉、而客户端**用差集**算出是哪几个。
+/// 声明超出单频飞行员授权的频率，看服务端真的拒掉、而客户端**用差集**算出是哪几个。
 ///
-/// 这条把 H2 的那条规则端到端地验了一遍：夹具签的 token 里 `MaxTX = 8`，
-/// 所以声明 10 个 TX 会有 2 个拿不到。它同时也是"SUB 真的到了服务端、
+/// 夹具只给 121.800 一路 TX；另九路必须被拒。它同时也是"SUB 真的到了服务端、
 /// SUBACK 真的回来了"的唯一证据——只看 `Online` 证明不了控制面在动。
 #[tokio::test]
 async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
-    let Some((_srv, addr)) = start_server(64740) else {
+    let Some((_srv, addr)) = start_server(64740).await else {
         return;
     };
     let dir = fixture_dir();
@@ -196,8 +398,9 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
     let client = connect_or_explain(cfg).await;
     let mut events = client.events();
 
-    // MaxTX 是 8，这里声明 10 个。
-    let freqs: Vec<u32> = (0..10).map(|i| 118_000 + i * 25).collect();
+    let freqs: Vec<u32> = std::iter::once(121_800)
+        .chain((0..9).map(|i| 118_000 + i * 25))
+        .collect();
     client.set_subscription(can_voice_proto::control::Sub {
         rx: freqs.clone(),
         tx: freqs.clone(),
@@ -205,30 +408,36 @@ async fn declaring_more_tx_than_allowed_comes_back_as_a_denial_per_frequency() {
     });
 
     let mut denied_tx = Vec::new();
+    let mut acknowledged_tx = None;
     // READY 里的上限要作为一个事件交上来：界面在声明**之前**提示超额，靠的就是它。
     let mut limits = None;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while tokio::time::Instant::now() < deadline && denied_tx.len() < 2 {
+    while tokio::time::Instant::now() < deadline
+        && (denied_tx.len() < 9 || acknowledged_tx.is_none() || limits.is_none())
+    {
         match tokio::time::timeout(Duration::from_millis(300), events.recv()).await {
             Ok(Ok(can_voice_client::Event::TxDenied { freq_khz, .. })) => {
                 denied_tx.push(freq_khz);
             }
             Ok(Ok(can_voice_client::Event::Limits(l))) => limits = Some(l),
+            Ok(Ok(can_voice_client::Event::SubscriptionAck { tx, .. })) => {
+                acknowledged_tx = Some(tx);
+            }
             _ => {}
         }
     }
     assert_eq!(
         limits.map(|l| l.max_tx),
-        Some(8),
+        Some(1),
         "the max_tx from READY must reach the event stream"
     );
-    assert_eq!(
-        denied_tx.len(),
-        2,
-        "10 declared tx against max_tx=8 must come back as exactly 2 denials, got {denied_tx:?}"
-    );
+    assert_eq!(acknowledged_tx, Some(vec![121_800]));
+    assert_eq!(denied_tx.len(), 9, "10 declared TX against one signed pilot frequency must produce nine denials, got {denied_tx:?}");
     for f in &denied_tx {
-        assert!(freqs.contains(f), "{f} was never declared");
+        assert!(
+            freqs.contains(f) && *f != 121_800,
+            "{f} was not an unauthorized declaration"
+        );
     }
     client.shutdown().await;
 }
@@ -270,7 +479,7 @@ fn cfg_for(addr: &str, token: &str, root: &[u8]) -> can_voice_client::Config {
 /// 用一个 token 连两次的话后连上的会把先连上的踢掉。
 #[tokio::test]
 async fn audio_crosses_the_wire_from_one_client_to_another() {
-    let Some((_srv, addr)) = start_server(64741) else {
+    let Some((_srv, addr)) = start_server(64741).await else {
         return;
     };
     let dir = fixture_dir();
