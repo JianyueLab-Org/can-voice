@@ -76,7 +76,6 @@
     "disconnect": "Disconnect"
   },
   "observer": {
-    "frequency": "Voice frequency",
     "frequency_placeholder": "Leave blank to follow COM1",
     "frequency_tip": "Observer mode only: type a frequency and voice stays on it. Clear it to follow the cockpit COM1 again.",
     "manual": "manual",
@@ -93,7 +92,6 @@
   "lists": {
     "traffic": "Nearby traffic ({count})",
     "controllers": "Online ATC ({count})",
-    "messages": "Text messages",
     "no_traffic": "No other aircraft nearby",
     "no_controllers": "No ATC online nearby",
     "no_messages": "No text messages yet"
