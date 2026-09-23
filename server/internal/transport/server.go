@@ -45,6 +45,13 @@ type Config struct {
 	// 每个 RX 频率都要在写锁里进倒排索引，一个声明了一万个频率的已鉴权会话
 	// 会让全网的扇出排队等它。
 	MaxRX int
+	// MaxPendingHandshakes caps connections admitted before HELLO authentication.
+	// Zero uses a conservative default.
+	MaxPendingHandshakes int
+	AdmissionStats       *AdmissionStats
+	// Package tests exercising the pre-scope protocol may opt into old TX behavior.
+	// Unexported: production callers cannot enable this compatibility bypass.
+	unsafeLegacyTXForTests bool
 }
 
 // shutdownGrace 是关停时等所有连接把 CONNECTION_CLOSE 送出去的上限。
@@ -75,7 +82,7 @@ func Serve(ctx context.Context, cfg Config, r *router.Router) error {
 // 而关停这条路径**只能**从一个真的连上来的客户端那一侧观察。
 func serve(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router) error {
 	live := newConnSet()
-	err := accept(ctx, ln, cfg, r, live)
+	err := accept(ctx, ln, cfg, r, live, newAdmissionGate(cfg.MaxPendingHandshakes, cfg.AdmissionStats))
 
 	// 顺序是这条路径的全部内容，别换。
 	//
@@ -134,7 +141,13 @@ func quicConfig() *quic.Config {
 // 返回 error 而不是 void：监听器因为 ctx 之外的原因挂掉时，
 // Serve 必须把它报上去。原文 `accept(...); return ctx.Err()` 在那种情况下
 // 返回 nil，于是整个进程静悄悄地"正常退出"，而端口其实已经没人在听了。
-func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router, live *connSet) error {
+func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router, live *connSet, gates ...*admissionGate) error {
+	var gate *admissionGate
+	if len(gates) != 0 {
+		gate = gates[0]
+	} else {
+		gate = newAdmissionGate(cfg.MaxPendingHandshakes, cfg.AdmissionStats)
+	}
 	for {
 		conn, err := ln.Accept(ctx)
 		if err != nil {
@@ -144,11 +157,15 @@ func accept(ctx context.Context, ln *quic.Listener, cfg Config, r *router.Router
 			slog.Error("accept failed", "error", err)
 			return err
 		}
+		if !gate.tryAcquire() {
+			conn.CloseWithError(CloseEvicted, "too many pending handshakes")
+			continue
+		}
 		// 登记要在处理协程起来**之前**完成：反过来的话，一条刚接进来、还没被
 		// 登记上的连接会被关停整个漏掉，而那恰好是重启那一瞬间最可能发生的事。
 		// 这条顺序是 connSet.serve 的后置条件，并且在那里被钉住——写成
 		// live.add(conn) 加一句 go 的话，把 add 挪进协程里整套测试照绿。
-		live.serve(conn, func() { handleConn(ctx, conn, cfg, r) })
+		live.serve(conn, func() { handleConn(ctx, conn, cfg, r, gate.release) })
 	}
 }
 

@@ -644,7 +644,7 @@ async fn serve(state: &Arc<Mutex<LinkState>>, address: SocketAddr) -> Option<Soc
 trait Wire {
     fn address(&self) -> SocketAddr;
     async fn send(&self, packet: &[u8]) -> std::io::Result<()>;
-    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize>;
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
 }
 
 struct Peer {
@@ -661,8 +661,8 @@ impl Wire for Peer {
         self.socket.send_to(packet, self.address).await.map(|_| ())
     }
 
-    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.socket.recv(buf).await
+    async fn recv(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf).await
     }
 }
 
@@ -697,7 +697,10 @@ async fn subscribe_and_receive(
             return ever.then_some(address);
         }
         match tokio::time::timeout(STALE_AFTER, wire.recv(&mut buf)).await {
-            Ok(Ok(n)) => {
+            Ok(Ok((n, source))) => {
+                if source != address {
+                    continue;
+                }
                 let values = parse_values(&buf[..n]);
                 if values.is_empty() {
                     continue;
@@ -727,14 +730,26 @@ mod link_tests {
     use std::collections::VecDeque;
     use std::io;
 
+    type Reply = io::Result<(Vec<u8>, SocketAddr)>;
+
     /// 照剧本回话的 X-Plane：剧本念完就再也不说话。
     struct Scripted {
-        replies: Mutex<VecDeque<io::Result<Vec<u8>>>>,
+        replies: Mutex<VecDeque<Reply>>,
         sent: Mutex<Vec<Vec<u8>>>,
     }
 
     impl Scripted {
         fn new(replies: Vec<io::Result<Vec<u8>>>) -> Self {
+            let selected = SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT));
+            Self::with_sources(
+                replies
+                    .into_iter()
+                    .map(|r| r.map(|p| (p, selected)))
+                    .collect(),
+            )
+        }
+
+        fn with_sources(replies: Vec<Reply>) -> Self {
             Self {
                 replies: Mutex::new(replies.into()),
                 sent: Mutex::new(Vec::new()),
@@ -762,12 +777,12 @@ mod link_tests {
             Ok(())
         }
 
-        async fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        async fn recv(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
             let next = self.replies.lock().expect("replies").pop_front();
             match next {
-                Some(Ok(packet)) => {
+                Some(Ok((packet, source))) => {
                     buf[..packet.len()].copy_from_slice(&packet);
-                    Ok(packet.len())
+                    Ok((packet.len(), source))
                 }
                 Some(Err(e)) => Err(e),
                 None => std::future::pending().await,
@@ -844,5 +859,19 @@ mod link_tests {
 
         assert_eq!(got, None);
         assert_eq!(took, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn foreign_rref_packets_do_not_establish_or_update_the_link() {
+        let foreign = SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT + 1));
+        let wire = Scripted::with_sources(vec![latitude().map(|p| (p, foreign))]);
+        let state = Arc::new(Mutex::new(LinkState::default()));
+
+        let got = subscribe_and_receive(&state, &wire).await;
+
+        assert_eq!(got, None);
+        let state = state.lock().expect("link");
+        assert!(!state.connected);
+        assert!(state.values.is_empty());
     }
 }

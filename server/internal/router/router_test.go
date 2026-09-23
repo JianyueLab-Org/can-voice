@@ -21,6 +21,22 @@ func newSession(t *testing.T, r *Router, cid string, maxTX int) *Session {
 	return s
 }
 
+func TestRemovedListenerCannotBeAnnouncedAgain(t *testing.T) {
+	r := New()
+	listener := newSession(t, r, "listener", 1)
+	speaker := newSession(t, r, "speaker", 1)
+	if !r.noteTalker(listener.ID, speaker.ID) {
+		t.Fatal("live listener should receive first talker announcement")
+	}
+	r.Remove(listener.ID)
+	if r.noteTalker(listener.ID, speaker.ID) {
+		t.Fatal("removed listener received a talker announcement")
+	}
+	if _, ok := r.announced[listener.ID]; ok {
+		t.Fatal("removed listener's announcement entry was recreated")
+	}
+}
+
 func TestSubscribeReplacesWholesaleRatherThanMerging(t *testing.T) {
 	// SUB 是全量声明。第二次订阅必须整体取代第一次，
 	// 而不是并集——任何增量语义都会把 sync 风暴那一类 bug 请回来。

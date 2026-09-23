@@ -91,7 +91,12 @@ pub fn frequency_khz(entry: &Value) -> Option<u32> {
     if (mhz - NO_FREQUENCY_MHZ).abs() < FREQ_EPSILON {
         return None;
     }
-    Some((mhz * 1000.0).round() as u32)
+    let khz = (mhz * 1000.0).round();
+    if !khz.is_finite() || !(118_000.0..=136_975.0).contains(&khz) {
+        return None;
+    }
+    let khz = khz as u32;
+    (khz % 5 == 0).then_some(khz)
 }
 
 fn position_from(entry: &Value) -> Option<Position> {
@@ -274,6 +279,14 @@ mod tests {
             Some(118_350)
         );
         assert_eq!(frequency_khz(&json!({})), None);
+    }
+
+    #[test]
+    fn off_raster_controller_frequency_is_not_a_staffed_voice_position() {
+        let entry = json!({ "frequency": "118.501" });
+        assert_eq!(frequency_khz(&entry), None);
+        let f = feed(json!([atc("1000", "ZSPD_TWR", "118.501", 4)]));
+        assert_eq!(controller_for("1000", &f), None);
     }
 
     /// 在线一览按频率排，同频率按呼号排。

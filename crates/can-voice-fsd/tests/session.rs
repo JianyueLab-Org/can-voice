@@ -4,7 +4,9 @@
 //! 登录后掉线才重试、登录后的 `$ER` 不拆连接。三条都是踩出来的，所以都在这里。
 
 use can_voice_fsd::client::{self, Config, FsdState, Reason};
+use can_voice_fsd::observer_client::{self, ObserverConfig};
 use can_voice_fsd::packet::{Identity, Position, FACILITY_ATIS, RATING_OBSERVER};
+use can_voice_fsd::session::MAX_LINE_BYTES;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -365,6 +367,161 @@ async fn a_metar_request_is_answered_from_the_server() {
 
     let report = handle.request_metar("zspd", Duration::from_secs(10)).await;
     assert_eq!(report.as_deref(), Some("ZSPD 251300Z 09004MPS Q1013"));
+    handle.stop();
+}
+
+#[tokio::test]
+async fn an_oversized_login_line_closes_the_session() {
+    let (port, _log) = fake_server(|stream, log, _| async move {
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log.lines.lock().expect("lock").push(line.clone());
+            if line.contains(":SERVER:CAPS") {
+                let mut packet = vec![b'X'; MAX_LINE_BYTES + 1];
+                packet.push(b'\n');
+                write
+                    .write_all(&packet)
+                    .await
+                    .expect("write oversized line");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                return;
+            }
+        }
+    })
+    .await;
+    let handle = client::connect(config(port));
+    let mut events = handle.events();
+    let error = wait_for(
+        &mut events,
+        |e| matches!(e.reason, Reason::Protocol(_)),
+        "protocol error",
+    )
+    .await;
+    assert_eq!(error.state, FsdState::Error);
+}
+
+#[tokio::test]
+async fn observer_logs_in_at_facility_zero_and_publishes_own_position() {
+    let (port, log) = fake_server(|stream, log, _| async move {
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log.lines.lock().expect("lock").push(line.clone());
+            if line.contains(":SERVER:CAPS") {
+                write
+                    .write_all(b"$CRSERVER:ZSPD_OBS:CAPS:ATCINFO=1\r\n")
+                    .await
+                    .expect("login");
+            }
+        }
+    })
+    .await;
+    let observer = observer_client::connect(ObserverConfig {
+        host: "127.0.0.1".into(),
+        port,
+        identity: Identity::new("ZSPD_OBS", "1234", "pw", "Observer", RATING_OBSERVER),
+        reconnect_limit: 0,
+    });
+    observer.update_position(31.14233, 121.79084);
+    until(&log, "%ZSPD_OBS:99998:0:100:1:31.14233:121.79084:0").await;
+    let mut events = observer.events();
+    wait_for(
+        &mut events,
+        |e| e.state == FsdState::Online,
+        "observer online after delayed subscription read",
+    )
+    .await;
+    assert!(log.saw("#AAZSPD_OBS:SERVER:Observer:1234:pw:1:100"));
+    assert!(!log.saw("#APZSPD_OBS"));
+    observer.stop();
+}
+
+#[tokio::test]
+async fn expired_metar_requests_release_capacity_without_reconnecting() {
+    let (port, log) = fake_server(|stream, log, _| async move {
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log.lines.lock().expect("lock").push(line.clone());
+            if line.contains(":SERVER:CAPS") {
+                write
+                    .write_all(b"$CRSERVER:ZSPD_ATIS:CAPS:ATCINFO=1\r\n")
+                    .await
+                    .expect("login");
+            }
+        }
+    })
+    .await;
+    let handle = client::connect(config(port));
+    let mut events = handle.events();
+    wait_for(&mut events, |e| e.state == FsdState::Online, "online").await;
+
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let handle = handle.clone();
+        requests.spawn(async move {
+            handle
+                .request_metar("ZSPD", Duration::from_millis(100))
+                .await
+        });
+    }
+    while let Some(result) = requests.join_next().await {
+        assert_eq!(result.expect("request"), None);
+    }
+    let request = handle.request_metar("ZSPD", Duration::from_millis(200));
+    assert_eq!(request.await, None);
+    until(&log, "METAR:ZSPD").await;
+    let sent = log
+        .lines()
+        .iter()
+        .filter(|line| line.contains("METAR:ZSPD"))
+        .count();
+    assert_eq!(sent, 33, "expired requests must not exhaust the cap");
+    assert_eq!(log.connections(), 1);
+    handle.stop();
+}
+
+#[tokio::test]
+async fn excess_metar_requests_are_rejected_without_sending_to_fsd() {
+    let (port, log) = fake_server(|stream, log, _| async move {
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            log.lines.lock().expect("lock").push(line.clone());
+            if line.contains(":SERVER:CAPS") {
+                write
+                    .write_all(b"$CRSERVER:ZSPD_ATIS:CAPS:ATCINFO=1\r\n")
+                    .await
+                    .expect("login");
+            }
+        }
+    })
+    .await;
+    let handle = client::connect(config(port));
+    let mut events = handle.events();
+    wait_for(&mut events, |e| e.state == FsdState::Online, "online").await;
+
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..33 {
+        let handle = handle.clone();
+        requests.spawn(async move { handle.request_metar("ZSPD", Duration::from_secs(3)).await });
+    }
+    let first = tokio::time::timeout(Duration::from_secs(1), requests.join_next())
+        .await
+        .expect("over-cap request should return immediately")
+        .expect("request task")
+        .expect("request join");
+    assert_eq!(first, None);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        log.lines()
+            .iter()
+            .filter(|line| line.contains("METAR:ZSPD"))
+            .count(),
+        32
+    );
+    requests.abort_all();
     handle.stop();
 }
 

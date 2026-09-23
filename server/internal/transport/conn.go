@@ -172,7 +172,14 @@ func (f *framedReader) endFrame() {
 }
 
 // handleConn 处理一条连接的完整生命周期。
-func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router.Router) {
+func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router.Router, release ...func()) {
+	if len(release) != 0 {
+		defer func() {
+			if release[0] != nil {
+				release[0]()
+			}
+		}()
+	}
 	// 无论从哪条路径退出，连接都要关掉。没有这一条的话，readControl 返回、
 	// 会话已摘除之后，readDatagrams 还在 ReceiveDatagram 上转，每个包都走一次
 	// Fanout 拿到 "session is gone"——goroutine 泄漏到连接真正超时为止。
@@ -205,6 +212,10 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 
 	sess, err := handshake(st, conn, cfg, r, out.enqueue)
 	if err != nil {
+		if len(release) != 0 && release[0] != nil {
+			release[0]()
+			release[0] = nil
+		}
 		out.stop()
 		// 详细错误只进服务端日志。发给对端的是粗粒度的稳定代码——
 		// 这个对端还没有通过鉴权，告诉他"是签名错还是 base64 错"
@@ -223,6 +234,10 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		}
 		conn.CloseWithError(CloseHandshakeRefused, reason)
 		return
+	}
+	if len(release) != 0 && release[0] != nil {
+		release[0]()
+		release[0] = nil
 	}
 	// 握手过了，两侧的截止时间都撤掉——控制面之后是长连接，管制员可能几分钟
 	// 不说话，而握手那个一次性的时限留在一条长连接上早晚会过期，然后掐死一条
@@ -244,6 +259,12 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	}()
 
 	cw := &controlWriter{st: st}
+	sess.SetNotifyAuthorityLost(func() {
+		b, err := control.Encode(&control.Notice{Kind: control.KindAuthorityLost})
+		if err == nil {
+			_ = cw.write(b)
+		}
+	})
 	sess.SetNotifyTalker(func(speaker router.SessionID, cid string, freq uint32) {
 		out, err := control.Encode(&control.Notice{
 			Kind:    control.KindTalker,
@@ -352,7 +373,7 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	// （router 的 lookup）。无校验的话一个 6 万字节的值就那么进去了。
 	//
 	// 判在验签之前，理由同上：这是一条协议格式错误，和这张票新不新无关。
-	if h.Follow != "" && !isValidCallsign(h.Follow) {
+	if h.Follow != "" {
 		return nil, errFollowNotACallsign
 	}
 	// Station 同样进 map 的键（router 的顶号表），同样要先校形状。
@@ -363,6 +384,19 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 	claims, err := auth.Verify(cfg.PublicKey, h.Token, time.Now())
 	if err != nil {
 		return nil, err
+	}
+	if claims.Callsign != "" && !isValidCallsign(claims.Callsign) {
+		return nil, helloError("signed controller callsign is invalid")
+	}
+	if claims.Station != "" && !isValidCallsign(claims.Station) {
+		return nil, helloError("signed ATIS station is invalid")
+	}
+	if claims.Role == "atis" {
+		if h.Station != claims.Station {
+			return nil, helloError("HELLO station differs from signed ATIS station")
+		}
+	} else if h.Station != "" {
+		return nil, helloError("ordinary sessions cannot declare a station")
 	}
 	// 未定级的成员不能用语音。这不是新加的策略，是**把已有的那道闸补回来**：
 	// can-api 的 /api/v1/public/auth——这个网络上其它每一个组件用的那道凭据
@@ -380,13 +414,30 @@ func handshake(st quic.Stream, conn quic.Connection, cfg Config, r *router.Route
 
 	// MaxTX 是**唯一**一个直接来自对端的资源上限，所以它也要被服务端夹一次。
 	maxTX := grantedMaxTX(claims.MaxTX, cfg.MaxRX)
+	if (claims.Role == "pilot" || claims.Role == "observer") && maxTX > 1 {
+		maxTX = 1
+	}
+	role := claims.Role
+	if role == "" {
+		if !cfg.unsafeLegacyTXForTests {
+			role = "legacy"
+			maxTX = 0
+		}
+	}
+	grant := make([]uint32, len(claims.TX))
+	for i, freq := range claims.TX {
+		grant[i] = uint32(freq)
+	}
 
 	sess := r.Add(router.SessionOpts{
-		CID:    claims.CID,
-		Follow: h.Follow,
+		CID:          claims.CID,
+		Role:         role,
+		Callsign:     claims.Callsign,
+		TXGrant:      grant,
+		GrantExpires: time.Unix(claims.Exp, 0),
 		// Station 把顶号的键从 CID 变成 (CID, station)。不传下去的话通播
 		// 机队还是整队互踢——字段收下了、校验过了、然后丢掉，是最难查的那种。
-		Station: h.Station,
+		Station: claims.Station,
 		// MaxTX 来自 token（鉴权的一部分），MaxRX 来自服务端配置（资源上限）。
 		// MaxRX 必须真的传下去：只在 READY 里通告的话那个数字就只是一句建议，
 		// 一个已鉴权的会话可以声明一万个频率，每个都要在写锁里进倒排索引，

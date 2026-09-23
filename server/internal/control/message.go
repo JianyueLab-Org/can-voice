@@ -18,11 +18,11 @@ import (
 // 第一条它看不懂的消息上出问题——那时候已经没有任何东西指向版本了。
 const ProtoVersion = 1
 
-// Hello 是客户端的第一条消息。Follow 只有观察员模式用——
-// 观察员没有 FSD 连接，位置取自它跟随的那架飞机（spec 7.3）。
+// Hello 是客户端的第一条消息。Follow is retained only for decoding old
+// clients; the server rejects nonempty values.
 //
-// Station 是同一个账号下的席位标记，只有通播机队这种"整队共用一个 CID"的
-// 客户端填。顶号按 (CID, Station) 判，所以不填的普通客户端行为和以前一样：
+// Station is an ATIS-only seat marker and must match the signed ticket.
+// 顶号按 (CID, Station) 判，所以不填的普通客户端行为和以前一样：
 // 同一个成员号第二次登录，第一条会话被断开。
 type Hello struct {
 	Type    string `json:"type"`
@@ -103,6 +103,7 @@ type Notice struct {
 // Notice 的 Kind 取值。
 const (
 	KindTxDenied         = "tx_denied"
+	KindAuthorityLost    = "authority_lost"
 	KindRangeUnavailable = "range_unavailable"
 	// KindTalker：某个会话开始对这个听众说话。每个听众对每个发言者只发一次。
 	KindTalker = "talker"

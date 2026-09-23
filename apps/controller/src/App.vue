@@ -62,6 +62,9 @@ interface Snapshot {
   denied_tx: number[];
   denied_rx: number[];
   denied_xc: number[][];
+  effective_rx: number[];
+  effective_tx: number[];
+  effective_xc: number[][];
   health: {
     rtt_ms: number;
     sent: number;
@@ -583,6 +586,9 @@ async function act(name: string, args: Record<string, unknown>) {
             v-for="r in radios"
             :key="r.freq_khz"
             :radio="r"
+            :effective-rx="snap?.effective_rx?.includes(r.freq_khz) ?? false"
+            :effective-tx="snap?.effective_tx?.includes(r.freq_khz) ?? false"
+            :effective-xc="snap?.effective_xc?.some(([a, b]) => a === r.freq_khz || b === r.freq_khz) ?? false"
             :receiving="isReceiving(r.freq_khz)"
             :tx-denied="txDenied(r.freq_khz)"
             :rx-denied="rxDenied(r.freq_khz)"

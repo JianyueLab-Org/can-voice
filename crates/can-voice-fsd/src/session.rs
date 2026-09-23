@@ -27,6 +27,7 @@
 
 use crate::packet::{self, CallsignProblem, Incoming};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -34,6 +35,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const MAX_LINE_BYTES: usize = 16 * 1024;
+pub const MAX_METAR_WAITERS: usize = 32;
 /// 每次重连之间等一下，别贴着服务器猛敲。
 pub const RECONNECT_DELAY: Duration = Duration::from_secs(3);
 /// 已经登录过之后掉线，最多再试这么多次。
@@ -73,6 +76,7 @@ pub enum Reason {
     /// 登录之后连接断了。
     Dropped,
     SendFailed(String),
+    Protocol(String),
     /// 频率认不出来。发一个错的频率出去比不发更糟。
     BadFrequency(String),
     Online,
@@ -131,6 +135,7 @@ enum Envelope<C> {
     Stop,
     RequestMetar {
         icao: String,
+        deadline: tokio::time::Instant,
         reply: oneshot::Sender<Option<String>>,
     },
     Role(C),
@@ -140,6 +145,7 @@ enum Envelope<C> {
 pub struct SessionHandle<C> {
     cmd: mpsc::UnboundedSender<Envelope<C>>,
     events: broadcast::Sender<FsdEvent>,
+    first_events: Arc<Mutex<Option<broadcast::Receiver<FsdEvent>>>>,
 }
 
 impl<C> Clone for SessionHandle<C> {
@@ -147,6 +153,7 @@ impl<C> Clone for SessionHandle<C> {
         Self {
             cmd: self.cmd.clone(),
             events: self.events.clone(),
+            first_events: self.first_events.clone(),
         }
     }
 }
@@ -159,7 +166,11 @@ impl<C> std::fmt::Debug for SessionHandle<C> {
 
 impl<C> SessionHandle<C> {
     pub fn events(&self) -> broadcast::Receiver<FsdEvent> {
-        self.events.subscribe()
+        self.first_events
+            .lock()
+            .ok()
+            .and_then(|mut first| first.take())
+            .unwrap_or_else(|| self.events.subscribe())
     }
 
     pub fn send(&self, command: C) {
@@ -176,6 +187,7 @@ impl<C> SessionHandle<C> {
         self.cmd
             .send(Envelope::RequestMetar {
                 icao: icao.trim().to_uppercase(),
+                deadline: tokio::time::Instant::now() + timeout,
                 reply: tx,
             })
             .ok()?;
@@ -191,10 +203,11 @@ pub fn spawn<R: Role>(
     reconnect_limit: u32,
 ) -> SessionHandle<R::Command> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let (event_tx, _) = broadcast::channel(64);
+    let (event_tx, first_events) = broadcast::channel(64);
     let handle = SessionHandle {
         cmd: cmd_tx,
         events: event_tx.clone(),
+        first_events: Arc::new(Mutex::new(Some(first_events))),
     };
     tokio::spawn(
         Session {
@@ -223,7 +236,12 @@ struct Session<R: Role> {
     /// 登录成功过之后，失败就先当"可以重连"。见模块头。
     retryable: bool,
     stopping: bool,
-    metar_waiters: HashMap<String, Vec<oneshot::Sender<Option<String>>>>,
+    metar_waiters: HashMap<String, Vec<MetarWaiter>>,
+}
+
+struct MetarWaiter {
+    deadline: tokio::time::Instant,
+    reply: oneshot::Sender<Option<String>>,
 }
 
 enum Handled {
@@ -358,7 +376,7 @@ impl<R: Role> Session<R> {
             }
         };
         let (read, mut write) = stream.into_split();
-        let mut lines = BufReader::new(read).lines();
+        let mut lines = BoundedLines::new(read);
 
         for p in self.role.handshake_packets() {
             if let Err(e) = send(&mut write, &p).await {
@@ -369,6 +387,13 @@ impl<R: Role> Session<R> {
 
         if !self.await_login(&mut lines, &mut write).await? {
             return Err(false);
+        }
+        // A position queued during login must be visible to the first tick.
+        while let Ok(command) = self.cmd.try_recv() {
+            self.apply_offline(command);
+            if self.stopping {
+                return Err(true);
+            }
         }
         if !self.run_tick(&mut write).await {
             return Err(false);
@@ -383,7 +408,7 @@ impl<R: Role> Session<R> {
 
     async fn await_login<S>(
         &mut self,
-        lines: &mut tokio::io::Lines<BufReader<S>>,
+        lines: &mut BoundedLines<S>,
         write: &mut tokio::net::tcp::OwnedWriteHalf,
     ) -> Result<bool, bool>
     where
@@ -411,6 +436,10 @@ impl<R: Role> Session<R> {
                             Handled::Fatal => return Ok(false),
                         }
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        self.emit(FsdState::Error, Reason::Protocol(e.to_string()));
+                        return Ok(false);
+                    }
                     Ok(None) | Err(_) => {
                         self.emit(FsdState::Error, Reason::Closed);
                         return Ok(false);
@@ -422,17 +451,22 @@ impl<R: Role> Session<R> {
 
     async fn pump<S>(
         &mut self,
-        lines: &mut tokio::io::Lines<BufReader<S>>,
+        lines: &mut BoundedLines<S>,
         write: &mut tokio::net::tcp::OwnedWriteHalf,
     ) where
         S: tokio::io::AsyncRead + Unpin,
     {
         loop {
+            self.prune_metar_waiters();
+            let expiry = self.next_metar_deadline();
             // **每轮重新问间隔**：飞行员端停在地面时会自己降频，而一个建好就
             // 不变的 interval 会让那件事永远不生效。
             let tick = tokio::time::sleep(self.role.tick_interval());
             tokio::pin!(tick);
             tokio::select! {
+                _ = async { if let Some(deadline) = expiry { tokio::time::sleep_until(deadline).await } else { std::future::pending::<()>().await } } => {
+                    self.prune_metar_waiters();
+                }
                 _ = &mut tick => {
                     if !self.run_tick(write).await { return; }
                 }
@@ -443,12 +477,17 @@ impl<R: Role> Session<R> {
                             if send(write, &p).await.is_err() { return; }
                         }
                     }
-                    Some(Envelope::RequestMetar { icao, reply }) => {
+                    Some(Envelope::RequestMetar { icao, deadline, reply }) => {
+                        self.prune_metar_waiters();
+                        if deadline <= tokio::time::Instant::now() || self.metar_waiter_count() >= MAX_METAR_WAITERS {
+                            let _ = reply.send(None);
+                            continue;
+                        }
                         let p = packet::metar_request(self.role.callsign(), &icao);
                         if send(write, &p).await.is_err() {
                             let _ = reply.send(None);
                         } else {
-                            self.metar_waiters.entry(icao).or_default().push(reply);
+                            self.metar_waiters.entry(icao).or_default().push(MetarWaiter { deadline, reply });
                         }
                     }
                 },
@@ -459,6 +498,10 @@ impl<R: Role> Session<R> {
                         if matches!(self.handle(raw, write, true).await, Handled::Fatal) {
                             return;
                         }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        self.emit(FsdState::Error, Reason::Protocol(e.to_string()));
+                        return;
                     }
                     Ok(None) | Err(_) => {
                         self.emit(FsdState::Error, Reason::Dropped);
@@ -538,6 +581,7 @@ impl<R: Role> Session<R> {
     }
 
     fn resolve_metar(&mut self, report: &str) {
+        self.prune_metar_waiters();
         let station = packet::metar_station(report);
         // 报文里的电台代号优先；只有一个请求在等时也认——服务端偶尔回一份
         // 头部对不上的报文，而把它丢掉的话调用方就一直等到超时。
@@ -549,7 +593,7 @@ impl<R: Role> Session<R> {
         if let Some(key) = key {
             if let Some(waiters) = self.metar_waiters.remove(&key) {
                 for w in waiters {
-                    let _ = w.send(Some(report.to_string()));
+                    let _ = w.reply.send(Some(report.to_string()));
                 }
             }
         }
@@ -558,7 +602,75 @@ impl<R: Role> Session<R> {
     fn fail_metar_waiters(&mut self) {
         for (_, waiters) in std::mem::take(&mut self.metar_waiters) {
             for w in waiters {
-                let _ = w.send(None);
+                let _ = w.reply.send(None);
+            }
+        }
+    }
+
+    fn metar_waiter_count(&self) -> usize {
+        self.metar_waiters.values().map(Vec::len).sum()
+    }
+
+    fn next_metar_deadline(&self) -> Option<tokio::time::Instant> {
+        self.metar_waiters
+            .values()
+            .flatten()
+            .map(|w| w.deadline)
+            .min()
+    }
+
+    fn prune_metar_waiters(&mut self) {
+        let now = tokio::time::Instant::now();
+        self.metar_waiters.retain(|_, waiters| {
+            waiters.retain(|w| !w.reply.is_closed() && w.deadline > now);
+            !waiters.is_empty()
+        });
+    }
+}
+
+struct BoundedLines<R> {
+    reader: BufReader<R>,
+    partial: Vec<u8>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> BoundedLines<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            partial: Vec::new(),
+        }
+    }
+
+    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        use std::io::{Error, ErrorKind};
+        loop {
+            let chunk = self.reader.fill_buf().await?;
+            if chunk.is_empty() {
+                return if self.partial.is_empty() {
+                    Ok(None)
+                } else {
+                    String::from_utf8(std::mem::take(&mut self.partial))
+                        .map(Some)
+                        .map_err(|e| Error::new(ErrorKind::InvalidData, e))
+                };
+            }
+            let end = chunk.iter().position(|b| *b == b'\n');
+            let count = end.unwrap_or(chunk.len());
+            if self.partial.len().saturating_add(count) > MAX_LINE_BYTES {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "FSD line exceeds 16 KiB",
+                ));
+            }
+            self.partial.extend_from_slice(&chunk[..count]);
+            self.reader.consume(count + usize::from(end.is_some()));
+            if end.is_some() {
+                if self.partial.last() == Some(&b'\r') {
+                    self.partial.pop();
+                }
+                return String::from_utf8(std::mem::take(&mut self.partial))
+                    .map(Some)
+                    .map_err(|e| Error::new(ErrorKind::InvalidData, e));
             }
         }
     }
@@ -571,4 +683,49 @@ where
     tracing::debug!(packet = %packet::redact(p), "→");
     write.write_all(p.as_bytes()).await?;
     write.write_all(b"\r\n").await
+}
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn first_status_receiver_keeps_an_event_sent_before_subscription() {
+        let (events, first) = broadcast::channel(4);
+        let (cmd, _) = mpsc::unbounded_channel::<Envelope<()>>();
+        let handle = SessionHandle {
+            cmd,
+            events: events.clone(),
+            first_events: Arc::new(Mutex::new(Some(first))),
+        };
+        events
+            .send(FsdEvent {
+                state: FsdState::Online,
+                reason: Reason::Online,
+            })
+            .unwrap();
+        assert_eq!(
+            handle.events().recv().await.unwrap().state,
+            FsdState::Online
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_preserves_a_partially_received_line() {
+        let (reader, mut writer) = tokio::io::duplex(64);
+        let mut lines = BoundedLines::new(reader);
+        writer.write_all(b"$CRSERVER:").await.expect("first chunk");
+        tokio::select! {
+            _ = lines.next_line() => panic!("line completed early"),
+            _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+        }
+        writer
+            .write_all(b"ZSPD_ATIS:CAPS\r\n")
+            .await
+            .expect("second chunk");
+        assert_eq!(
+            lines.next_line().await.expect("line"),
+            Some("$CRSERVER:ZSPD_ATIS:CAPS".into())
+        );
+    }
 }

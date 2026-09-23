@@ -18,8 +18,8 @@
 use crate::snapshot::{Ended, Snapshot};
 use can_voice_client::stack::RadioStack;
 use can_voice_client::{Config, Event, VoiceClient};
-use can_voice_token::TokenSource;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use can_voice_token::{TokenScope, TokenSource};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,6 +56,9 @@ struct Inner {
     /// 重连要的两样东西。`disconnect` 会清掉它 —— 否则主动下线会被监护任务
     /// 当成掉线再连回来。
     session: Mutex<Option<(Config, TokenSource)>>,
+    /// Serializes adoption against explicit disconnects after async token fetches.
+    transition: Mutex<()>,
+    generation: AtomicU64,
     /// 发话灯的真相：最后一次真正交给语音层的 PTT。屏幕按钮和硬件绑定都走
     /// [`Bridge::set_transmitting`]；没连上时按了也不点灯。
     transmitting: AtomicBool,
@@ -78,6 +81,8 @@ impl Bridge {
                 stack: Mutex::new(RadioStack::new()),
                 snapshot: Mutex::new(Snapshot::default()),
                 session: Mutex::new(None),
+                transition: Mutex::new(()),
+                generation: AtomicU64::new(0),
                 transmitting: AtomicBool::new(false),
                 mic: AtomicU32::new(100),
                 speaker: AtomicU32::new(100),
@@ -108,22 +113,101 @@ impl Bridge {
     ///
     /// 凭据留在桥里，因为票只活 60 秒：掉线重连拿的必须是一张新票。
     pub async fn connect(&self, cfg: Config, tokens: &TokenSource) -> Result<(), Error> {
-        let client = can_voice_token::connect(cfg.clone(), tokens).await?;
-        if let Ok(mut s) = self.inner.session.lock() {
-            *s = Some((cfg, tokens.clone()));
+        let generation = self.inner.generation.load(Ordering::Relaxed);
+        self.connect_at_generation(cfg, tokens, generation).await
+    }
+
+    async fn connect_at_generation(
+        &self,
+        cfg: Config,
+        tokens: &TokenSource,
+        generation: u64,
+    ) -> Result<(), Error> {
+        if self.inner.generation.load(Ordering::Relaxed) != generation {
+            return Err(Error::NotConnected);
         }
-        self.inner.adopt(client);
-        Ok(())
+        let client = can_voice_token::connect(cfg.clone(), tokens).await?;
+        {
+            let _transition = self
+                .inner
+                .transition
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if self.inner.generation.load(Ordering::Relaxed) == generation {
+                *self.inner.session.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some((cfg, tokens.clone()));
+                self.inner.adopt(client);
+                return Ok(());
+            }
+        }
+        client.shutdown().await;
+        Err(Error::NotConnected)
+    }
+
+    /// Allow the FSD authority feed a bounded interval to observe a new login.
+    pub async fn connect_with_authority_retry(
+        &self,
+        cfg: Config,
+        tokens: &TokenSource,
+    ) -> Result<(), Error> {
+        let generation = self.inner.generation.load(Ordering::Relaxed);
+        for attempt in 0..10 {
+            match self
+                .connect_at_generation(cfg.clone(), tokens, generation)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) if attempt < 9 && retryable_authority_error(&e) => {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        unreachable!("the retry loop always returns on its final attempt")
+    }
+
+    /// Replace the signed radio scope after a simulator or assignment change.
+    /// The old session remains in place if a fresh ticket cannot be obtained.
+    pub async fn rescope(&self, scope: Option<TokenScope>) -> Result<(), Error> {
+        let generation = self.inner.generation.load(Ordering::Relaxed);
+        let Some((cfg, tokens)) = self.inner.session.lock().ok().and_then(|s| s.clone()) else {
+            return Err(Error::NotConnected);
+        };
+        if tokens.scope() == scope.as_ref() {
+            return Ok(());
+        }
+        let next = tokens.with_optional_scope(scope);
+        let client = can_voice_token::connect(cfg.clone(), &next).await?;
+        {
+            let _transition = self
+                .inner
+                .transition
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if self.inner.generation.load(Ordering::Relaxed) == generation {
+                *self.inner.session.lock().unwrap_or_else(|p| p.into_inner()) = Some((cfg, next));
+                self.inner.adopt(client);
+                return Ok(());
+            }
+        }
+        client.shutdown().await;
+        Err(Error::NotConnected)
     }
 
     /// 断开。
     pub async fn disconnect(&self) {
-        // 先清重连依据，再关连接。反过来的话，关闭事件到达时监护任务还看得见
-        // 凭据，会把一次主动下线当成掉线连回来。
-        if let Ok(mut s) = self.inner.session.lock() {
-            *s = None;
-        }
-        let client = self.inner.client.lock().ok().and_then(|mut c| c.take());
+        let client = {
+            let _transition = self
+                .inner
+                .transition
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            self.inner.generation.fetch_add(1, Ordering::Relaxed);
+            // 先清重连依据，再关连接。反过来的话，关闭事件到达时监护任务还看得见
+            // 凭据，会把一次主动下线当成掉线连回来。
+            *self.inner.session.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            self.inner.client.lock().ok().and_then(|mut c| c.take())
+        };
         if let Some(c) = client {
             c.shutdown().await;
         }
@@ -248,18 +332,42 @@ impl Bridge {
     }
 }
 
+fn retryable_authority_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Token(
+            can_voice_token::Error::ScopePending | can_voice_token::Error::AuthorityUnavailable
+        )
+    )
+}
+
 impl Inner {
     /// 接管一条新连接：起监护任务、存起来、把台面重发一遍。
     ///
     /// **重连之后台面要重发**，而重发就是恢复——声明是幂等的全量声明，
     /// 这正是声明式 API 换来的东西。
     fn adopt(self: &Arc<Self>, client: VoiceClient) {
+        let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.transmitting.store(false, Ordering::Relaxed);
         let events = client.events();
         if let Ok(mut slot) = self.client.lock() {
             *slot = Some(client);
         }
-        tokio::spawn(supervise(self.clone(), events));
+        tokio::spawn(supervise(self.clone(), events, generation));
+        let inner = self.clone();
+        tokio::spawn(async move {
+            let mut delay = Duration::from_secs(45);
+            loop {
+                tokio::time::sleep(delay).await;
+                if inner.generation.load(Ordering::Relaxed) != generation {
+                    break;
+                }
+                if renew(inner.clone(), generation).await {
+                    break;
+                }
+                delay = Duration::from_secs(5);
+            }
+        });
         self.push_declaration();
         self.push_master();
     }
@@ -293,11 +401,18 @@ impl Inner {
 }
 
 /// 把事件泵进快照，并在票过期时换一张再连一次。
-async fn supervise(inner: Arc<Inner>, mut events: tokio::sync::broadcast::Receiver<Event>) {
+async fn supervise(
+    inner: Arc<Inner>,
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    generation: u64,
+) {
     let started = std::time::Instant::now();
     loop {
         match events.recv().await {
             Ok(e) => {
+                if inner.generation.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 let ended = {
                     let Ok(mut s) = inner.snapshot.lock() else {
                         return;
@@ -307,7 +422,7 @@ async fn supervise(inner: Arc<Inner>, mut events: tokio::sync::broadcast::Receiv
                 };
                 let Some(ended) = ended else { continue };
                 if should_renew_after(&ended, started.elapsed()) {
-                    renew(inner).await;
+                    renew(inner, generation).await;
                 }
                 // 无论换不换，这一条链路结束了，这个任务也该结束——
                 // 新的一条由 `adopt` 起一个新的。
@@ -323,15 +438,31 @@ async fn supervise(inner: Arc<Inner>, mut events: tokio::sync::broadcast::Receiv
 }
 
 /// 换一张票再连一次。
-async fn renew(inner: Arc<Inner>) {
+async fn renew(inner: Arc<Inner>, generation: u64) -> bool {
+    if inner.generation.load(Ordering::Relaxed) != generation {
+        return false;
+    }
     let Some((cfg, tokens)) = inner.session.lock().ok().and_then(|s| s.clone()) else {
         // 主动下线清掉了凭据。什么都不做才是对的。
-        return;
+        return false;
     };
     tracing::info!("the token had expired; fetching a fresh one and reconnecting");
     match can_voice_token::connect(cfg, &tokens).await {
-        Ok(client) => inner.adopt(client),
-        Err(e) => tracing::warn!(error = %e, "could not reconnect with a fresh token"),
+        Ok(client) => {
+            {
+                let _transition = inner.transition.lock().unwrap_or_else(|p| p.into_inner());
+                if inner.generation.load(Ordering::Relaxed) == generation {
+                    inner.adopt(client);
+                    return true;
+                }
+            }
+            client.shutdown().await;
+            false
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not reconnect with a fresh token");
+            false
+        }
     }
 }
 
@@ -357,6 +488,75 @@ mod tests {
     use super::*;
     use can_voice_client::conn::RefusedReason;
     use can_voice_client::session::Limits;
+
+    #[tokio::test]
+    async fn disconnect_cancels_an_authority_retry_before_it_can_reconnect() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let origin = format!("http://{}", listener.local_addr().expect("address"));
+        let (first_reply, replied) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("first request");
+            let mut reader = tokio::io::BufReader::new(&mut socket);
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).await.expect("read header"), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().expect("content length");
+                }
+            }
+            assert!(content_length <= 2048, "test request body is too large");
+            let mut request_body = vec![0u8; content_length];
+            reader
+                .read_exact(&mut request_body)
+                .await
+                .expect("read body");
+            drop(reader);
+            let body = r#"{"error":"voice_scope_refused"}"#;
+            let response = format!(
+                "HTTP/1.1 403 Forbidden\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            let _ = first_reply.send(());
+        });
+
+        let bridge = Arc::new(Bridge::new());
+        let tokens = TokenSource::new(&origin, "1001", "password", reqwest::Client::new());
+        let config = Config {
+            server: "127.0.0.1:1".into(),
+            server_name: "localhost".into(),
+            token: String::new(),
+            client_id: "retry-test".into(),
+            follow: String::new(),
+            station: String::new(),
+            input_device: None,
+            output_device: None,
+            audio_devices: false,
+            extra_roots: Vec::new(),
+        };
+        let task = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.connect_with_authority_retry(config, &tokens).await })
+        };
+        replied.await.expect("first scope refusal");
+        bridge.disconnect().await;
+        let result = tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("retry should stop promptly")
+            .expect("task should finish");
+        assert!(matches!(result, Err(Error::NotConnected)), "got {result:?}");
+    }
 
     /// **桥这一层不得引入 `join` / `leave` / `channel_id`。**
     ///

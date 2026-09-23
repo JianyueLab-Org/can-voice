@@ -140,10 +140,14 @@ type Position struct {
 	Callsign string
 	// CID 是这条记录的成员号。放进 Position 里是为了能从呼号索引反向重建
 	// cid 索引——见 indexByCID。
-	CID   string
-	Lat   float64
-	Lon   float64
-	AltFt float64
+	CID string
+	// Assignment fields are server-feed authority, not client-declared state.
+	Facility     int
+	FrequencyKHz uint32
+	IsObserver   bool
+	Lat          float64
+	Lon          float64
+	AltFt        float64
 	// Known 报告 can-fsd 是否已经知道这个人在哪。
 	//
 	// 为 false 时 Lat/Lon 没有意义——它们是零值，而 (0,0) 是几内亚湾。
@@ -253,6 +257,8 @@ type pilotEntry struct {
 type atcEntry struct {
 	Callsign    string    `json:"callsign"`
 	CID         string    `json:"cid"`
+	Frequency   string    `json:"frequency"`
+	Facility    *int      `json:"facility"`
 	Lat         flexFloat `json:"latitude"`
 	Lon         flexFloat `json:"longitude"`
 	VisualRange int       `json:"visual_range"`
@@ -314,15 +320,31 @@ func atcPosition(e atcEntry, isATIS bool) Position {
 	if r <= 0 {
 		r = geo.FallbackRangeNM(e.Callsign)
 	}
+	isObserver := !isATIS && e.Facility != nil && *e.Facility == 0
+	var facility int
+	if e.Facility != nil {
+		facility = *e.Facility
+	}
+	if isObserver && r > 100 {
+		r = 100
+	}
+	freq, err := strconv.ParseFloat(e.Frequency, 64)
+	var frequencyKHz uint32
+	if err == nil && freq >= 118 && freq <= 136.975 {
+		frequencyKHz = uint32(math.Round(freq * 1000))
+	}
 	return Position{
-		Callsign: e.Callsign,
-		CID:      e.CID,
-		Known:    e.Lat.Set && e.Lon.Set,
-		Lat:      e.Lat.V,
-		Lon:      e.Lon.V,
-		RadiusNM: r,
-		IsATC:    true,
-		IsATIS:   isATIS,
+		Callsign:     e.Callsign,
+		CID:          e.CID,
+		Facility:     facility,
+		FrequencyKHz: frequencyKHz,
+		IsObserver:   isObserver,
+		Known:        e.Lat.Set && e.Lon.Set,
+		Lat:          e.Lat.V,
+		Lon:          e.Lon.V,
+		RadiusNM:     r,
+		IsATC:        true,
+		IsATIS:       isATIS,
 	}
 }
 
@@ -445,9 +467,27 @@ type Feed struct {
 	// http.DefaultClient 两件事都做不到。
 	client *http.Client
 
-	mu       sync.RWMutex
-	snap     Snapshot
-	degraded bool
+	mu         sync.RWMutex
+	snap       Snapshot
+	degraded   bool
+	changeHook func()
+}
+
+// SetChangeHook installs a callback invoked after a new authority snapshot or
+// degradation becomes visible. It must not call back into Feed while locked.
+func (f *Feed) SetChangeHook(hook func()) {
+	f.mu.Lock()
+	f.changeHook = hook
+	f.mu.Unlock()
+}
+
+func (f *Feed) notifyChange() {
+	f.mu.RLock()
+	hook := f.changeHook
+	f.mu.RUnlock()
+	if hook != nil {
+		hook()
+	}
 }
 
 // NewFeed 建一个 Feed，尚未连接。初始状态是降级的——在第一份快照到达之前
@@ -516,6 +556,7 @@ func (f *Feed) Run(ctx context.Context) {
 		f.mu.Lock()
 		f.degraded = true
 		f.mu.Unlock()
+		f.notifyChange()
 
 		select {
 		case <-ctx.Done():
@@ -539,9 +580,10 @@ func (f *Feed) applyEvent(event string, data []byte) error {
 			return err
 		}
 		f.mu.Lock()
-		defer f.mu.Unlock()
 		f.snap = s
 		f.degraded = false
+		f.mu.Unlock()
+		f.notifyChange()
 		return nil
 
 	case "update":
@@ -550,7 +592,6 @@ func (f *Feed) applyEvent(event string, data []byte) error {
 			return err
 		}
 		f.mu.Lock()
-		defer f.mu.Unlock()
 
 		// 合并必须产出全新的 map。Snapshot 的文档契约承诺"已经返回出去的
 		// 快照不会再被就地修改"，而调用方可能正拿着上一份在读；就地写进
@@ -578,6 +619,8 @@ func (f *Feed) applyEvent(event string, data []byte) error {
 		// degraded 不在这里清除：一个增量证明不了我们掌握了全网，而在第一份
 		// 全量到达之前把稀疏的位置表当成权威，等于屏蔽所有不在表里的人——
 		// 降级本来就是为了宁可全放行也不要全屏蔽。
+		f.mu.Unlock()
+		f.notifyChange()
 		return nil
 
 	default:
@@ -690,6 +733,7 @@ func (f *Feed) stream(parent context.Context) error {
 		f.mu.Lock()
 		f.degraded = true
 		f.mu.Unlock()
+		f.notifyChange()
 		slog.Error("too many consecutive unusable feed events, dropping the connection",
 			"count", consecutiveFailures, "url", f.url, "last_reason", reason)
 		return fmt.Errorf("%d consecutive feed events were unusable, last: %s", consecutiveFailures, reason)

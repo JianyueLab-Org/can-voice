@@ -67,8 +67,8 @@
     "observer_note": "For the right seat: voice only, without a second aircraft on the network. Each pilot needs their own account.",
     "cid": "CAN ID",
     "password": "Password",
-    "follow": "Callsign to follow (the captain's)",
-    "follow_tip": "The callsign of the captain's aircraft. The voice server measures your range from its position.",
+    "follow": "Observer callsign",
+    "follow_tip": "Your own callsign for the observer FSD connection. Voice range uses your simulator position.",
     "callsign": "Callsign CES123",
     "aircraft": "Aircraft A320",
     "real_name": "Name",
@@ -76,7 +76,7 @@
   },
   "session": {
     "ident": "IDENT (8 s)",
-    "following": "Following",
+    "following": "Observer",
     "disconnect": "Disconnect"
   },
   "observer": {

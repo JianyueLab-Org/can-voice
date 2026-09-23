@@ -59,6 +59,7 @@ export type Reason =
   | { ConnectFailed: string }
   | { Rejected: { code: string; message: string } }
   | { SendFailed: string }
+  | { Protocol: string }
   | { BadFrequency: string }
   | { Retrying: { attempt: number; limit: number } }
   | { GaveUp: { limit: number } };
@@ -158,6 +159,7 @@ export function reasonText(reason: Reason | null): string {
   if ("BadFrequency" in reason)
     return t("state.reason.bad_frequency", { frequency: reason.BadFrequency });
   if ("SendFailed" in reason) return t("state.reason.send_failed", { detail: reason.SendFailed });
+  if ("Protocol" in reason) return t("state.reason.protocol", { detail: reason.Protocol });
   if ("Retrying" in reason)
     return t("state.reason.retrying", {
       attempt: reason.Retrying.attempt,
