@@ -76,6 +76,7 @@ cp .env.example .env
 | `ATIS_CID` / `ATIS_PASSWORD` | 机队用的**真实成员账号**。不填则容器能起、通播是哑的。空串也算没填好（#69） |
 
 can-api 的 `VOICE_ATIS_CID` 必须与 can-voice 的 `ATIS_CID` 相同，才能签发通播席位的语音票。
+它可以与 FSD 中发布该席位的控制员 CID 不同；FSD 只需提供在线的呼号和频率。
 
 其余有默认值：`CAN_VOICE_PORT=64738`、`CAN_VOICE_FSD_FEED`、机队连 `audio.ceruleanavi.net:64738`。机队**连外面的域名，不是 compose 内部主机名**——票按域名校证书，而且它连不上的时候成员也连不上。
 
