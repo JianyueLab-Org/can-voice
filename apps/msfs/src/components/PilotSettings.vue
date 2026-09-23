@@ -207,8 +207,17 @@ async function remove(i: number) {
 
 <template>
   <section class="flex flex-col gap-3 text-xs">
-    <!-- 枢轴就是 `PilotPanel` 那个页签的写法：一个 ref、几个按钮、v-if/v-else。
-         三页值不上一个分页组件。 -->
+    <!-- 枢轴沿用这个文件从前身 `PilotPanel.vue` 带过来的写法：一个 ref、几个按钮、
+         v-if/v-else。三页值不上一个分页组件。
+
+         **`page` 只能由下面这三个 @click 改，这一条是有承重的。** 他机页上那个机库
+         目录输入框只在原生 change / keyup.enter 时才落盘，而切页的 v-if 会把它连同
+         没提交的编辑一起拆掉。今天不丢，是因为点按钮必然先在 mousedown 把焦点挪走，
+         blur → change 先跑，拆子树的 Vue handler 后跑。
+         哪天有人用代码改 `page`（比如机库空的时候一键跳到他机页——本分支新加的那两条
+         机库横幅正会让人想这么干），焦点不动，这一条就不成立了，编辑会无声丢掉，而且
+         什么都不会报错。`SettingsDialog.vue` 里那个 close() 先 blur 再 emit 的写法，
+         就是同一个坑在 Esc 上的解法。真要加代码改页，照着它先 blur。 -->
     <div class="flex gap-2">
       <button class="rounded border px-2 py-1" :class="page === 'audio' ? 'border-sky-500' : ''" @click="page = 'audio'">
         {{ t("local.audio") }}
