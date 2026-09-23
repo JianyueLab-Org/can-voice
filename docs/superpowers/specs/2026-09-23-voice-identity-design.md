@@ -12,13 +12,13 @@ per configured ATIS callsign. The voice server accepts the extra ATIS session
 key only when the signed ticket names that station.
 
 The short-lived ticket carries a role (`pilot`, `observer`, `controller`, or
-`atis`), an optional station callsign, and a bounded list of permitted TX
+`atis`), a controller callsign or ATIS-only station callsign, and a bounded list of permitted TX
 frequencies. The issuer obtains controller assignments from the live FSD feed.
 It issues an ATIS station scope only to the configured fleet CAN ID for a
 callsign in the configured ATIS station list. Requests for an unowned station
 or frequency fail. Ordinary tokens retain empty station scope. The existing
 `{token, expires_in}` response shape stays unchanged. Pilot and observer
-tickets allow one in-band COM frequency at a time only while the same CID has
+tickets allow one client-selected in-band COM frequency at a time only while the same CID has
 the matching FSD role online. Controller tickets name the online callsign and
 its assigned frequency. ATIS tickets name one configured station and its
 configured frequency. Passwords and tickets are not logged.
