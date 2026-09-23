@@ -354,20 +354,6 @@ impl Inner {
             *slot = Some(client);
         }
         tokio::spawn(supervise(self.clone(), events, generation));
-        let inner = self.clone();
-        tokio::spawn(async move {
-            let mut delay = Duration::from_secs(45);
-            loop {
-                tokio::time::sleep(delay).await;
-                if inner.generation.load(Ordering::Relaxed) != generation {
-                    break;
-                }
-                if renew(inner.clone(), generation).await {
-                    break;
-                }
-                delay = Duration::from_secs(5);
-            }
-        });
         self.push_declaration();
         self.push_master();
     }
