@@ -58,8 +58,8 @@ const aircraft = ref("");
 const realName = ref("");
 /** 观察员模式（双人机组的右座）。真相在设置文件里，只有下线时能改。 */
 const observer = ref(false);
-/** 跟随的呼号：机长那架飞机的。 */
-const follow = ref("");
+/** Observer's own FSD callsign. */
+const observerCallsign = ref("");
 /** 手输频率框里的字。空的 = 跟随 COM1。 */
 const manualFrequency = ref("");
 /**
@@ -272,7 +272,7 @@ onMounted(async () => {
   aircraft.value = saved.aircraft;
   realName.value = saved.real_name;
   observer.value = saved.observer;
-  follow.value = saved.follow;
+  observerCallsign.value = saved.observer_callsign;
   manualFrequency.value = boxText(saved.observer_frequency);
   mouseSupported.value = await invoke<boolean>("mouse_ptt_supported");
   await refresh();
@@ -308,7 +308,7 @@ const connect = () =>
       callsign: callsign.value,
       aircraft: aircraft.value,
       realName: realName.value,
-      follow: follow.value,
+      observerCallsign: observerCallsign.value,
     });
     // 密码用过就丢：它只需要换一张短期票，之后重连带的是票不是密码。
     password.value = "";
@@ -435,10 +435,10 @@ const send = () =>
         <!-- can-audio 的网格顺序（xpc/gui.py:251-263）：呼号 · CID · 密码 · 机型 · 连接。
              follow 和姓名是 can-voice 多出来的两格，留在同一行。 -->
         <div class="grid grid-cols-7 gap-2">
-          <!-- 观察员填的是机长的呼号：语音服务端按那架飞机的位置给他算距离。 -->
+          <!-- The observer connects to FSD under their own callsign. -->
           <input
             v-if="observer"
-            v-model="follow"
+            v-model="observerCallsign"
             :disabled="online"
             :placeholder="t('login.follow')"
             :title="t('login.follow_tip')"
@@ -495,7 +495,7 @@ const send = () =>
               </button>
               <span v-if="observing" class="text-xs opacity-70">
                 {{ t("session.following") }}
-                <span class="font-mono">{{ view?.observer?.follow }}</span>
+                <span class="font-mono">{{ view?.observer?.callsign }}</span>
               </span>
             </template>
           </div>

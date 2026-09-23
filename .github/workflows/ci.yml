@@ -148,8 +148,8 @@ jobs:
       #
       # 夹具（两级证书链、Ed25519 密钥对、一张有效 token 和一张过期的）由
       # 那个 fixture 工具一条命令产出，不需要 openssl。
-      - run: mkdir -p target/e2e
-      - run: go build -o target/e2e/can-voice ./server/cmd/can-voice
+      - run: mkdir -p .temp/e2e
+      - run: go build -o .temp/e2e/can-voice ./server/cmd/can-voice
       - run: go run ./server/cmd/can-voice-e2e-fixture
       - run: cargo test -p can-voice-client --test e2e
         env:

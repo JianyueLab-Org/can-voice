@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -31,8 +32,69 @@ func TestVerifyAcceptsAFreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if got != in {
+	if !reflect.DeepEqual(got, in) {
 		t.Fatalf("claims = %+v, want %+v", got, in)
+	}
+}
+
+func TestVerifyPreservesScopedGrant(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	in := Claims{CID: "1000", Rating: 5, MaxTX: 1, Role: "controller", Callsign: "ZSPD_TWR", TX: []int{118500}, Exp: now.Add(time.Minute).Unix()}
+	tok, err := Sign(priv, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Verify(pub, tok, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, in) {
+		t.Fatalf("claims = %+v, want %+v", got, in)
+	}
+}
+
+func TestVerifyRejectsMalformedSignedVoiceScopes(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	for _, tc := range []struct {
+		name  string
+		claim Claims
+	}{
+		{"unknown role", Claims{Role: "administrator"}},
+		{"controller missing callsign", Claims{Role: "controller", TX: []int{118500}}},
+		{"controller with ATIS station", Claims{Role: "controller", Callsign: "ZSPD_TWR", Station: "ZSPD_ATIS", TX: []int{118500}}},
+		{"duplicate grant", Claims{Role: "controller", Callsign: "ZSPD_TWR", TX: []int{118500, 118500}}},
+		{"out of band grant", Claims{Role: "atis", Station: "ZSPD_ATIS", TX: []int{200000}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := tc.claim
+			c.CID, c.Rating, c.MaxTX, c.Exp = "1000", 5, 2, now.Add(time.Minute).Unix()
+			tok, err := Sign(priv, c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Verify(pub, tok, now); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("Verify error = %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestVerifyAcceptsOneSignedPilotFrequency(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	in := Claims{CID: "1000", Rating: 5, MaxTX: 1, Role: "pilot", TX: []int{118500}, Exp: now.Add(time.Minute).Unix()}
+	tok, err := Sign(priv, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Verify(pub, tok, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, in) {
+		t.Fatalf("pilot claim = %+v, want %+v", got, in)
 	}
 }
 

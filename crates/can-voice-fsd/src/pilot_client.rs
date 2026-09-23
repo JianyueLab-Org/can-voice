@@ -9,7 +9,6 @@ use crate::pilot::{
     self, unpack_pbh, AircraftConfig, Attitude, FlightPlan, PilotIdentity, PilotPosition, XpdrMode,
 };
 use crate::session::{self, Role, SessionHandle};
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
 
@@ -110,8 +109,6 @@ pub(crate) struct PilotRole {
     position: Option<PilotPosition>,
     ident_until: Option<Instant>,
     events: broadcast::Sender<PilotEvent>,
-    /// 别人的呼号 → 最近一次收到的位置。只用来判断"这架还在不在"。
-    seen: HashMap<String, Instant>,
     /// 自己的机型和航司，别人问起时答这个。
     aircraft: String,
     airline: String,
@@ -182,13 +179,11 @@ impl Role for PilotRole {
         // 而这两种是纯粹的通告。
         if let Some(t) = parse_traffic(raw) {
             if t.callsign != self.identity.callsign {
-                self.seen.insert(t.callsign.clone(), Instant::now());
                 let _ = self.events.send(PilotEvent::Traffic(Box::new(t)));
             }
         } else if let Some(c) = parse_controller(raw) {
             let _ = self.events.send(PilotEvent::Controller(Box::new(c)));
         } else if let Some(cs) = raw.strip_prefix("#DP").and_then(|r| r.split(':').next()) {
-            self.seen.remove(cs);
             let _ = self.events.send(PilotEvent::TrafficGone(cs.to_string()));
         } else if let Some(cs) = raw.strip_prefix("#DA").and_then(|r| r.split(':').next()) {
             let _ = self.events.send(PilotEvent::ControllerGone(cs.to_string()));
@@ -473,7 +468,6 @@ pub fn connect(config: PilotConfig) -> PilotHandle {
         position: None,
         ident_until: None,
         events: events.clone(),
-        seen: HashMap::new(),
         aircraft: config.aircraft,
         airline: config.airline,
         own_config: AircraftConfig::default(),
@@ -496,7 +490,6 @@ pub(crate) mod tests_support {
             position: None,
             ident_until: None,
             events,
-            seen: HashMap::new(),
             aircraft: "A320".into(),
             airline: "CES".into(),
             own_config: AircraftConfig::default(),

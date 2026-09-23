@@ -52,6 +52,7 @@ fn resample(input: &[i16], from: u32, to: u32) -> Vec<i16> {
 }
 
 /// 单声道铺到 `channels` 个声道（每个采样重复 N 次）。
+#[cfg(test)]
 pub(crate) fn spread_mono(mono: &[i16], channels: u16) -> Vec<i16> {
     if channels == 0 {
         return Vec::new();
@@ -69,6 +70,7 @@ pub(crate) fn spread_mono(mono: &[i16], channels: u16) -> Vec<i16> {
 ///
 /// 立体声接口上麦克风常常只接在一个声道上，另一个是静音的；取平均会让电平掉一半，
 /// 症状是"我的声音很小"，而增益旋钮看起来一切正常。
+#[cfg(test)]
 pub(crate) fn fold_to_mono(interleaved: &[i16], channels: u16) -> Vec<i16> {
     if channels == 0 {
         return Vec::new();
@@ -122,6 +124,65 @@ fn devices(input: bool) -> Vec<DeviceInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CountingAllocator;
+    thread_local! {
+        static COUNT_ALLOCATIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static ALLOCATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            COUNT_ALLOCATIONS
+                .try_with(|on| {
+                    if on.get() {
+                        let _ = ALLOCATION_COUNT.try_with(|count| count.set(count.get() + 1));
+                    }
+                })
+                .ok();
+            std::alloc::System.alloc(layout)
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            std::alloc::System.dealloc(ptr, layout);
+        }
+    }
+
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    #[test]
+    fn callback_rendering_reuses_its_buffers() {
+        let ring = Arc::new(Mutex::new(VecDeque::from(vec![1000i16; 6000])));
+        let clock = PlaybackClock::new();
+        clock.on_rebuild(48_000);
+        let mut output = vec![0f32; 480];
+        let mut pcm = vec![0i16; 480];
+        let mut mono = Vec::with_capacity(481);
+        render_f32(&mut output, 1, &ring, &clock, &mut pcm, &mut mono);
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_ALLOCATIONS.with(|on| on.set(true));
+        render_f32(&mut output, 1, &ring, &clock, &mut pcm, &mut mono);
+        COUNT_ALLOCATIONS.with(|on| on.set(false));
+        let allocations = ALLOCATION_COUNT.with(std::cell::Cell::get);
+        assert_eq!(allocations, 0, "audio output callback allocated");
+        assert!(output.iter().all(|sample| *sample > 0.0));
+    }
+
+    #[test]
+    fn f32_capture_reuses_its_buffer() {
+        let ring = Arc::new(Mutex::new(VecDeque::with_capacity(9600)));
+        let samples = vec![0.5f32; 960];
+        let mut pcm = vec![0i16; 960];
+        capture_f32(&samples, 2, &ring, 48_000, &mut pcm);
+        ALLOCATION_COUNT.with(|count| count.set(0));
+        COUNT_ALLOCATIONS.with(|on| on.set(true));
+        capture_f32(&samples, 2, &ring, 48_000, &mut pcm);
+        COUNT_ALLOCATIONS.with(|on| on.set(false));
+        let allocations = ALLOCATION_COUNT.with(std::cell::Cell::get);
+        assert_eq!(allocations, 0, "audio input callback allocated");
+        assert_eq!(ring.lock().unwrap().len(), 960);
+    }
 
     // ——— 挑一个我们建得出来的采样格式 ———
 
@@ -1292,6 +1353,8 @@ impl Drop for AudioIo {
 
 type Streams = (cpal::Stream, cpal::Stream, (u32, u32));
 
+const MAX_CALLBACK_FRAMES: usize = 8192;
+
 fn build_streams(
     input: Option<&str>,
     output: Option<&str>,
@@ -1312,6 +1375,14 @@ fn build_streams(
     let in_rate = in_cfg.sample_rate().0;
     let out_ch = out_cfg.channels();
     let in_ch = in_cfg.channels();
+    let output_chunk = MAX_CALLBACK_FRAMES * usize::from(out_ch.max(1));
+    let input_chunk = MAX_CALLBACK_FRAMES * usize::from(in_ch.max(1));
+    // Input callbacks never grow this ring; capacity is reserved before streams start.
+    if let Ok(mut ring) = capture.lock() {
+        let cap = in_rate as usize * RING_MS / 1000;
+        let additional = cap.saturating_sub(ring.len());
+        ring.reserve(additional);
+    }
 
     // **重建出来的设备采样率可能和原来那个不一样**，而目标水位、硬上限和死区
     // 都是按采样率算的。顺带把"攒水位"重新置上：重建之后环里那点东西是按旧
@@ -1332,24 +1403,33 @@ fn build_streams(
     };
 
     let out_stream = match out_cfg.sample_format() {
-        cpal::SampleFormat::I16 => out_dev.build_output_stream(
-            &out_cfg.config(),
-            move |buf: &mut [i16], _| fill_output(buf, out_ch, &playback, &out_clock),
-            make_err_fn(),
-            None,
-        ),
-        cpal::SampleFormat::F32 => out_dev.build_output_stream(
-            &out_cfg.config(),
-            move |buf: &mut [f32], _| {
-                let mut tmp = vec![0i16; buf.len()];
-                fill_output(&mut tmp, out_ch, &playback, &out_clock);
-                for (d, s) in buf.iter_mut().zip(tmp) {
-                    *d = s as f32 / 32768.0;
-                }
-            },
-            make_err_fn(),
-            None,
-        ),
+        cpal::SampleFormat::I16 => {
+            let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
+            out_dev.build_output_stream(
+                &out_cfg.config(),
+                move |buf: &mut [i16], _| {
+                    for chunk in buf.chunks_mut(output_chunk) {
+                        fill_output_reuse(chunk, out_ch, &playback, &out_clock, &mut mono);
+                    }
+                },
+                make_err_fn(),
+                None,
+            )
+        }
+        cpal::SampleFormat::F32 => {
+            let mut pcm = vec![0i16; output_chunk];
+            let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
+            out_dev.build_output_stream(
+                &out_cfg.config(),
+                move |buf: &mut [f32], _| {
+                    for chunk in buf.chunks_mut(output_chunk) {
+                        render_f32(chunk, out_ch, &playback, &out_clock, &mut pcm, &mut mono);
+                    }
+                },
+                make_err_fn(),
+                None,
+            )
+        }
         other => return Err(Error::SampleFormat(other)),
     }
     .map_err(|e| Error::Build(e.to_string()))?;
@@ -1361,18 +1441,19 @@ fn build_streams(
             make_err_fn(),
             None,
         ),
-        cpal::SampleFormat::F32 => in_dev.build_input_stream(
-            &in_cfg.config(),
-            move |buf: &[f32], _| {
-                let tmp: Vec<i16> = buf
-                    .iter()
-                    .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16)
-                    .collect();
-                take_input(&tmp, in_ch, &capture, in_rate);
-            },
-            make_err_fn(),
-            None,
-        ),
+        cpal::SampleFormat::F32 => {
+            let mut pcm = vec![0i16; input_chunk];
+            in_dev.build_input_stream(
+                &in_cfg.config(),
+                move |buf: &[f32], _| {
+                    for chunk in buf.chunks(input_chunk) {
+                        capture_f32(chunk, in_ch, &capture, in_rate, &mut pcm);
+                    }
+                },
+                make_err_fn(),
+                None,
+            )
+        }
         other => return Err(Error::SampleFormat(other)),
     }
     .map_err(|e| Error::Build(e.to_string()))?;
@@ -1390,21 +1471,51 @@ fn build_streams(
 ///
 /// 三件事按顺序发生：没攒够水位就整片静音、按水位多吃或少吃一个样本、
 /// 环被吃空就退回去重新攒。见 [`PlaybackClock`] 的说明。
+#[cfg(test)]
 fn fill_output(
     buf: &mut [i16],
     channels: u16,
     ring: &Arc<Mutex<VecDeque<i16>>>,
     clock: &PlaybackClock,
 ) {
+    let mut mono = Vec::with_capacity(buf.len() + 1);
+    fill_output_reuse(buf, channels, ring, clock, &mut mono);
+}
+
+fn render_f32(
+    buf: &mut [f32],
+    channels: u16,
+    ring: &Arc<Mutex<VecDeque<i16>>>,
+    clock: &PlaybackClock,
+    pcm: &mut [i16],
+    mono: &mut Vec<i16>,
+) {
+    let samples = &mut pcm[..buf.len()];
+    fill_output_reuse(samples, channels, ring, clock, mono);
+    for (target, sample) in buf.iter_mut().zip(samples) {
+        *target = *sample as f32 / 32768.0;
+    }
+}
+
+fn fill_output_reuse(
+    buf: &mut [i16],
+    channels: u16,
+    ring: &Arc<Mutex<VecDeque<i16>>>,
+    clock: &PlaybackClock,
+    mono: &mut Vec<i16>,
+) {
     // 先整片写静音。`buf.len()` 不一定是声道数的整数倍，而尾巴上那几个位置不
     // 属于任何一帧；cpal 交上来的缓冲是复用的，不写就是上一轮的残响。
     buf.fill(0);
+    if channels == 0 {
+        return;
+    }
     let frames = buf.len() / channels.max(1) as usize;
     if frames == 0 {
         return;
     }
 
-    let mut mono: Vec<i16> = Vec::with_capacity(frames + 1);
+    mono.clear();
     let take;
     let emptied;
     {
@@ -1437,11 +1548,11 @@ fn fill_output(
     if mono.len() == take && !mono.is_empty() {
         match take.cmp(&frames) {
             std::cmp::Ordering::Greater => {
-                mono.remove(quietest(&mono));
+                mono.remove(quietest(mono));
                 clock.note_removed(1);
             }
             std::cmp::Ordering::Less => {
-                let i = quietest(&mono);
+                let i = quietest(mono);
                 let v = mono[i];
                 mono.insert(i, v);
                 clock.note_added(1);
@@ -1459,21 +1570,42 @@ fn fill_output(
         clock.note_drained();
     }
 
-    let interleaved = spread_mono(&mono, channels);
-    buf[..interleaved.len()].copy_from_slice(&interleaved);
+    for (&sample, frame) in mono
+        .iter()
+        .zip(buf.chunks_exact_mut(channels.max(1) as usize))
+    {
+        frame.fill(sample);
+    }
 }
 
 fn take_input(buf: &[i16], channels: u16, ring: &Arc<Mutex<VecDeque<i16>>>, rate: u32) {
-    let mono = fold_to_mono(buf, channels);
     let cap = rate as usize * RING_MS / 1000;
+    if channels == 0 || cap == 0 {
+        return;
+    }
     let mut r = match ring.lock() {
         Ok(r) => r,
         Err(p) => p.into_inner(),
     };
-    r.extend(mono);
-    while r.len() > cap {
-        r.pop_front();
+    for frame in buf.chunks_exact(channels as usize) {
+        if r.len() == cap {
+            r.pop_front();
+        }
+        r.push_back(frame[0]);
     }
+}
+
+fn capture_f32(
+    buf: &[f32],
+    channels: u16,
+    ring: &Arc<Mutex<VecDeque<i16>>>,
+    rate: u32,
+    pcm: &mut [i16],
+) {
+    for (target, sample) in pcm.iter_mut().zip(buf) {
+        *target = (sample.clamp(-1.0, 1.0) * 32767.0) as i16;
+    }
+    take_input(&pcm[..buf.len()], channels, ring, rate);
 }
 
 fn pick(host: &cpal::Host, name: Option<&str>, input: bool) -> Option<cpal::Device> {

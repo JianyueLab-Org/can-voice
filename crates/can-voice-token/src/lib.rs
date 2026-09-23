@@ -36,6 +36,10 @@ pub enum Error {
     /// 而把它归到密码上会让人去改一个本来对的密码。
     #[error("can-api refused the token exchange: HTTP {0}")]
     Rejected(reqwest::StatusCode),
+    #[error("voice authority is not yet visible in the FSD feed")]
+    ScopePending,
+    #[error("voice authority feed is temporarily unavailable")]
+    AuthorityUnavailable,
     #[error("could not reach can-api: {0}")]
     Http(#[from] reqwest::Error),
     #[error("voice: {0}")]
@@ -55,6 +59,8 @@ impl Error {
             Error::Rejected(status) => {
                 Message::new("error.token.rejected").with("status", status.as_u16())
             }
+            Error::ScopePending => Message::new("error.token.rejected").with("status", 403),
+            Error::AuthorityUnavailable => Message::new("error.token.rejected").with("status", 503),
             Error::Http(e) => Message::new("error.token.unreachable").with("detail", e),
             Error::Voice(ClientError::Conn(ConnError::Refused(reason))) => match reason {
                 RefusedReason::TokenExpired => Message::new("error.voice.token_expired"),
@@ -87,7 +93,48 @@ pub struct TokenSource {
     endpoint: String,
     cid: String,
     password: String,
+    scope: Option<TokenScope>,
     http: reqwest::Client,
+}
+
+/// Requested role and one radio frequency. The issuer independently verifies
+/// the role and assignment; this value never grants authority by itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenScope {
+    Pilot { callsign: String, frequency: u32 },
+    Observer { callsign: String, frequency: u32 },
+    Controller { callsign: String, frequency: u32 },
+    Atis { station: String, frequency: u32 },
+}
+
+impl TokenScope {
+    pub fn pilot(callsign: impl Into<String>, frequency: u32) -> Self {
+        Self::Pilot {
+            callsign: callsign.into(),
+            frequency,
+        }
+    }
+
+    pub fn observer(callsign: impl Into<String>, frequency: u32) -> Self {
+        Self::Observer {
+            callsign: callsign.into(),
+            frequency,
+        }
+    }
+
+    pub fn controller(callsign: impl Into<String>, frequency: u32) -> Self {
+        Self::Controller {
+            callsign: callsign.into(),
+            frequency,
+        }
+    }
+
+    pub fn atis(station: impl Into<String>, frequency: u32) -> Self {
+        Self::Atis {
+            station: station.into(),
+            frequency,
+        }
+    }
 }
 
 impl std::fmt::Debug for TokenSource {
@@ -97,6 +144,7 @@ impl std::fmt::Debug for TokenSource {
             .field("endpoint", &self.endpoint)
             .field("cid", &self.cid)
             .field("password", &"***")
+            .field("scope", &self.scope)
             .finish_non_exhaustive()
     }
 }
@@ -118,8 +166,55 @@ impl TokenSource {
             endpoint: endpoint_for(api_origin),
             cid: cid.into(),
             password: password.into(),
+            scope: None,
             http,
         }
+    }
+
+    pub fn with_scope(mut self, scope: TokenScope) -> Self {
+        self.scope = Some(scope);
+        self
+    }
+
+    pub fn with_optional_scope(mut self, scope: Option<TokenScope>) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    pub fn scope(&self) -> Option<&TokenScope> {
+        self.scope.as_ref()
+    }
+
+    fn request_body(&self) -> serde_json::Value {
+        let mut body = serde_json::json!({ "cid": self.cid, "password": self.password });
+        let Some(scope) = self.scope.as_ref() else {
+            return body;
+        };
+        let (role, callsign, station, frequency) = match scope {
+            TokenScope::Pilot {
+                callsign,
+                frequency,
+            } => ("pilot", Some(callsign), None, frequency),
+            TokenScope::Observer {
+                callsign,
+                frequency,
+            } => ("observer", Some(callsign), None, frequency),
+            TokenScope::Controller {
+                callsign,
+                frequency,
+            } => ("controller", Some(callsign), None, frequency),
+            TokenScope::Atis { station, frequency } => ("atis", None, Some(station), frequency),
+        };
+        let object = body.as_object_mut().expect("request body is an object");
+        object.insert("role".into(), serde_json::json!(role));
+        object.insert("frequency".into(), serde_json::json!(frequency));
+        if let Some(callsign) = callsign {
+            object.insert("callsign".into(), serde_json::json!(callsign));
+        }
+        if let Some(station) = station {
+            object.insert("station".into(), serde_json::json!(station));
+        }
+        body
     }
 
     /// 换一张票。
@@ -130,7 +225,7 @@ impl TokenSource {
         let resp = self
             .http
             .post(&self.endpoint)
-            .json(&serde_json::json!({ "cid": self.cid, "password": self.password }))
+            .json(&self.request_body())
             .send()
             .await?;
         // 状态码在解 JSON **之前**分类：`error_for_status()` 把 401 和一个连不上
@@ -149,6 +244,8 @@ impl TokenSource {
 
 /// can-api 给未定级成员回的错误码（`internal/api/voicetoken.go`）。
 const INSUFFICIENT_RATING: &str = "insufficient_rating";
+const VOICE_SCOPE_REFUSED: &str = "voice_scope_refused";
+const VOICE_AUTHORITY_UNAVAILABLE: &str = "voice_authority_unavailable";
 
 /// 状态码加错误码 → 哪一种失败。
 fn classify(status: reqwest::StatusCode, body: &str) -> Error {
@@ -157,6 +254,16 @@ fn classify(status: reqwest::StatusCode, body: &str) -> Error {
             if error_code(body).as_deref() == Some(INSUFFICIENT_RATING) =>
         {
             Error::NotRated
+        }
+        reqwest::StatusCode::FORBIDDEN
+            if error_code(body).as_deref() == Some(VOICE_SCOPE_REFUSED) =>
+        {
+            Error::ScopePending
+        }
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+            if error_code(body).as_deref() == Some(VOICE_AUTHORITY_UNAVAILABLE) =>
+        {
+            Error::AuthorityUnavailable
         }
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => Error::Credentials,
         other => Error::Rejected(other),
@@ -240,6 +347,24 @@ mod tests {
         let status = Error::Rejected(reqwest::StatusCode::BAD_GATEWAY).message();
         assert_eq!(status.key, "error.token.rejected");
         assert_eq!(status.values["status"], "502");
+    }
+
+    #[test]
+    fn scope_refusal_is_not_a_password_error() {
+        assert!(matches!(
+            classify(
+                reqwest::StatusCode::FORBIDDEN,
+                r#"{"error":"voice_scope_refused"}"#
+            ),
+            Error::ScopePending
+        ));
+        assert!(matches!(
+            classify(
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                r#"{"error":"voice_authority_unavailable"}"#
+            ),
+            Error::AuthorityUnavailable
+        ));
     }
 
     fn refused(r: RefusedReason) -> ClientError {
@@ -415,6 +540,40 @@ mod tests {
         assert!(!shown.contains("correct-horse"), "密码进了 Debug: {shown}");
         assert!(shown.contains("***"), "{shown}");
         assert!(shown.contains("1001"), "CID 该留着: {shown}");
+    }
+
+    #[test]
+    fn scoped_request_has_only_the_selected_authority() {
+        let src = TokenSource::new(
+            "https://api.example",
+            "1001",
+            "private-password",
+            reqwest::Client::new(),
+        )
+        .with_scope(TokenScope::controller("ZSPD_TWR", 118_500));
+        assert_eq!(
+            src.request_body(),
+            serde_json::json!({
+                "cid": "1001", "password": "private-password", "role": "controller",
+                "callsign": "ZSPD_TWR", "frequency": 118_500
+            })
+        );
+        assert!(!format!("{src:?}").contains("private-password"));
+    }
+
+    #[test]
+    fn observer_without_a_frequency_still_requests_observer_identity() {
+        let src = TokenSource::new(
+            "https://api.example",
+            "1001",
+            "secret",
+            reqwest::Client::new(),
+        )
+        .with_scope(TokenScope::observer("OBS123", 0));
+        let body = src.request_body();
+        assert_eq!(body["role"], "observer");
+        assert_eq!(body["callsign"], "OBS123");
+        assert_eq!(body["frequency"], 0);
     }
 
     /// 而 can-api 自己坏了要看得出来是它坏了，不要归到密码上。

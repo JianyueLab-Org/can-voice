@@ -20,11 +20,17 @@
 //!   文本 ──(TTS 命令)──► mp3 ──(ffmpeg -f s16le -ar 48000 -ac 1)──► PCM ──► push_audio
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 
 /// 一帧的采样数，与 `can-voice-client` 的 20 毫秒帧一致。
 pub const FRAME_SAMPLES: usize = 960;
+pub const MAX_TTS_TEXT_BYTES: usize = 16 * 1024;
+pub const MAX_MEDIA_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_PCM_SAMPLES: usize = 48_000 * 120;
+pub const TTS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// 合成结果最多缓存几条。
 ///
@@ -35,6 +41,10 @@ pub const CACHE_ENTRIES: usize = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("tts text exceeds 16 KiB")]
+    InputTooLarge,
+    #[error("tts media or pcm exceeds size limit")]
+    MediaTooLarge,
     #[error("tts command failed: {0}")]
     Tts(String),
     #[error("ffmpeg failed: {0}")]
@@ -103,6 +113,9 @@ pub struct CommandTts {
 impl CommandTts {
     /// 合成一段文本，返回 48 kHz 单声道 PCM。
     pub async fn speak(&self, text: &str, chinese: bool) -> Result<Vec<i16>, Error> {
+        if text.len() > MAX_TTS_TEXT_BYTES {
+            return Err(Error::InputTooLarge);
+        }
         let dir = std::env::temp_dir();
         // 文件名带 pid 和一个自增号：一台机器上会有好几路同时在合成。
         let out = dir.join(format!(
@@ -110,6 +123,11 @@ impl CommandTts {
             std::process::id(),
             next_id()
         ));
+        self.speak_to(text, chinese, out).await
+    }
+
+    async fn speak_to(&self, text: &str, chinese: bool, out: PathBuf) -> Result<Vec<i16>, Error> {
+        let _media = MediaGuard(out.clone());
         let voice = if chinese {
             &self.voice_zh
         } else {
@@ -117,40 +135,103 @@ impl CommandTts {
         };
         let argv = build_argv(&self.argv, voice, text, &out.to_string_lossy());
 
-        let result = self.run(&argv, &out).await;
-        // 无论成败都清掉：一路每几十秒合成一次，留着就是一天几千个文件。
-        let _ = tokio::fs::remove_file(&out).await;
-        result
+        self.run(&argv, &out).await
     }
 
     async fn run(&self, argv: &[String], out: &Path) -> Result<Vec<i16>, Error> {
+        self.run_with_timeout(argv, out, TTS_TIMEOUT).await
+    }
+
+    async fn run_with_timeout(
+        &self,
+        argv: &[String],
+        out: &Path,
+        timeout: Duration,
+    ) -> Result<Vec<i16>, Error> {
+        let deadline = tokio::time::Instant::now() + timeout;
         let Some((program, args)) = argv.split_first() else {
             return Err(Error::Tts("empty command".into()));
         };
-        let status = tokio::process::Command::new(program)
+        let mut child = tokio::process::Command::new(program)
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .status()
-            .await?;
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err(Error::Tts("timed out".into()));
+            }
+        };
         if !status.success() {
             return Err(Error::Tts(format!("{program} exited with {status}")));
         }
 
-        let decoded = tokio::process::Command::new(&self.ffmpeg)
+        if tokio::fs::metadata(out).await?.len() > MAX_MEDIA_BYTES as u64 {
+            return Err(Error::MediaTooLarge);
+        }
+
+        let mut decoder = tokio::process::Command::new(&self.ffmpeg)
             .args(["-v", "error", "-i"])
             .arg(out)
             .args(["-f", "s16le", "-ar", "48000", "-ac", "1", "-"])
             .stdin(Stdio::null())
-            .output()
-            .await?;
-        if !decoded.status.success() {
-            return Err(Error::Ffmpeg(
-                String::from_utf8_lossy(&decoded.stderr).trim().to_string(),
-            ));
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut output = Vec::new();
+        let mut stdout = decoder
+            .stdout
+            .take()
+            .expect("piped decoder output")
+            .take((MAX_PCM_SAMPLES * 2 + 1) as u64);
+        let result = tokio::time::timeout_at(deadline, stdout.read_to_end(&mut output)).await;
+        match result {
+            Ok(Ok(_)) if output.len() <= MAX_PCM_SAMPLES * 2 => {}
+            Ok(Ok(_)) => {
+                let _ = decoder.kill().await;
+                return Err(Error::MediaTooLarge);
+            }
+            Ok(Err(e)) => {
+                let _ = decoder.kill().await;
+                return Err(Error::Io(e));
+            }
+            Err(_) => {
+                let _ = decoder.kill().await;
+                return Err(Error::Ffmpeg("timed out".into()));
+            }
         }
-        Ok(pcm_from_le(&decoded.stdout))
+        let status = match tokio::time::timeout_at(deadline, decoder.wait()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                let _ = decoder.kill().await;
+                return Err(Error::Ffmpeg("timed out".into()));
+            }
+        };
+        if !status.success() {
+            return Err(Error::Ffmpeg(format!("ffmpeg exited with {status}")));
+        }
+        decode_pcm_bounded(&output)
     }
+}
+
+struct MediaGuard(PathBuf);
+
+impl Drop for MediaGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn decode_pcm_bounded(bytes: &[u8]) -> Result<Vec<i16>, Error> {
+    if bytes.len() > MAX_PCM_SAMPLES * 2 {
+        return Err(Error::MediaTooLarge);
+    }
+    Ok(pcm_from_le(bytes))
 }
 
 fn next_id() -> u64 {
@@ -207,6 +288,85 @@ pub fn frames_of(pcm: &[i16]) -> Vec<Vec<i16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn oversized_text_is_rejected_before_a_command_is_started() {
+        let tts = CommandTts {
+            argv: vec!["missing-tts-command".into()],
+            voice_en: "en".into(),
+            voice_zh: "zh".into(),
+            ffmpeg: "missing-ffmpeg".into(),
+        };
+        let error = tts
+            .speak(&"中".repeat(MAX_TTS_TEXT_BYTES / 3 + 1), false)
+            .await
+            .expect_err("oversized text");
+        assert!(matches!(error, Error::InputTooLarge));
+    }
+
+    #[test]
+    fn decoded_pcm_is_bounded_to_two_minutes() {
+        assert!(decode_pcm_bounded(&vec![0; MAX_PCM_SAMPLES * 2]).is_ok());
+        assert!(matches!(
+            decode_pcm_bounded(&vec![0; MAX_PCM_SAMPLES * 2 + 2]),
+            Err(Error::MediaTooLarge)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_slow_tts_command_times_out() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp/tts-timeout");
+        std::fs::create_dir_all(&dir).expect("test directory");
+        let out = dir.join(format!("{}.media", next_id()));
+        let tts = CommandTts {
+            argv: vec![],
+            voice_en: "en".into(),
+            voice_zh: "zh".into(),
+            ffmpeg: "ffmpeg".into(),
+        };
+        let argv = vec!["sh".into(), "-c".into(), "exec sleep 5".into()];
+        let started = tokio::time::Instant::now();
+        let result = tts
+            .run_with_timeout(&argv, &out, Duration::from_millis(100))
+            .await;
+        assert!(matches!(result, Err(Error::Tts(message)) if message == "timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::fs::remove_dir(&dir).expect("remove test directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_synthesis_removes_its_media_file() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.temp/tts-cancel");
+        std::fs::create_dir_all(&dir).expect("test directory");
+        let out = dir.join(format!("{}.media", next_id()));
+        let tts = CommandTts {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "printf x > \"$1\"; exec sleep 5".into(),
+                "--".into(),
+                "{out}".into(),
+            ],
+            voice_en: "en".into(),
+            voice_zh: "zh".into(),
+            ffmpeg: "ffmpeg".into(),
+        };
+        let path = out.clone();
+        let task = tokio::spawn(async move { tts.speak_to("test", false, path).await });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !out.exists() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(out.exists(), "fake command produced media");
+        task.abort();
+        let _ = task.await;
+        assert!(!out.exists(), "media removed on cancellation");
+        std::fs::remove_dir(&dir).expect("remove test directory");
+    }
 
     #[test]
     fn the_argv_template_substitutes_every_placeholder() {

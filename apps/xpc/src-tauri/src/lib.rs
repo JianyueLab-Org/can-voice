@@ -24,6 +24,9 @@
 //! COM1，位置借机长那架的（`HELLO.follow`）。规则在 [`can_voice_app::observer`]。
 
 mod install;
+#[path = "../../../shared/lifecycle.rs"]
+mod lifecycle;
+use lifecycle::{terminal_fsd, LifeGate};
 
 use can_voice_app::Bridge;
 use can_voice_fsd::pilot::{FlightPlan, PilotIdentity, PilotPosition};
@@ -129,10 +132,9 @@ pub struct Settings {
     /// 观察员模式（双人机组的右座）：只连语音，不上 FSD。**连着的时候改不了**。
     #[serde(default)]
     pub observer: bool,
-    /// 观察员跟随的呼号——机长那架飞机的。和 `callsign` 分开存：同一个人换回
-    /// 自己飞的时候，呼号框里不该预填着别人的呼号。
+    /// Observer's own FSD callsign, separate from the pilot callsign.
     #[serde(default)]
-    pub follow: String,
+    pub observer_callsign: String,
     /// 观察员手输的频率（kHz）。`None` = 跟随本机 COM1。
     #[serde(default)]
     pub observer_frequency: Option<u32>,
@@ -250,7 +252,9 @@ impl Chimer {
 pub struct App {
     voice: Arc<Bridge>,
     sim: xplane::Link,
-    fsd: Mutex<Option<PilotHandle>>,
+    fsd: Arc<Mutex<Option<PilotHandle>>>,
+    observer_fsd: Arc<Mutex<Option<can_voice_fsd::observer_client::ObserverHandle>>>,
+    lifecycle: Arc<LifeGate>,
     /// FSD 链路最近一条事件。**界面靠它判断"上线了没有"**。
     link: Arc<Mutex<Option<can_voice_fsd::session::FsdEvent>>>,
     /// 插件最近一次回报。`None` = 从没听到过。
@@ -278,13 +282,13 @@ pub struct App {
     ///
     /// **界面靠它判断观察员"上线了没有"**：观察员没有 FSD，`link` 永远是 `None`，
     /// 只看 `link` 的话连上之后登录表单不消失。
-    observing: Mutex<Option<String>>,
+    observing: Arc<Mutex<Option<String>>>,
     /// 观察员手输的频率（kHz），0 = 没填。给频率那条循环每一拍读，所以是原子量。
     manual_frequency: Arc<std::sync::atomic::AtomicU32>,
     /// 让订阅跟上频率的那条循环。**下线时停掉**：留着的话，换个身份再连上来时
     /// 新旧两条一起改台面——一条跟手输的频率，一条跟 COM1——台面上就有两个
     /// 都开着发射的频率。
-    pump: Mutex<Option<tokio::task::AbortHandle>>,
+    pump: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
     /// 菜单点了哪一项，还没被前端取走。
     ///
     /// **不走事件。** 理由和 `update_state` 那条注释一样：`.setup()` 跑的时候
@@ -294,7 +298,52 @@ pub struct App {
     menu: Mutex<Option<MenuRequest>>,
 }
 
+#[derive(Clone)]
+struct RuntimeSlots {
+    voice: Arc<Bridge>,
+    fsd: Arc<Mutex<Option<PilotHandle>>>,
+    observer_fsd: Arc<Mutex<Option<can_voice_fsd::observer_client::ObserverHandle>>>,
+    pump: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+    observing: Arc<Mutex<Option<String>>>,
+    link: Arc<Mutex<Option<can_voice_fsd::session::FsdEvent>>>,
+    traffic: Arc<Mutex<TrafficTable>>,
+    chime: Arc<Chimer>,
+    lifecycle: Arc<LifeGate>,
+}
+
+impl RuntimeSlots {
+    async fn stop(&self) {
+        if let Some(pump) = self.pump.lock().expect("pump").take() {
+            pump.abort();
+        }
+        *self.observing.lock().expect("observing") = None;
+        if let Some(fsd) = self.fsd.lock().expect("fsd").take() {
+            fsd.stop();
+        }
+        if let Some(fsd) = self.observer_fsd.lock().expect("observer fsd").take() {
+            fsd.stop();
+        }
+        *self.link.lock().expect("link") = None;
+        self.chime.set_callsign("");
+        self.voice.disconnect().await;
+        self.traffic.lock().expect("traffic").prune(f64::MAX);
+    }
+}
+
 impl App {
+    fn runtime_slots(&self) -> RuntimeSlots {
+        RuntimeSlots {
+            voice: self.voice.clone(),
+            fsd: self.fsd.clone(),
+            observer_fsd: self.observer_fsd.clone(),
+            pump: self.pump.clone(),
+            observing: self.observing.clone(),
+            link: self.link.clone(),
+            traffic: self.traffic.clone(),
+            chime: self.chime.clone(),
+            lifecycle: self.lifecycle.clone(),
+        }
+    }
     pub fn new() -> Self {
         let store = can_voice_settings::Store::for_product("xpc-for-can");
         let settings: Settings = store.load();
@@ -303,13 +352,15 @@ impl App {
         Self {
             voice: Arc::new(Bridge::new()),
             sim: xplane::Link::spawn(),
-            fsd: Mutex::new(None),
+            fsd: Arc::new(Mutex::new(None)),
+            observer_fsd: Arc::new(Mutex::new(None)),
+            lifecycle: Arc::new(LifeGate::new()),
             link: Arc::new(Mutex::new(None)),
-            observing: Mutex::new(None),
+            observing: Arc::new(Mutex::new(None)),
             manual_frequency: Arc::new(std::sync::atomic::AtomicU32::new(saved_manual_frequency(
                 &settings,
             ))),
-            pump: Mutex::new(None),
+            pump: Arc::new(Mutex::new(None)),
             plugin: {
                 let slot = Arc::new(Mutex::new(None));
                 spawn_plugin_status_reader(slot.clone());
@@ -421,7 +472,7 @@ impl App {
 /// 一个波段外的数进了循环，语音会落在谁也不在的频率上。
 fn saved_manual_frequency(s: &Settings) -> u32 {
     s.observer_frequency
-        .filter(|k| can_voice_app::observer::BAND_KHZ.contains(k))
+        .filter(|k| can_voice_app::observer::BAND_KHZ.contains(k) && k % 5 == 0)
         .unwrap_or(0)
 }
 
@@ -517,8 +568,7 @@ pub struct View {
 /// 观察员那一侧的状况。
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ObserverView {
-    /// 跟随的呼号。
-    pub follow: String,
+    pub callsign: String,
     /// 语音此刻该在的频率（kHz）。`None` = 还没有频率：没手输，COM1 也读不到。
     ///
     /// **要报出来**：没有频率的观察员连得上、灯是绿的，却什么也听不见。
@@ -568,18 +618,21 @@ fn voice_frequency(s: &Snapshot) -> Option<u32> {
     let khz = (mhz * 1000.0).round();
     // 夹在 VHF 波段里。模拟器初始化过程中 COM1 会短暂读出 0 或者别的怪值，
     // 照单订阅会让人落在一个谁也不在的频率上，而界面看着一切正常。
-    (118_000.0..=136_975.0).contains(&khz).then_some(khz as u32)
+    (118_000.0..=136_975.0)
+        .contains(&khz)
+        .then_some(khz as u32)
+        .filter(|khz| khz % 5 == 0)
 }
 
-/// 语音连接的配置。`follow` 只有观察员填。
-fn voice_config(saved: &Settings, follow: String) -> can_voice_client::Config {
+/// Voice identity comes from the signed ticket; legacy follow stays empty.
+fn voice_config(saved: &Settings) -> can_voice_client::Config {
     let (voice_server, voice_name) = saved.endpoints.voice();
     can_voice_client::Config {
         server: voice_server,
         server_name: voice_name,
         token: String::new(),
         client_id: concat!("xpc-for-can/", env!("CARGO_PKG_VERSION")).into(),
-        follow,
+        follow: String::new(),
         // 一人一个账号，没有席位标记：同一个成员号第二次登录顶掉第一条。
         station: String::new(),
         input_device: saved.input_device.clone(),
@@ -601,6 +654,54 @@ fn clear_radios(voice: &Bridge) {
     });
 }
 
+async fn wait_fsd_online(
+    mut events: tokio::sync::broadcast::Receiver<can_voice_fsd::session::FsdEvent>,
+) -> Result<
+    (
+        tokio::sync::broadcast::Receiver<can_voice_fsd::session::FsdEvent>,
+        can_voice_fsd::session::FsdEvent,
+    ),
+    Message,
+> {
+    let wait = async {
+        loop {
+            match events.recv().await {
+                Ok(event) if event.state == can_voice_fsd::session::FsdState::Online => {
+                    return Ok(event)
+                }
+                Ok(event)
+                    if matches!(
+                        event.state,
+                        can_voice_fsd::session::FsdState::Error
+                            | can_voice_fsd::session::FsdState::Offline
+                            | can_voice_fsd::session::FsdState::Stopped
+                    ) =>
+                {
+                    break
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                _ => {}
+            }
+        }
+        Err(())
+    };
+    match tokio::time::timeout(Duration::from_secs(30), wait).await {
+        Ok(Ok(online)) => Ok((events, online)),
+        _ => {
+            Err(Message::new("error.voice.unreachable")
+                .with("detail", "FSD login did not complete"))
+        }
+    }
+}
+
+fn connection_busy() -> Message {
+    Message::new("error.voice.unreachable").with("detail", "already connecting or connected")
+}
+
+fn connection_canceled() -> Message {
+    Message::new("error.voice.unreachable").with("detail", "connection canceled")
+}
+
 // ——— 命令 ———
 
 #[tauri::command]
@@ -611,28 +712,33 @@ async fn connect(
     callsign: String,
     aircraft: String,
     real_name: String,
-    follow: String,
+    observer_callsign: String,
 ) -> Result<(), Message> {
     let saved = app.settings_snapshot();
-    if saved.observer {
-        return connect_observer(&app, &saved, cid, password, follow).await;
+    if !saved.observer {
+        can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.message())?;
     }
-    can_voice_fsd::pilot::check_pilot_callsign(&callsign).map_err(|e| e.message())?;
-
-    // 语音先连。凭据只在这里出现一次，换成一张短期票之后就不再需要——
-    // 重连带的是票不是密码，所以一个卡在重连里的客户端不会把账号锁出语音。
-    let tokens = TokenSource::new(
-        &saved.endpoints.api_origin(),
-        cid.clone(),
-        password.clone(),
-        app.http.clone(),
-    );
-    app.replace_pump(None);
-    clear_radios(&app.voice);
-    app.voice
-        .connect(voice_config(&saved, String::new()), &tokens)
-        .await
-        .map_err(|e| e.message())?;
+    let (generation, mut canceled) = app.lifecycle.begin().ok_or_else(connection_busy)?;
+    let _operation = app.lifecycle.operation.lock().await;
+    if !app.lifecycle.current(generation) {
+        return Err(connection_canceled());
+    }
+    if saved.observer {
+        let result = connect_observer(
+            &app,
+            &saved,
+            cid,
+            password,
+            observer_callsign,
+            generation,
+            &mut canceled,
+        )
+        .await;
+        if result.is_err() {
+            app.lifecycle.fail_connect(generation);
+        }
+        return result;
+    }
 
     let (fsd_host, fsd_port) = saved.endpoints.fsd();
     let fsd = pilot_client::connect(PilotConfig {
@@ -660,7 +766,56 @@ async fn connect(
             .collect(),
     });
 
-    spawn_link_reader(fsd.link(), app.link.clone());
+    if let Some(snapshot) = app.sim.snapshot() {
+        fsd.update_position(to_position(
+            &snapshot,
+            can_voice_fsd::packet::RATING_OBSERVER,
+        ));
+    }
+    let (link_events, online) = match tokio::select! {
+        _ = canceled.changed() => { fsd.stop(); return Err(connection_canceled()); },
+        result = wait_fsd_online(fsd.link()) => result,
+    } {
+        Ok(value) => value,
+        Err(e) => {
+            fsd.stop();
+            app.lifecycle.fail_connect(generation);
+            return Err(e);
+        }
+    };
+    let mut tokens = TokenSource::new(
+        &saved.endpoints.api_origin(),
+        cid.clone(),
+        password.clone(),
+        app.http.clone(),
+    );
+    let initial_frequency = app.sim.snapshot().as_ref().and_then(voice_frequency);
+    tokens = tokens.with_scope(can_voice_token::TokenScope::pilot(
+        &callsign,
+        initial_frequency.unwrap_or(0),
+    ));
+    app.replace_pump(None);
+    clear_radios(&app.voice);
+    let voice_result = tokio::select! {
+        _ = canceled.changed() => { fsd.stop(); app.voice.disconnect().await; return Err(connection_canceled()); },
+        result = app.voice.connect_with_authority_retry(voice_config(&saved), &tokens) => result,
+    };
+    if let Err(e) = voice_result {
+        fsd.stop();
+        app.voice.disconnect().await;
+        app.lifecycle.fail_connect(generation);
+        return Err(e.message());
+    }
+
+    if !app.lifecycle.activate(generation) {
+        fsd.stop();
+        app.voice.disconnect().await;
+        return Err(connection_canceled());
+    }
+
+    *app.link.lock().expect("link") = Some(online);
+    *app.fsd.lock().expect("fsd") = Some(fsd.clone());
+    spawn_link_reader(link_events, app.runtime_slots(), generation);
     spawn_traffic_reader(
         fsd.traffic(),
         app.traffic.clone(),
@@ -673,6 +828,8 @@ async fn connect(
         fsd.clone(),
         app.sim.clone(),
         app.voice.clone(),
+        callsign.clone(),
+        initial_frequency,
     )));
     spawn_plugin_feed(
         app.sim.clone(),
@@ -681,7 +838,6 @@ async fn connect(
         app.inject.clone(),
         app.traffic_range.clone(),
     );
-    *app.fsd.lock().expect("fsd") = Some(fsd);
     // 判"有没有点到我"要用正在连着的这个呼号，不是设置里存的那个。
     app.chime.set_callsign(&callsign);
     // 上线成功才记住这一组：连不上的那一组多半有一项是打错的。
@@ -691,59 +847,114 @@ async fn connect(
         s.aircraft = aircraft;
         s.real_name = real_name;
     });
-    Ok(())
+    if app.lifecycle.active(generation) {
+        Ok(())
+    } else {
+        Err(connection_canceled())
+    }
 }
 
-/// 观察员上线：只连语音。
-///
-/// **不开 FSD 连接**，所以没有他机、没有文字消息、不能拍发计划也不能识别——
-/// 那些都是机长那条连接的事。位置借机长那架飞机的：服务端拿 `follow` 去
-/// datafeed 里查。
+/// Observer startup: own facility-0 FSD presence, then scoped voice.
 async fn connect_observer(
     app: &App,
     saved: &Settings,
     cid: String,
     password: String,
-    follow: String,
+    observer_callsign: String,
+    generation: u64,
+    canceled: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Result<(), Message> {
     use can_voice_app::observer;
-    let follow = observer::follow_callsign(&follow).map_err(|e| e.message())?;
-    let tokens = TokenSource::new(
+    let callsign = observer::observer_callsign(&observer_callsign).map_err(|e| e.message())?;
+    let (host, port) = saved.endpoints.fsd();
+    let fsd =
+        can_voice_fsd::observer_client::connect(can_voice_fsd::observer_client::ObserverConfig {
+            host,
+            port,
+            identity: can_voice_fsd::packet::Identity::new(
+                &callsign,
+                &cid,
+                &password,
+                &saved.real_name,
+                can_voice_fsd::packet::RATING_OBSERVER,
+            ),
+            reconnect_limit: can_voice_fsd::session::RECONNECT_LIMIT,
+        });
+    if let Some(snapshot) = app.sim.snapshot() {
+        fsd.update_position(snapshot.latitude, snapshot.longitude);
+    }
+    let (link_events, online) = match tokio::select! {
+        _ = canceled.changed() => { fsd.stop(); return Err(connection_canceled()); },
+        result = wait_fsd_online(fsd.events()) => result,
+    } {
+        Ok(value) => value,
+        Err(e) => {
+            fsd.stop();
+            return Err(e);
+        }
+    };
+    let mut tokens = TokenSource::new(
         &saved.endpoints.api_origin(),
         cid.clone(),
         password,
         app.http.clone(),
     );
+    let initial_frequency = can_voice_app::observer::frequency_for(
+        app.manual_frequency(),
+        app.sim.snapshot().as_ref().and_then(voice_frequency),
+    );
+    tokens = tokens.with_scope(can_voice_token::TokenScope::observer(
+        &callsign,
+        initial_frequency.unwrap_or(0),
+    ));
     app.replace_pump(None);
     clear_radios(&app.voice);
-    app.voice
-        .connect(voice_config(saved, follow.clone()), &tokens)
-        .await
-        .map_err(|e| e.message())?;
+    let voice_result = tokio::select! {
+        _ = canceled.changed() => { fsd.stop(); app.voice.disconnect().await; return Err(connection_canceled()); },
+        result = app.voice.connect_with_authority_retry(voice_config(saved), &tokens) => result,
+    };
+    if let Err(e) = voice_result {
+        fsd.stop();
+        app.voice.disconnect().await;
+        return Err(e.message());
+    }
+    if !app.lifecycle.activate(generation) {
+        fsd.stop();
+        app.voice.disconnect().await;
+        return Err(connection_canceled());
+    }
+    *app.link.lock().expect("link") = Some(online);
+    *app.observer_fsd.lock().expect("observer fsd") = Some(fsd.clone());
+    spawn_link_reader(link_events, app.runtime_slots(), generation);
     app.replace_pump(Some(spawn_observer_pump(
+        fsd.clone(),
         app.sim.clone(),
         app.voice.clone(),
         app.manual_frequency.clone(),
+        callsign.clone(),
+        initial_frequency,
     )));
-    *app.observing.lock().expect("observing") = Some(follow.clone());
+    *app.observing.lock().expect("observing") = Some(callsign.clone());
     app.update_settings(|s| {
         s.cid = cid;
-        s.follow = follow;
+        s.observer_callsign = callsign;
     });
-    Ok(())
+    if app.lifecycle.active(generation) {
+        Ok(())
+    } else {
+        Err(connection_canceled())
+    }
 }
 
 #[tauri::command]
 async fn disconnect(app: tauri::State<'_, App>) -> Result<(), String> {
-    app.replace_pump(None);
-    *app.observing.lock().expect("observing") = None;
-    if let Some(fsd) = app.fsd.lock().expect("fsd").take() {
-        fsd.stop();
-    }
-    *app.link.lock().expect("link") = None;
-    app.chime.set_callsign("");
-    app.voice.disconnect().await;
-    app.traffic.lock().expect("traffic").prune(f64::MAX);
+    let Some(stopping) = app.lifecycle.request_stop(None) else {
+        app.lifecycle.wait_for_stop().await;
+        return Ok(());
+    };
+    let _operation = app.lifecycle.operation.lock().await;
+    app.runtime_slots().stop().await;
+    app.lifecycle.finish_stop(stopping);
     Ok(())
 }
 
@@ -988,10 +1199,10 @@ fn build_view(app: &App) -> View {
             loading: app.csl_loading.load(std::sync::atomic::Ordering::Relaxed),
         },
         // 和频率循环走的是同一条规则，所以这里算出来的就是那条循环 200 ms 内会收敛到的。
-        observer: app.observing().map(|follow| {
+        observer: app.observing().map(|callsign| {
             let manual = app.manual_frequency();
             ObserverView {
-                follow,
+                callsign,
                 frequency: can_voice_app::observer::frequency_for(manual, com1),
                 manual: manual.is_some(),
             }
@@ -1202,12 +1413,24 @@ fn monotonic() -> f64 {
 /// 全由它推导，于是上线成功也看不出来。
 fn spawn_link_reader(
     mut events: tokio::sync::broadcast::Receiver<can_voice_fsd::session::FsdEvent>,
-    slot: Arc<Mutex<Option<can_voice_fsd::session::FsdEvent>>>,
+    slots: RuntimeSlots,
+    generation: u64,
 ) {
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(e) => *slot.lock().expect("link") = Some(e),
+                Ok(e) if terminal_fsd(&e) => {
+                    if let Some(stopping) = slots.lifecycle.request_stop(Some(generation)) {
+                        let _operation = slots.lifecycle.operation.lock().await;
+                        slots.stop().await;
+                        slots.lifecycle.finish_stop(stopping);
+                    }
+                    return;
+                }
+                Ok(e) if slots.lifecycle.active(generation) => {
+                    *slots.link.lock().expect("link") = Some(e)
+                }
+                Ok(_) => return,
                 // 跟不上就继续：界面只关心最新那一条。
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => return,
@@ -1303,10 +1526,18 @@ fn to_aircraft_config(a: &can_voice_sim::Animation) -> can_voice_fsd::pilot::Air
 }
 
 /// 每 200 ms 把模拟器那一帧喂给 FSD，并让语音订阅跟上 COM1。
-fn spawn_pump(fsd: PilotHandle, sim: xplane::Link, voice: Arc<Bridge>) -> tokio::task::AbortHandle {
+fn spawn_pump(
+    fsd: PilotHandle,
+    sim: xplane::Link,
+    voice: Arc<Bridge>,
+    callsign: String,
+    initial_scope: Option<u32>,
+) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PUMP_INTERVAL);
         let mut current_freq: Option<u32> = None;
+        let mut scope_freq = initial_scope;
+        let mut last_scope_attempt = None;
         // 外形变了才发：它是本地状态，别人问 `$CQ ACC` 时才用得上，
         // 每秒五次重复同一份没有意义。
         let mut last_config: Option<can_voice_sim::Animation> = None;
@@ -1328,7 +1559,17 @@ fn spawn_pump(fsd: PilotHandle, sim: xplane::Link, voice: Arc<Bridge>) -> tokio:
                 can_voice_fsd::packet::RATING_OBSERVER,
             ));
 
-            retune(&voice, &mut current_freq, voice_frequency(&snapshot));
+            let wanted = voice_frequency(&snapshot);
+            retune(&voice, &mut current_freq, wanted);
+            refresh_radio_scope(
+                &voice,
+                &callsign,
+                false,
+                wanted,
+                &mut scope_freq,
+                &mut last_scope_attempt,
+            )
+            .await;
         }
     })
     .abort_handle()
@@ -1357,28 +1598,69 @@ fn retune(voice: &Bridge, current: &mut Option<u32>, wanted: Option<u32>) {
     });
 }
 
+async fn refresh_radio_scope(
+    voice: &Bridge,
+    callsign: &str,
+    observer: bool,
+    wanted: Option<u32>,
+    current: &mut Option<u32>,
+    last_attempt: &mut Option<std::time::Instant>,
+) {
+    if wanted == *current || last_attempt.is_some_and(|at| at.elapsed() < Duration::from_secs(3)) {
+        return;
+    }
+    *last_attempt = Some(std::time::Instant::now());
+    let scope = Some({
+        let frequency = wanted.unwrap_or(0);
+        if observer {
+            can_voice_token::TokenScope::observer(callsign, frequency)
+        } else {
+            can_voice_token::TokenScope::pilot(callsign, frequency)
+        }
+    });
+    match voice.rescope(scope).await {
+        Ok(()) => *current = wanted,
+        Err(e) => tracing::warn!(error = %e, "could not refresh radio authority"),
+    }
+}
+
 /// 观察员的频率循环：每 200 ms 看一眼该在哪个频率上。
 ///
 /// **读不到模拟器也照转**，这是和 [`spawn_pump`] 不一样的地方：手输了频率的
 /// 观察员可以根本不开模拟器，照搬那条"没有模拟器那一帧就跳过"的话，这种人
 /// 永远订阅不上任何频率。
 fn spawn_observer_pump(
+    fsd: can_voice_fsd::observer_client::ObserverHandle,
     sim: xplane::Link,
     voice: Arc<Bridge>,
     manual: Arc<std::sync::atomic::AtomicU32>,
+    callsign: String,
+    initial_scope: Option<u32>,
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(PUMP_INTERVAL);
         let mut current: Option<u32> = None;
+        let mut scope_freq = initial_scope;
+        let mut last_scope_attempt = None;
         loop {
             tick.tick().await;
             let typed = Some(manual.load(std::sync::atomic::Ordering::Relaxed)).filter(|&k| k != 0);
-            let com1 = sim.snapshot().as_ref().and_then(voice_frequency);
-            retune(
+            let snapshot = sim.snapshot();
+            if let Some(snapshot) = snapshot.as_ref() {
+                fsd.update_position(snapshot.latitude, snapshot.longitude);
+            }
+            let com1 = snapshot.as_ref().and_then(voice_frequency);
+            let wanted = can_voice_app::observer::frequency_for(typed, com1);
+            retune(&voice, &mut current, wanted);
+            refresh_radio_scope(
                 &voice,
-                &mut current,
-                can_voice_app::observer::frequency_for(typed, com1),
-            );
+                &callsign,
+                true,
+                wanted,
+                &mut scope_freq,
+                &mut last_scope_attempt,
+            )
+            .await;
         }
     })
     .abort_handle()
@@ -1921,6 +2203,79 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_rejects_overlap_and_invalidates_a_pending_connect() {
+        let gate = LifeGate::new();
+        let (first, cancel) = gate.begin().expect("first connect");
+        assert!(gate.begin().is_none(), "a second connect must be rejected");
+        let stopped = gate.request_stop(None).expect("disconnect");
+        assert!(cancel.has_changed().expect("cancellation signal"));
+        assert!(
+            !gate.activate(first),
+            "a canceled startup cannot become active"
+        );
+        gate.finish_stop(stopped);
+        assert!(gate.begin().is_some(), "reconnect allowed after cleanup");
+    }
+
+    #[test]
+    fn only_terminal_fsd_events_end_the_current_generation() {
+        use can_voice_fsd::session::{FsdEvent, FsdState, Reason};
+        let gate = LifeGate::new();
+        let (first, _) = gate.begin().expect("connect");
+        assert!(gate.activate(first));
+        assert!(!terminal_fsd(&FsdEvent {
+            state: FsdState::Reconnecting,
+            reason: Reason::Retrying {
+                attempt: 1,
+                limit: 3
+            }
+        }));
+        assert!(
+            gate.request_stop(Some(first + 1)).is_none(),
+            "stale reader cannot stop active session"
+        );
+        assert!(terminal_fsd(&FsdEvent {
+            state: FsdState::Offline,
+            reason: Reason::GaveUp { limit: 3 }
+        }));
+        assert!(gate.request_stop(Some(first)).is_some());
+    }
+
+    #[tokio::test]
+    async fn terminal_fsd_event_clears_observer_identity_and_link() {
+        use can_voice_fsd::session::{FsdEvent, FsdState, Reason};
+        let app = App::new();
+        let (generation, _) = app.lifecycle.begin().expect("connect");
+        assert!(app.lifecycle.activate(generation));
+        *app.observing.lock().expect("observing") = Some("ZSPD_OBS".into());
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        spawn_link_reader(rx, app.runtime_slots(), generation);
+        tx.send(FsdEvent {
+            state: FsdState::Reconnecting,
+            reason: Reason::Retrying {
+                attempt: 1,
+                limit: 3,
+            },
+        })
+        .expect("reconnect event");
+        tokio::task::yield_now().await;
+        assert!(app.observing().is_some(), "a retry is not terminal");
+        tx.send(FsdEvent {
+            state: FsdState::Offline,
+            reason: Reason::GaveUp { limit: 3 },
+        })
+        .expect("terminal event");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while app.observing().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal teardown");
+        assert!(app.link.lock().expect("link").is_none());
+    }
     use can_voice_fsd::pilot::XpdrMode;
 
     /// **界面靠 `link` 判断"上线了没有"**：`App.vue` 里 `online` 就是
@@ -2110,6 +2465,19 @@ mod tests {
         assert_eq!(voice_frequency(&s), Some(121_800));
     }
 
+    #[test]
+    fn off_raster_com1_is_not_sent_to_voice() {
+        let tune = |mhz| {
+            voice_frequency(&Snapshot {
+                com1: Some(mhz),
+                com1_power: true,
+                ..Default::default()
+            })
+        };
+        assert_eq!(tune(121.451), None);
+        assert_eq!(tune(121.455), Some(121_455));
+    }
+
     /// 模拟器初始化过程中 COM1 会短暂读出 0 或者别的怪值。照单订阅会让人落在
     /// 一个谁也不在的频率上，而界面看着一切正常。
     #[test]
@@ -2150,7 +2518,7 @@ mod tests {
             serde_json::from_str(r#"{"cid":"1234567","callsign":"CES123"}"#).expect("parse");
         assert_eq!(s.cid, "1234567");
         assert!(!s.observer);
-        assert_eq!(s.follow, "");
+        assert_eq!(s.observer_callsign, "");
         assert_eq!(s.observer_frequency, None);
     }
 
@@ -2168,7 +2536,7 @@ mod tests {
 
         let v = build_view(&app);
         assert_eq!(v.link, None);
-        assert_eq!(v.observer.expect("observer").follow, "CCA1501");
+        assert_eq!(v.observer.expect("observer").callsign, "CCA1501");
         assert!(app.is_online());
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2237,6 +2605,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(saved_manual_frequency(&with(Some(121_800))), 121_800);
+        assert_eq!(saved_manual_frequency(&with(Some(121_451))), 0);
         assert_eq!(saved_manual_frequency(&with(Some(99_500))), 0);
         assert_eq!(saved_manual_frequency(&with(None)), 0);
     }

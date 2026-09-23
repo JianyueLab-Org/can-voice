@@ -143,10 +143,11 @@ func TestMaxTXIsAlsoClampedToMaxRX(t *testing.T) {
 	}
 	r := router.New()
 	cfg := Config{
-		Addr:      "127.0.0.1:0",
-		TLS:       &tls.Config{Certificates: []tls.Certificate{cert}},
-		PublicKey: pub,
-		MaxRX:     maxRX,
+		Addr:                   "127.0.0.1:0",
+		TLS:                    &tls.Config{Certificates: []tls.Certificate{cert}},
+		PublicKey:              pub,
+		MaxRX:                  maxRX,
+		unsafeLegacyTXForTests: true,
 	}
 	ln, err := listen(cfg)
 	if err != nil {
@@ -354,7 +355,7 @@ func TestAFollowThatIsNotACallsignIsRefused(t *testing.T) {
 //
 // 取值刻意贴着两端的边界（两个字符、十个字符），所以长度判是 `< 2 / > 10`
 // 而不是 `<= 2 / >= 10` 这件事也被钉住了。
-func TestARealCallsignStillWorksAsAFollow(t *testing.T) {
+func TestEvenAValidCallsignIsRefusedAsFollow(t *testing.T) {
 	addr, priv, _ := testServer(t)
 
 	for i, follow := range []string{"CCA101", "AB", "CCA1234567", "CES-2", "ZSPD_ATIS"} {
@@ -362,8 +363,8 @@ func TestARealCallsignStillWorksAsAFollow(t *testing.T) {
 			Token: goodToken(t, priv, "100"+string(rune('0'+i))), Client: "test/1",
 			Proto: control.ProtoVersion, Follow: follow,
 		})
-		if _, ok := m.(*control.Ready); !ok {
-			t.Fatalf("a HELLO following %q got %T, want *control.Ready — observer mode is the only reason this field exists", follow, m)
+		if _, ok := m.(*control.Bye); !ok {
+			t.Fatalf("a HELLO following %q got %T, want *control.Bye", follow, m)
 		}
 	}
 }

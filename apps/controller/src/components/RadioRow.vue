@@ -15,6 +15,9 @@ interface Radio {
 
 const props = defineProps<{
   radio: Radio;
+  effectiveRx: boolean;
+  effectiveTx: boolean;
+  effectiveXc: boolean;
   receiving: boolean;
   txDenied: boolean;
   rxDenied: boolean;
@@ -52,8 +55,9 @@ function switchTitle(s: "rx" | "tx" | "xc"): string {
 
 /** TrackAudio 三态：关 / 开 / 正在响。静音时 RX 整颗变红。 */
 function state(s: "rx" | "tx" | "xc"): "off" | "on" | "active" | "muted" {
+  const effective = s === "rx" ? props.effectiveRx : s === "tx" ? props.effectiveTx : props.effectiveXc;
+  if (!effective) return "off";
   if (s === "rx" && props.radio.muted) return "muted";
-  if (!props.radio[s]) return "off";
   if (s === "rx" && props.receiving) return "active";
   if (s === "tx" && props.transmitting) return "active";
   return "on";

@@ -62,6 +62,7 @@
   },
   "notice": {
     "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",
+    "authority_lost": "发射权限已撤销，仍可继续收听。",
     "range_unavailable": "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听",
     "unknown_message": "服务端不认识客户端发的一帧（{reason}），可能需要更新客户端",
     "rate_limited": "上行语音超过了服务端的速率上限，多出来的被丢掉了：这通常是客户端的 bug（PTT 卡住），重连一次；反复出现请回传日志。",
@@ -105,8 +106,9 @@
     "observer": {
       "unreadable": "频率 {value} 读不出来，写成 121.800 这样",
       "out_of_band": "频率 {value} 不在 118.000 – 136.975 之间",
-      "no_follow": "观察员要填跟随的呼号：机长那架飞机的呼号，语音按它的位置算距离",
-      "bad_follow": "跟随的呼号 {callsign} 不合规矩：2–10 位，只能是字母、数字、- 或 _"
+      "off_raster": "频率 {value} 不在 5 kHz 频道栅格上，请输入 121.450 或 121.455 这样的频率",
+      "no_callsign": "观察员需要填写自己连接 FSD 的呼号",
+      "bad_callsign": "观察员呼号 {callsign} 不合规矩：2–10 位，只能是字母、数字、- 或 _"
     },
     "endpoint": {
       "url_scheme": {

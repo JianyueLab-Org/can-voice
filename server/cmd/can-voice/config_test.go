@@ -128,6 +128,25 @@ func TestLoadConfigHonoursAMaxRXOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigBoundsPendingHandshakes(t *testing.T) {
+	base := map[string]string{
+		"CAN_VOICE_ADDR": ":64738", "CAN_VOICE_TLS_CERT": "/tmp/c.pem",
+		"CAN_VOICE_TLS_KEY": "/tmp/k.pem", "CAN_VOICE_API_PUBKEY": "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=",
+	}
+	base["CAN_VOICE_MAX_PENDING_HANDSHAKES"] = "7"
+	cfg, err := LoadConfig(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxPendingHandshakes != 7 {
+		t.Fatalf("max pending = %d, want 7", cfg.MaxPendingHandshakes)
+	}
+	base["CAN_VOICE_MAX_PENDING_HANDSHAKES"] = "0"
+	if _, err := LoadConfig(env(base)); err == nil {
+		t.Fatal("zero pending handshakes should be rejected")
+	}
+}
+
 func TestLoadConfigDefaultsTheOptionalValues(t *testing.T) {
 	cfg, err := LoadConfig(env(map[string]string{
 		"CAN_VOICE_ADDR":       ":64738",

@@ -245,6 +245,7 @@ async fn pump(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let epoch = Instant::now();
+    let subscription_epoch = subs.epoch();
     let mut last_ping = Instant::now();
     let mut rtt_ms = 0u32;
     let mut counters = Counters::default();
@@ -290,12 +291,12 @@ async fn pump(
             },
 
             msg = control.recv() => match msg {
-                Some(Ok(Message::SubAck(ack))) => on_ack(subs, events, ack),
+                Some(Ok(Message::SubAck(ack))) => on_ack(subs, events, subscription_epoch, ack),
                 Some(Ok(Message::Pong(p))) => {
                     let now = epoch.elapsed().as_millis() as i64;
                     rtt_ms = now.saturating_sub(p.t).clamp(0, u32::MAX as i64) as u32;
                 }
-                Some(Ok(Message::Notice(n))) => on_notice(events, n),
+                Some(Ok(Message::Notice(n))) => on_notice(subs, events, n),
                 Some(Ok(Message::Bye(b))) => {
                     // BYE **会丢**——真正丢不掉的是关闭码与原因串，它们和关闭
                     // 原子地一起送达。所以这里只记日志，处置交给 `drop_reason`。
@@ -450,6 +451,7 @@ fn drop_reason(quic: &quinn::Connection) -> Disposition {
 fn on_ack(
     subs: &mut SubscriptionState,
     events: &tokio::sync::broadcast::Sender<Event>,
+    epoch: u64,
     ack: control::SubAck,
 ) {
     tracing::debug!(
@@ -459,6 +461,15 @@ fn on_ack(
         truncated = ack.rejected_truncated,
         "subscription acknowledged"
     );
+    if !subs.on_ack_epoch(epoch, ack.clone()) {
+        tracing::warn!("ignoring an unmatched subscription acknowledgement");
+        return;
+    }
+    let _ = events.send(Event::SubscriptionAck {
+        rx: ack.rx.clone(),
+        tx: ack.tx.clone(),
+        xc: subs.effective_xc(),
+    });
     // 交叉耦合被拒是**另一张单子**：耦合对不在 rx/tx 里，差集公式管不到它。
     for pair in &ack.rejected_xc {
         let _ = events.send(Event::XcDenied {
@@ -467,7 +478,6 @@ fn on_ack(
             reason: "not granted".into(),
         });
     }
-    subs.on_ack(ack);
 
     // **按差集分派，不要把 `rejected` 里的每一项都当成 TxDenied。** 一个频率同时
     // 出现在 `ack.rx` 和 `rejected` 里是正常的（TX 被限额拒了、RX 给了），
@@ -484,10 +494,26 @@ fn on_ack(
     }
 }
 
-fn on_notice(events: &tokio::sync::broadcast::Sender<Event>, n: control::Notice) {
+fn on_notice(
+    subs: &mut SubscriptionState,
+    events: &tokio::sync::broadcast::Sender<Event>,
+    n: control::Notice,
+) {
     use can_voice_proto::control::notice_kind;
     if n.kind == notice_kind::TX_DENIED {
         let _ = events.send(Event::TxDenied {
+            freq_khz: n.freq,
+            reason: n.reason,
+        });
+    } else if n.kind == notice_kind::AUTHORITY_LOST {
+        subs.revoke_tx();
+        let _ = events.send(Event::SubscriptionAck {
+            rx: subs.acknowledged().rx.clone(),
+            tx: Vec::new(),
+            xc: Vec::new(),
+        });
+        let _ = events.send(Event::Notice {
+            kind: n.kind,
             freq_khz: n.freq,
             reason: n.reason,
         });

@@ -33,10 +33,11 @@ func testServer(t *testing.T) (addr string, priv ed25519.PrivateKey, r *router.R
 	// （后者少了 TLS 和 Addr），碰巧能跑——因为 accept 用不到那两项——
 	// 但下一个人加一个 accept 真的要读的字段时就会踩空。
 	cfg := Config{
-		Addr:      "127.0.0.1:0",
-		TLS:       &tls.Config{Certificates: []tls.Certificate{cert}},
-		PublicKey: pub,
-		MaxRX:     32,
+		Addr:                   "127.0.0.1:0",
+		TLS:                    &tls.Config{Certificates: []tls.Certificate{cert}},
+		PublicKey:              pub,
+		MaxRX:                  32,
+		unsafeLegacyTXForTests: true,
 	}
 	ln, err := listen(cfg)
 	if err != nil {
@@ -856,7 +857,7 @@ func TestMaxTXIsEnforcedOverTheWire(t *testing.T) {
 // 丢了的话，观察员的 Follow 是空串，扇出就拿不到它该用的那架飞机的位置——
 // 射程于是按"位置未知"算，而那条路径是放行。症状是观察员听得见本不该听见的
 // 远处电台，没有任何错误。
-func TestTheFollowFieldFromHelloReachesTheSession(t *testing.T) {
+func TestTheFollowFieldFromHelloIsRefused(t *testing.T) {
 	addr, priv, r := testServer(t)
 	tok, err := auth.Sign(priv, auth.Claims{
 		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
@@ -884,16 +885,8 @@ func TestTheFollowFieldFromHelloReachesTheSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	ready, ok := m.(*control.Ready)
-	if !ok {
-		t.Fatalf("got %T, want *control.Ready", m)
-	}
-	sess, ok := r.Get(router.SessionID(ready.Session))
-	if !ok {
-		t.Fatal("the session was not registered")
-	}
-	if sess.Follow != "CCA101" {
-		t.Fatalf("Session.Follow = %q, want %q from the HELLO", sess.Follow, "CCA101")
+	if _, ok := m.(*control.Bye); !ok || r.SessionCount() != 0 {
+		t.Fatalf("follow HELLO got %T and %d sessions, want refusal", m, r.SessionCount())
 	}
 }
 
@@ -1284,7 +1277,7 @@ func TestTransmittingWhileRangeFilteringIsDegradedSaysSo(t *testing.T) {
 func TestTheStationFieldFromHelloReachesTheSession(t *testing.T) {
 	addr, priv, r := testServer(t)
 	tok, err := auth.Sign(priv, auth.Claims{
-		CID: "1000", Rating: 5, MaxTX: 8, Exp: time.Now().Add(time.Minute).Unix(),
+		CID: "1000", Rating: 5, MaxTX: 1, Role: "atis", Station: "ZSPD_ATIS", TX: []int{118500}, Exp: time.Now().Add(time.Minute).Unix(),
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)

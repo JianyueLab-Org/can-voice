@@ -19,7 +19,7 @@ use can_voice_client::stack::{Radio, RadioStack};
 use can_voice_client::Config;
 use can_voice_datafeed::Position;
 use can_voice_i18n::Message;
-use can_voice_token::TokenSource;
+use can_voice_token::{TokenScope, TokenSource};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -326,7 +326,15 @@ fn spawn_feed(app: &App, cid: String) {
             let removed = locked(&removed).clone();
             let view = bridge.with_stack(|s| apply_feed(s, &cid, feed.as_ref(), &removed));
             match view {
-                Some(v) => *locked(&slot) = v,
+                Some(v) => {
+                    let scope = v.duty.freq_khz.map(|frequency| {
+                        can_voice_token::TokenScope::controller(&v.duty.callsign, frequency)
+                    });
+                    *locked(&slot) = v;
+                    if let Err(e) = bridge.rescope(scope).await {
+                        tracing::warn!(error = %e, "could not refresh controller assignment");
+                    }
+                }
                 // 取不到就只把"查不到"这件事说出来，别的一律不动。
                 None => locked(&slot).reachable = false,
             }
@@ -358,14 +366,25 @@ async fn connect(
     password: String,
 ) -> Result<(), Message> {
     let remembered = cid.clone();
-    let tokens = TokenSource::new(
+    let saved = state.settings();
+    let feed_url = can_voice_settings::endpoints::endpoint(
+        "CAN_FSD_DATAFEED",
+        &saved.endpoints.datafeed_url,
+        can_voice_datafeed::DEFAULT_URL,
+    );
+    let assignment = can_voice_datafeed::fetch(&state.http, &feed_url)
+        .await
+        .and_then(|feed| can_voice_datafeed::controller_for(&cid, &feed));
+    let mut tokens = TokenSource::new(
         &state.settings().endpoints.api_origin(),
         cid,
         password,
         state.http.clone(),
     );
+    if let Some(position) = assignment {
+        tokens = tokens.with_scope(TokenScope::controller(position.callsign, position.freq_khz));
+    }
     let (server, server_name) = state.settings().endpoints.voice();
-    let saved = state.settings();
 
     state
         .bridge

@@ -1,6 +1,9 @@
 package router
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // SessionID 是一个连接的标识，也是数据面包头里的 speaker 字段。
 // 从 1 开始，所以 0 永远不是一个有效会话——包头里的 0 可以当哨兵用。
@@ -40,11 +43,15 @@ func emptySubs() *subs {
 type Session struct {
 	ID  SessionID
 	CID string
-	// Follow 只有观察员模式填：观察员没有 FSD 连接，
-	// 位置取自它跟随的那架飞机（spec 7.3）。
+	// Follow is only retained for router compatibility tests. Production
+	// handshakes reject nonempty follow values; observers use their own CID.
 	Follow string
 	// Station 是同一个账号下的第几个席位，空串表示"就一个"。见 evictionKey。
-	Station string
+	Station      string
+	Role         string
+	Callsign     string
+	TXGrant      map[uint32]struct{}
+	GrantExpires time.Time
 	// MaxTX 来自 token：客户端最多能在几个频率上发送。
 	MaxTX int
 	// MaxRX 来自服务端配置：客户端最多能订阅几个纯 RX 频率。
@@ -74,7 +81,8 @@ type Session struct {
 	send func([]byte)
 
 	// notifyTalker 见 SessionOpts.NotifyTalker。
-	notifyTalker func(speaker SessionID, cid string, freq uint32)
+	notifyTalker        func(speaker SessionID, cid string, freq uint32)
+	notifyAuthorityLost atomic.Pointer[authorityLostCallback]
 
 	// closeConn 断开这条会话的底层连接。同一个 CID 再次登录时用它顶掉旧会话。
 	// 和 send 一样由传输层注入，router 因此仍然不认识 QUIC。
@@ -84,6 +92,18 @@ type Session struct {
 	closeConn func()
 
 	subs atomic.Pointer[subs]
+}
+
+type authorityLostCallback struct{ fn func() }
+
+func (s *Session) SetNotifyAuthorityLost(fn func()) {
+	s.notifyAuthorityLost.Store(&authorityLostCallback{fn: fn})
+}
+
+func (s *Session) authorityLost() {
+	if cb := s.notifyAuthorityLost.Load(); cb != nil {
+		cb.fn()
+	}
 }
 
 // Send 把一个已编好的数据面包发出去。

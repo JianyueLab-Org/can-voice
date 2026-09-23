@@ -3,8 +3,8 @@
 //	ca.der              一张一次性的根证书（DER），Rust 侧当**额外的根证书**用
 //	cert.pem / key.pem  由它签出的服务端叶证书（CN=localhost，含 127.0.0.1 的 SAN）
 //	api.pub             Ed25519 公钥，裸 32 字节的 base64（服务端要的正是这个形状）
-//	token.txt           一张有效的 token（CID 1000）
-//	token-b.txt         第二个账号的 token（CID 1001）——服务端会把同一个 CID 的
+//	token.txt           一张有效的单频飞行员 token（CID 1000，TX 121.800）
+//	token-b.txt         第二个账号的单频 token（CID 1001）——服务端会把同一个 CID 的
 //	                    旧会话顶掉，所以 两个客户端互相说话 的测试需要两个账号
 //	token-expired.txt   一张已经过期的 token，用来验"拒绝要说得出原因"
 //
@@ -31,16 +31,16 @@ import (
 	"github.com/JianyueLab-Org/can-voice/server/internal/auth"
 )
 
-const outDir = "target/e2e"
+const outDir = ".temp/e2e"
 
 func main() {
 	must(os.MkdirAll(outDir, 0o755))
-	writeCert()
-	writeTokens()
+	writeCert(outDir)
+	writeTokens(outDir)
 	fmt.Printf("wrote fixtures into %s\n", outDir)
 }
 
-func writeCert() {
+func writeCert(dir string) {
 	// **必须是两级：一张根 + 一张由它签出的叶证书。**
 	// 自签一张既 IsCA 又拿去当服务端证书用的话，webpki 会以
 	// CaUsedAsEndEntity 拒掉——而症状是一条看不出所以然的
@@ -60,7 +60,7 @@ func writeCert() {
 	must(err)
 	caCert, err := x509.ParseCertificate(caDER)
 	must(err)
-	must(os.WriteFile(path("ca.der"), caDER, 0o644))
+	must(os.WriteFile(path(dir, "ca.der"), caDER, 0o644))
 
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	must(err)
@@ -83,11 +83,11 @@ func writeCert() {
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER})...,
 	)
-	must(os.WriteFile(path("cert.pem"), chain, 0o644))
+	must(os.WriteFile(path(dir, "cert.pem"), chain, 0o644))
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(leafKey)
 	must(err)
-	must(os.WriteFile(path("key.pem"),
+	must(os.WriteFile(path(dir, "key.pem"),
 		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600))
 }
 
@@ -97,7 +97,7 @@ func serial() *big.Int {
 	return n
 }
 
-func writeTokens() {
+func writeTokens(dir string) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	must(err)
 
@@ -106,33 +106,33 @@ func writeTokens() {
 	// 所以 exp 有上界。踩中的话，e2e 会以一条 token_invalid 失败，
 	// 而那看起来像密钥不配对。
 	good, err := auth.Sign(priv, auth.Claims{
-		CID: "1000", Rating: 5, MaxTX: 8,
+		CID: "1000", Rating: 5, MaxTX: 1, Role: "pilot", TX: []int{121800},
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
 	must(err)
 
 	expired, err := auth.Sign(priv, auth.Claims{
-		CID: "1000", Rating: 5, MaxTX: 8,
+		CID: "1000", Rating: 5, MaxTX: 1, Role: "pilot", TX: []int{121800},
 		Exp: time.Now().Add(-1 * time.Minute).Unix(),
 	})
 	must(err)
 
-	must(os.WriteFile(path("api.pub"),
+	must(os.WriteFile(path(dir, "api.pub"),
 		[]byte(base64.StdEncoding.EncodeToString(pub)), 0o644))
 	// 第二个账号：服务端对同一个 CID 会顶号（关闭码 2），所以"两个客户端互相说话"
 	// 这种测试必须用两个不同的 CID，否则后连上的那个会把先连上的踢掉。
 	second, err := auth.Sign(priv, auth.Claims{
-		CID: "1001", Rating: 5, MaxTX: 8,
+		CID: "1001", Rating: 5, MaxTX: 1, Role: "pilot", TX: []int{121800},
 		Exp: time.Now().Add(5 * time.Minute).Unix(),
 	})
 	must(err)
 
-	must(os.WriteFile(path("token.txt"), []byte(good), 0o644))
-	must(os.WriteFile(path("token-b.txt"), []byte(second), 0o644))
-	must(os.WriteFile(path("token-expired.txt"), []byte(expired), 0o644))
+	must(os.WriteFile(path(dir, "token.txt"), []byte(good), 0o644))
+	must(os.WriteFile(path(dir, "token-b.txt"), []byte(second), 0o644))
+	must(os.WriteFile(path(dir, "token-expired.txt"), []byte(expired), 0o644))
 }
 
-func path(name string) string { return filepath.Join(outDir, name) }
+func path(dir, name string) string { return filepath.Join(dir, name) }
 
 func must(err error) {
 	if err != nil {

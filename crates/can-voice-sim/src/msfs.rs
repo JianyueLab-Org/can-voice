@@ -405,6 +405,59 @@ pub use ffi::SimConnectSource;
 #[cfg(not(windows))]
 pub type SimConnectSource = Unavailable;
 
+#[cfg(any(windows, test))]
+fn dispatch_has_bytes(size: usize, required: usize) -> bool {
+    size >= required
+}
+
+#[cfg(any(windows, test))]
+fn dispatch_has_array(size: usize, header: usize, count: usize, element: usize) -> bool {
+    count
+        .checked_mul(element)
+        .and_then(|bytes| header.checked_add(bytes))
+        .is_some_and(|required| dispatch_has_bytes(size, required))
+}
+
+#[cfg(any(windows, test))]
+fn decode_f64_payload(bytes: &[u8], header: usize, count: usize) -> Option<Vec<f64>> {
+    if !dispatch_has_array(bytes.len(), header, count, std::mem::size_of::<f64>()) {
+        return None;
+    }
+    let end = header.checked_add(count.checked_mul(std::mem::size_of::<f64>())?)?;
+    bytes
+        .get(header..end)?
+        .chunks_exact(8)
+        .map(|chunk| Some(f64::from_ne_bytes(chunk.try_into().ok()?)))
+        .collect()
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_requires_the_full_fixed_header() {
+        assert!(dispatch_has_bytes(24, 24));
+        assert!(!dispatch_has_bytes(23, 24));
+    }
+
+    #[test]
+    fn dispatch_rejects_truncated_and_overflowing_variable_payloads() {
+        assert!(dispatch_has_array(64, 32, 4, 8));
+        assert!(!dispatch_has_array(63, 32, 4, 8));
+        assert!(!dispatch_has_array(usize::MAX, 32, usize::MAX, 8));
+    }
+
+    #[test]
+    fn complete_simvar_payload_decodes_only_validated_values() {
+        let mut packet = vec![0; 4];
+        packet.extend_from_slice(&1.5f64.to_ne_bytes());
+        packet.extend_from_slice(&(-2.0f64).to_ne_bytes());
+        assert_eq!(decode_f64_payload(&packet, 4, 2), Some(vec![1.5, -2.0]));
+        assert_eq!(decode_f64_payload(&packet[..packet.len() - 1], 4, 2), None);
+    }
+}
+
 #[cfg(windows)]
 mod ffi {
     //! SimConnect 的 C API 绑定。
@@ -429,10 +482,22 @@ mod ffi {
     //! [`super::all_simvars`] 一一对应。改那张表的顺序而不改这里，读出来的
     //! 每一个值都会串位——而每一个值单独看都是合法的数字。
 
-    use super::{all_simvars, SimVarSource, TrafficSink};
+    use super::{all_simvars, dispatch_has_array, dispatch_has_bytes, SimVarSource, TrafficSink};
     use std::collections::HashMap;
     use std::ffi::c_void;
     use std::os::raw::{c_char, c_double, c_int, c_ulong};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static SHORT_HEADER_LOGGED: AtomicBool = AtomicBool::new(false);
+    static SHORT_SIMVARS_LOGGED: AtomicBool = AtomicBool::new(false);
+    static SHORT_ASSIGNED_LOGGED: AtomicBool = AtomicBool::new(false);
+    static SHORT_EXCEPTION_LOGGED: AtomicBool = AtomicBool::new(false);
+
+    fn warn_short(flag: &AtomicBool, packet: &'static str) {
+        if !flag.swap(true, Ordering::Relaxed) {
+            tracing::warn!(packet, "truncated SimConnect dispatch ignored");
+        }
+    }
 
     type Handle = *mut c_void;
     const DEF_ID: c_ulong = 1;
@@ -787,8 +852,17 @@ mod ffi {
                     // 队列空了就是空了，不是错误。
                     return Ok(out);
                 }
+                if !dispatch_has_bytes(size as usize, std::mem::size_of::<Recv>()) {
+                    warn_short(&SHORT_HEADER_LOGGED, "header");
+                    continue;
+                }
                 unsafe {
                     if (*data).id != RECV_ID_SIMOBJECT_DATA {
+                        continue;
+                    }
+                    if !dispatch_has_bytes(size as usize, std::mem::size_of::<RecvSimObjectData>())
+                    {
+                        warn_short(&SHORT_SIMVARS_LOGGED, "simvar header");
                         continue;
                     }
                     let payload = data as *const RecvSimObjectData;
@@ -798,11 +872,26 @@ mod ffi {
                     if count != names.len() {
                         continue;
                     }
-                    let values = (payload as *const u8)
-                        .add(std::mem::size_of::<RecvSimObjectData>())
-                        as *const c_double;
-                    for (i, name) in names.iter().enumerate() {
-                        out.insert(*name, *values.add(i));
+                    if !dispatch_has_array(
+                        size as usize,
+                        std::mem::size_of::<RecvSimObjectData>(),
+                        count,
+                        std::mem::size_of::<c_double>(),
+                    ) {
+                        warn_short(&SHORT_SIMVARS_LOGGED, "simvar values");
+                        continue;
+                    }
+                    let required = std::mem::size_of::<RecvSimObjectData>()
+                        + count * std::mem::size_of::<c_double>();
+                    let bytes = std::slice::from_raw_parts(data as *const u8, required);
+                    if let Some(values) = super::decode_f64_payload(
+                        bytes,
+                        std::mem::size_of::<RecvSimObjectData>(),
+                        count,
+                    ) {
+                        for (name, value) in names.iter().zip(values) {
+                            out.insert(*name, value);
+                        }
                     }
                 }
             }
@@ -1068,15 +1157,33 @@ mod ffi {
                 if !ok(result) || data.is_null() {
                     break; // 队列空了
                 }
+                if !dispatch_has_bytes(size as usize, std::mem::size_of::<Recv>()) {
+                    warn_short(&SHORT_HEADER_LOGGED, "header");
+                    continue;
+                }
                 unsafe {
                     match (*data).id {
                         RECV_ID_ASSIGNED_OBJECT_ID => {
+                            if !dispatch_has_bytes(
+                                size as usize,
+                                std::mem::size_of::<RecvAssignedObjectId>(),
+                            ) {
+                                warn_short(&SHORT_ASSIGNED_LOGGED, "assigned object");
+                                continue;
+                            }
                             let payload = data as *const RecvAssignedObjectId;
                             if let Some(o) = self.by_request.remove(&(*payload).request_id) {
                                 out.push((o.callsign, Some((*payload).object_id as u32)));
                             }
                         }
                         RECV_ID_EXCEPTION => {
+                            if !dispatch_has_bytes(
+                                size as usize,
+                                std::mem::size_of::<RecvException>(),
+                            ) {
+                                warn_short(&SHORT_EXCEPTION_LOGGED, "exception");
+                                continue;
+                            }
                             let payload = data as *const RecvException;
                             // EXCEPTION 带的是 send id，要经 by_send 转一道。
                             if let Some(request_id) = self.by_send.remove(&(*payload).send_id) {

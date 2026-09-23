@@ -155,9 +155,6 @@ impl JitterBuffer {
     /// 收下一帧。
     pub fn push(&mut self, seq: u16, payload: Vec<u8>, last: bool) {
         let ext = self.extend(seq);
-        if last {
-            self.last = Some(ext);
-        }
         // 已经播过的序号是迟到帧，丢弃 —— 收下它会把播放指针拉回去，
         // 听感上是一小段音频重复。比较必须走展开后的序号，直接比 u16 会在
         // 回绕点把"更早"判成"更晚"。
@@ -165,6 +162,9 @@ impl JitterBuffer {
             if ext < next {
                 return;
             }
+        }
+        if last {
+            self.last = Some(ext);
         }
         let is_highest = match self.high {
             None => true,
@@ -367,6 +367,17 @@ mod tests {
             Some(Frame::Audio(b)) => assert_ne!(b[0], 99, "a late frame must not rewind playback"),
             other => panic!("pop returned {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_stale_tail_does_not_end_the_current_talkspurt() {
+        let mut j = JitterBuffer::new();
+        push_n(&mut j, &[100, 101, 102]);
+        assert!(matches!(j.pop(), Some(Frame::Audio(_))));
+        assert!(matches!(j.pop(), Some(Frame::Audio(_))));
+        j.push(99, vec![99], true);
+        assert!(matches!(j.pop(), Some(Frame::Audio(_))));
+        assert_eq!(j.pop(), Some(Frame::Lost));
     }
 
     #[test]
