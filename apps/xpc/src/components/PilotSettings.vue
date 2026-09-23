@@ -5,12 +5,31 @@ import LogPanel from "./LogPanel.vue";
 import InstallWizard from "./InstallWizard.vue";
 import { t } from "../i18n";
 
+/**
+ * 设置对话框里 xpc 自己那几段：音频 / 网络 / 他机三页（spec §6）。
+ *
+ * **它整个挂在 `SettingsDialog` 的 `v-if="open"` 里面**，每次打开都是新挂一次，
+ * 关掉就销毁。所以 `onMounted` 就是「打开的时候读一遍」，`onUnmounted` 就是
+ * 「关掉的时候停掉」——不要改成 watch，外层 `v-if` 已经决定了生命周期，再套一层
+ * 只会多一条走不到的路（`SettingsCommon` 那条 `{ immediate: true }` 是因为它读的
+ * 是自己的属性，不是自己的挂载）。管制端的 `SettingsPanel.vue` 是同一个形状。
+ *
+ * 「网络」那一页只有寄日志：服务器地址那几格在 `SettingsCommon` 里，就在这个枢轴
+ * 的正上方；真实姓名和连不连在主界面的连接卡片上。
+ *
+ * **msfs 也有一个同名文件，但两份故意不一样，所以两份都不进 `SHARED_FRONTEND`。**
+ * msfs 那一份是机库不是 CSL（四种状态、不印路径）、没有显示距离（它的 Rust 侧根本
+ * 没有 `set_traffic_range`）、没有安装向导。**不要把这两份合成一份**——合起来就要给
+ * 一半的字段写「这个端没有」的分支，而那正是共用件要避开的东西。
+ */
+
 /// `cid` 是已经存下来的 CAN 号，寄日志时预填，省得再打一遍；
-/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来；
-/// `observer` 是观察员模式开着没有——观察员不上 FSD，拍发不了计划。
-const props = defineProps<{ cid?: string; csl?: CslView; observer?: boolean }>();
-import type { CslView, FlightPlan, Settings } from "../types";
-import { emptyFlightPlan } from "../types";
+/// `csl` 是扫模型那一侧的现状，由 App.vue 那份轮询回来的快照带进来。
+const props = defineProps<{ cid?: string; csl?: CslView }>();
+import type { CslView, Settings } from "../types";
+
+/** 枢轴停在哪一页。默认音频，和 can-audio 的 `setCurrentItem("audio")` 一样。 */
+const page = ref<"audio" | "network" | "traffic">("audio");
 
 interface BindingView {
   token: string;
@@ -18,13 +37,6 @@ interface BindingView {
   binding: unknown;
 }
 
-const tab = ref<"plan" | "settings">("plan");
-const plan = ref<FlightPlan>(emptyFlightPlan());
-/**
- * 上一次拍发的结果，`null` = 还没拍发过。**存的是哪一种结果不是那句话**：
- * 存成句子的话，切了语言那一行还停在旧语言上。
- */
-const filed = ref<"filed" | "offline" | null>(null);
 interface DeviceInfo {
   id: string;
   name: string;
@@ -70,7 +82,6 @@ onMounted(async () => {
   speaker.value = s.speaker_volume ?? 100;
   range.value = s.traffic_range_nm;
   cslDir.value = s.csl_dir;
-  plan.value.aircraft = s.aircraft;
   bindings.value = await invoke<BindingView[]>("ptt_bindings");
   await dropGoneDevices();
   deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
@@ -78,13 +89,11 @@ onMounted(async () => {
 onUnmounted(() => {
   window.clearInterval(captureTimer);
   window.clearInterval(deviceTimer);
+  // 关掉对话框就销毁这个组件，所以「录到一半」是关得掉的——而清掉那个 150 ms
+  // 轮询并不会让 Rust 侧退出录制。不取消的话，对话框关着的时候按下的键会留在
+  // 那里，下次一点「录制」立刻抓到它。
+  if (capturing.value) void invoke("cancel_ptt_capture");
 });
-
-async function file() {
-  filed.value = (await invoke<boolean>("file_flight_plan", { plan: plan.value }))
-    ? "filed"
-    : "offline";
-}
 
 const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
@@ -204,75 +213,22 @@ async function remove(i: number) {
 </script>
 
 <template>
-  <section class="flex flex-col gap-3 rounded border p-3 text-xs">
+  <section class="flex flex-col gap-3 text-xs">
+    <!-- 枢轴就是 `PilotPanel` 那个页签的写法：一个 ref、几个按钮、v-if/v-else。
+         三页值不上一个分页组件。 -->
     <div class="flex gap-2">
-      <button class="rounded border px-2 py-1" :class="tab === 'plan' ? 'border-sky-500' : ''" @click="tab = 'plan'">
-        {{ t("plan.tab") }}
+      <button class="rounded border px-2 py-1" :class="page === 'audio' ? 'border-sky-500' : ''" @click="page = 'audio'">
+        {{ t("local.audio") }}
       </button>
-      <button class="rounded border px-2 py-1" :class="tab === 'settings' ? 'border-sky-500' : ''" @click="tab = 'settings'">
-        {{ t("local.tab") }}
+      <button class="rounded border px-2 py-1" :class="page === 'network' ? 'border-sky-500' : ''" @click="page = 'network'">
+        {{ t("local.network") }}
+      </button>
+      <button class="rounded border px-2 py-1" :class="page === 'traffic' ? 'border-sky-500' : ''" @click="page = 'traffic'">
+        {{ t("local.traffic") }}
       </button>
     </div>
 
-    <div v-if="tab === 'plan'" class="grid grid-cols-4 gap-2">
-      <label class="flex flex-col gap-1">
-        <span class="opacity-60">{{ t("plan.rules") }}</span>
-        <select v-model="plan.rules" class="rounded border px-2 py-1">
-          <option value="I">{{ t("plan.rules_i") }}</option>
-          <option value="V">{{ t("plan.rules_v") }}</option>
-          <option value="Y">{{ t("plan.rules_y") }}</option>
-          <option value="Z">{{ t("plan.rules_z") }}</option>
-        </select>
-      </label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.aircraft") }}</span>
-        <input v-model="plan.aircraft" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_speed") }}</span>
-        <input v-model="plan.cruise_speed" placeholder="N0450" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.cruise_altitude") }}</span>
-        <input v-model="plan.cruise_altitude" placeholder="F350" class="rounded border px-2 py-1" /></label>
-
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure") }}</span>
-        <input v-model="plan.departure" placeholder="ZSPD" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.arrival") }}</span>
-        <input v-model="plan.arrival" placeholder="ZBAA" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.alternate") }}</span>
-        <input v-model="plan.alternate" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.departure_time") }}</span>
-        <input v-model="plan.departure_time" placeholder="1230" class="rounded border px-2 py-1" /></label>
-
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_hours") }}</span>
-        <input v-model="plan.enroute_hours" placeholder="02" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.enroute_minutes") }}</span>
-        <input v-model="plan.enroute_minutes" placeholder="15" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_hours") }}</span>
-        <input v-model="plan.fuel_hours" placeholder="04" class="rounded border px-2 py-1" /></label>
-      <label class="flex flex-col gap-1"><span class="opacity-60">{{ t("plan.fuel_minutes") }}</span>
-        <input v-model="plan.fuel_minutes" placeholder="00" class="rounded border px-2 py-1" /></label>
-
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.route") }}</span>
-        <input v-model="plan.route" class="rounded border px-2 py-1 font-mono uppercase" /></label>
-      <label class="col-span-4 flex flex-col gap-1"><span class="opacity-60">{{ t("plan.remarks") }}</span>
-        <input v-model="plan.remarks" class="rounded border px-2 py-1" /></label>
-
-      <div class="col-span-4 flex items-center gap-2">
-        <!-- 观察员没有 FSD 连接，计划由机长那一端拍发。 -->
-        <button class="rounded border px-3 py-1" :disabled="props.observer" @click="file">
-          {{ t("plan.file") }}
-        </button>
-        <span v-if="props.observer" class="opacity-70">{{ t("plan.observer") }}</span>
-        <span v-else-if="filed" class="opacity-70">
-          {{ filed === "filed" ? t("plan.filed") : t("plan.offline") }}
-        </span>
-      </div>
-    </div>
-
-    <div v-else class="flex flex-col gap-3">
-      <label class="flex items-center gap-2">
-        <input v-model="inject" type="checkbox" @change="applyInject" />
-        <span>{{ t("local.inject") }}</span>
-        <span class="opacity-60">{{ t("local.inject_note") }}</span>
-      </label>
-
+    <div v-if="page === 'audio'" class="flex flex-col gap-3">
       <label class="flex items-center gap-2">
         <span class="w-16 opacity-70">{{ t("local.microphone") }}</span>
         <select v-model="input" class="flex-1 rounded border px-2 py-1" @change="applyDevices">
@@ -306,6 +262,37 @@ async function remove(i: number) {
         <span class="w-16 shrink-0 opacity-70">{{ t("local.speaker_volume") }}</span>
         <input type="range" min="0" max="200" step="1" v-model.number="speaker" class="flex-1" @change="applyVolume" />
         <span class="w-10 text-right font-mono">{{ speaker }}%</span>
+      </label>
+
+      <div class="flex flex-col gap-2">
+        <span class="font-semibold">{{ t("ptt.title") }}</span>
+        <ul v-if="bindings.length" class="flex flex-col gap-1">
+          <li v-for="(b, i) in bindings" :key="i" class="flex items-center gap-2 rounded border px-2 py-1">
+            <span class="font-mono">{{ b.token || "…" }}</span>
+            <span v-if="b.unresolved" class="text-red-600">{{ t("ptt.unresolved") }}</span>
+            <button class="ml-auto rounded border px-2" @click="remove(i)">{{ t("ptt.remove") }}</button>
+          </li>
+        </ul>
+        <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
+        <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
+          {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
+        </button>
+        <p v-if="!keyboardOk" class="text-red-600">
+          {{ t("ptt.wayland") }}
+        </p>
+        <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
+      </div>
+    </div>
+
+    <div v-else-if="page === 'network'" class="flex flex-col gap-3">
+      <LogPanel :cid="props.cid" />
+    </div>
+
+    <div v-else class="flex flex-col gap-3">
+      <label class="flex items-center gap-2">
+        <input v-model="inject" type="checkbox" @change="applyInject" />
+        <span>{{ t("local.inject") }}</span>
+        <span class="opacity-60">{{ t("local.inject_note") }}</span>
       </label>
 
       <label class="flex items-center gap-2">
@@ -372,28 +359,7 @@ async function remove(i: number) {
         </span>
       </p>
 
-      <div class="flex flex-col gap-2">
-        <span class="font-semibold">{{ t("ptt.title") }}</span>
-        <ul v-if="bindings.length" class="flex flex-col gap-1">
-          <li v-for="(b, i) in bindings" :key="i" class="flex items-center gap-2 rounded border px-2 py-1">
-            <span class="font-mono">{{ b.token || "…" }}</span>
-            <span v-if="b.unresolved" class="text-red-600">{{ t("ptt.unresolved") }}</span>
-            <button class="ml-auto rounded border px-2" @click="remove(i)">{{ t("ptt.remove") }}</button>
-          </li>
-        </ul>
-        <p v-else class="opacity-60">{{ t("ptt.none") }}</p>
-        <button class="self-start rounded border px-3 py-1" :disabled="capturing" @click="capture">
-          {{ capturing ? t("ptt.capturing") : t("ptt.record") }}
-        </button>
-        <p v-if="!keyboardOk" class="text-red-600">
-          {{ t("ptt.wayland") }}
-        </p>
-        <p v-if="!mouseOk" class="opacity-70">{{ t("ptt.no_mouse") }}</p>
-      </div>
-
       <InstallWizard />
-
-      <LogPanel :cid="props.cid" />
     </div>
   </section>
 </template>

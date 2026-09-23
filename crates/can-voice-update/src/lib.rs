@@ -189,6 +189,23 @@ pub fn open_in_browser(url: &str) -> Result<(), Message> {
         .map_err(|e| Message::new("error.update.open_failed").with("detail", e))
 }
 
+/// 用系统默认的文件管理器打开一个目录。
+///
+/// **不收字符串，只收 `&Path`。** `open_in_browser` 只放行 https，注释写明的
+/// 理由是这一步在把外部数据交给操作系统；一个能从前端传任意路径进来的命令会把
+/// 那条理由作废。调用方自己算路径，这个签名让"从网页那一侧传一个路径进来"
+/// 写不出来。
+pub fn open_folder(path: &std::path::Path) -> Result<(), Message> {
+    let (program, args) =
+        opener(std::env::consts::OS).ok_or_else(|| Message::new("error.update.no_opener"))?;
+    std::process::Command::new(program)
+        .args(args)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| Message::new("error.update.open_failed").with("detail", e))
+}
+
 /// 自带 HTTP 客户端的版本，给手上没有现成 client 的调用方用。
 ///
 /// 通播制作客户端就是这一种：它本来不需要 reqwest，而"为查一次更新拉一个

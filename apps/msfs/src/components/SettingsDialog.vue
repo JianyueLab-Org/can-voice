@@ -22,19 +22,28 @@ watch(
     box.value?.focus();
   },
 );
+
+// 三条关闭路径（遮罩点击、「关闭」钮、Esc）都先手动 blur 当前焦点元素再 emit
+// `close`，编辑才保证落盘。遮罩点击和「关闭」钮原先指望浏览器点击时自己把输入框
+// 失焦、补一次原生 `change`——这只是假设，没有验证过。`Esc` 会直接销毁子树，
+// 浏览器不会为一个已经不在 DOM 里的输入框补发 `change`，所以三条路径统一走这里。
+function close() {
+  (document.activeElement as HTMLElement | null)?.blur();
+  emit("close");
+}
 </script>
 
 <template>
   <div
     v-if="open"
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-3"
-    @click.self="emit('close')"
+    @click.self="close"
   >
     <div
       ref="box"
       tabindex="-1"
       class="flex max-h-full w-[30rem] flex-col gap-4 overflow-auto rounded border bg-white p-4 text-sm outline-none"
-      @keyup.escape="emit('close')"
+      @keyup.escape="close"
     >
       <h2 class="font-semibold">{{ t("settings.title") }}</h2>
 
@@ -42,7 +51,7 @@ watch(
       <slot />
 
       <div class="flex justify-end">
-        <button class="rounded border px-3 py-1 text-xs" @click="emit('close')">
+        <button class="rounded border px-3 py-1 text-xs" @click="close">
           {{ t("common.close") }}
         </button>
       </div>

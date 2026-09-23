@@ -5,15 +5,41 @@
     "offline": "Not connected yet",
     "not_xplane": "This directory does not look like an X-Plane installation (it has no Resources/plugins)",
     "plugin_dir": "Could not create {path}: {detail}",
-    "plugin_write": "Could not write {path}: {detail}"
+    "plugin_write": "Could not write {path}: {detail}",
+    "menu": "Could not build the menu: {detail}"
   },
   "app": {
     "title": "X-Plane Pilot Client"
   },
+  "menu": {
+    "file": "File",
+    "flight_plan": "Flight plan…",
+    "settings": "Settings…",
+    "quit": "Quit",
+    "help": "Help",
+    "open_log": "Open the log folder",
+    "update": "Check for updates",
+    "about": "About"
+  },
+  "connect": { "title": "Connection" },
+  "messages": { "title": "Messages" },
+  "controllers": { "hint": "Click a position to put it in the recipient box." },
+  "radio": {
+    "title": "Radio",
+    "com1": "COM1  {frequency}",
+    "com1_none": "COM1  ---.---",
+    "traffic": "Traffic {count}"
+  },
+  "about": {
+    "title": "About",
+    "body": "{name} {version}\n\nThe X-Plane pilot client for the Cerulean Aviation Network.\nVoice over Mumble, network over FSD, flight data over X-Plane's UDP link.\n\nLog: {log}",
+    "no_log": "(not written to a file)"
+  },
   "status": {
     "plugin": "Plugin",
     "observing": "Observer (not on the network)",
-    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system"
+    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system",
+    "ready": "Ready"
   },
   "fsd": {
     "connecting": "FSD connecting…",
@@ -54,7 +80,6 @@
     "disconnect": "Disconnect"
   },
   "observer": {
-    "frequency": "Voice frequency",
     "frequency_placeholder": "Leave blank to follow COM1",
     "frequency_tip": "Observer mode only: type a frequency and voice stays on it. Clear it to follow the cockpit COM1 again.",
     "manual": "manual",
@@ -71,7 +96,6 @@
   "lists": {
     "traffic": "Nearby traffic ({count})",
     "controllers": "Online ATC ({count})",
-    "messages": "Text messages",
     "no_traffic": "No other aircraft nearby",
     "no_controllers": "No ATC online nearby",
     "no_messages": "No text messages yet"
@@ -115,7 +139,9 @@
     "observer": "Observers are not on the network; the captain files the flight plan"
   },
   "local": {
-    "tab": "Local setup",
+    "audio": "Audio",
+    "network": "Network",
+    "traffic": "Traffic",
     "inject": "Inject traffic into the simulator",
     "inject_note": "When off, you have the sky to yourself; voice is unaffected",
     "microphone": "Microphone",
@@ -156,8 +182,8 @@
     "no_mouse": "Mouse side buttons cannot be used for PTT on this system."
   },
   "plugin": {
-    "version_mismatch": "The X-Plane plugin speaks protocol version {version}, which does not match this client. It will drop every frame and no traffic will appear. Reinstall it under “Local setup → X-Plane traffic plugin” below.",
-    "not_heard": "The X-Plane plugin has not been heard from. Voice is unaffected, but no traffic will be drawn. Install it under “Local setup → X-Plane traffic plugin” below, and make sure XPPython3 is installed and X-Plane is running.",
+    "version_mismatch": "The X-Plane plugin speaks protocol version {version}, which does not match this client. It will drop every frame and no traffic will appear. Reinstall it under “Settings → Traffic → X-Plane traffic plugin”.",
+    "not_heard": "The X-Plane plugin has not been heard from. Voice is unaffected, but no traffic will be drawn. Install it under “Settings → Traffic → X-Plane traffic plugin”, and make sure XPPython3 is installed and X-Plane is running.",
     "title": "X-Plane traffic plugin",
     "why": "Without it, voice and connecting work normally, but no other aircraft will appear in the sky.",
     "state": {

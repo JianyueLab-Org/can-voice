@@ -5,15 +5,41 @@
     "offline": "还没上线",
     "not_xplane": "这个目录不像 X-Plane 装的地方（里面没有 Resources/plugins）",
     "plugin_dir": "建不了 {path}：{detail}",
-    "plugin_write": "写不进 {path}：{detail}"
+    "plugin_write": "写不进 {path}：{detail}",
+    "menu": "菜单建不起来：{detail}"
   },
   "app": {
     "title": "X-Plane 飞行客户端"
   },
+  "menu": {
+    "file": "文件",
+    "flight_plan": "飞行计划…",
+    "settings": "设置…",
+    "quit": "退出",
+    "help": "帮助",
+    "open_log": "打开日志目录",
+    "update": "检查更新",
+    "about": "关于"
+  },
+  "connect": { "title": "连接" },
+  "messages": { "title": "消息" },
+  "controllers": { "hint": "点一个席位，把它填进收件人。" },
+  "radio": {
+    "title": "无线电",
+    "com1": "COM1  {frequency}",
+    "com1_none": "COM1  ---.---",
+    "traffic": "他机 {count}"
+  },
+  "about": {
+    "title": "关于",
+    "body": "{name} {version}\n\nCerulean Aviation Network 的 X-Plane 飞行员客户端。\n语音走 Mumble，网络走 FSD，飞行数据从 X-Plane 的 UDP 取。\n\n日志：{log}",
+    "no_log": "（未写入文件）"
+  },
   "status": {
     "plugin": "插件",
     "observing": "观察员（不上网络）",
-    "no_mouse_ptt": "本系统不支持鼠标侧键作 PTT"
+    "no_mouse_ptt": "本系统不支持鼠标侧键作 PTT",
+    "ready": "就绪"
   },
   "fsd": {
     "connecting": "FSD 连接中…",
@@ -54,7 +80,6 @@
     "disconnect": "下线"
   },
   "observer": {
-    "frequency": "语音频率",
     "frequency_placeholder": "留空跟随 COM1",
     "frequency_tip": "观察员模式专用：手输一个频率，语音就待在那里。清空则回到跟随座舱 COM1。",
     "manual": "手输",
@@ -71,7 +96,6 @@
   "lists": {
     "traffic": "附近的飞机（{count}）",
     "controllers": "在线席位（{count}）",
-    "messages": "文字消息",
     "no_traffic": "附近没有其他飞机",
     "no_controllers": "附近没有在线席位",
     "no_messages": "还没有文字消息"
@@ -115,7 +139,9 @@
     "observer": "观察员不上网络，飞行计划由机长拍发"
   },
   "local": {
-    "tab": "本机",
+    "audio": "音频",
+    "network": "网络",
+    "traffic": "他机",
     "inject": "把他机注入模拟器",
     "inject_note": "关掉之后天上就只剩自己，语音不受影响",
     "microphone": "麦克风",
@@ -156,8 +182,8 @@
     "no_mouse": "本系统不支持鼠标侧键作 PTT。"
   },
   "plugin": {
-    "version_mismatch": "X-Plane 插件的协议版本是 {version}，和本客户端对不上。它会丢掉每一帧，天上不会有任何飞机——到下面「本机 → X-Plane 他机插件」点一下重新安装。",
-    "not_heard": "没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——到下面「本机 → X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。",
+    "version_mismatch": "X-Plane 插件的协议版本是 {version}，和本客户端对不上。它会丢掉每一帧，天上不会有任何飞机——打开设置，到「他机」页上的「X-Plane 他机插件」点一下重新安装。",
+    "not_heard": "没有听到 X-Plane 插件。语音不受影响，但天上不会画出任何他机——打开设置，到「他机」页上的「X-Plane 他机插件」装一下，并确认 XPPython3 已装、X-Plane 正在运行。",
     "title": "X-Plane 他机插件",
     "why": "没有它，语音和上线都正常，但天上一架别人的飞机都不会出现。",
     "state": {

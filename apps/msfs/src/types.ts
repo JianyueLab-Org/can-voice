@@ -43,6 +43,14 @@ export type FsdState =
   | "Offline"
   | "Stopped";
 
+/**
+ * 菜单上刚点的那一项。和 Rust 侧 `MenuRequest` 一一对应。
+ *
+ * **读一次就没了**：`view` 每调一次就把它取走并清掉。所以读到非 null 要当场
+ * 处理，不要存进别的地方等以后——不会有以后。
+ */
+export type MenuRequest = "flight_plan" | "settings" | "update" | "about";
+
 /** 本机机库扫的结果。 */
 export interface HangarView {
   /** 正在扫。界面靠它区分"还在扫"和"扫完了，没有"。 */
@@ -68,6 +76,8 @@ export interface View {
   hangar: HangarView;
   /** 以观察员身份连着时的状况；没连、或者正常上着网是 `null`。 */
   observer: ObserverView | null;
+  /** 菜单上刚点的那一项，没点过是 `null`。见 `MenuRequest`。 */
+  menu: MenuRequest | null;
 }
 
 export function mhz(khz: number | null | undefined): string {
