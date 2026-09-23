@@ -16,8 +16,7 @@ import { onUnmounted } from "vue";
  *
  * 插槽在值守文案之后，给各客户端自己那一格——管制端放链路健康统计。
  *
- * 用到它的客户端：controller、xpc。msfs 的状态栏在计划 4 里接上。
- * 逐字节相同的一份。
+ * 用到它的客户端：controller、xpc、msfs。逐字节相同的一份。
  */
 defineProps<{
   /** 正在发话。灯转成 active 色。 */

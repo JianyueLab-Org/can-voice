@@ -2,14 +2,40 @@
   "problem": {
     "observer_locked": "Observer mode cannot be switched while connected. Disconnect first, then change it.",
     "nothing_to_send": "Nothing to send: the message is empty, or there is neither a recipient nor a COM1 frequency",
-    "offline": "Not connected yet"
+    "offline": "Not connected yet",
+    "menu": "Could not build the menu: {detail}"
   },
   "app": {
     "title": "MSFS Pilot Client"
   },
+  "menu": {
+    "file": "File",
+    "flight_plan": "Flight plan…",
+    "settings": "Settings…",
+    "quit": "Quit",
+    "help": "Help",
+    "open_log": "Open the log folder",
+    "update": "Check for updates",
+    "about": "About"
+  },
+  "connect": { "title": "Connection" },
+  "messages": { "title": "Messages" },
+  "controllers": { "hint": "Click a position to put it in the recipient box." },
+  "radio": {
+    "title": "Radio",
+    "com1": "COM1  {frequency}",
+    "com1_none": "COM1  ---.---",
+    "traffic": "Traffic {count}"
+  },
+  "about": {
+    "title": "About",
+    "body": "{name} {version}\n\nThe MSFS pilot client for the Cerulean Aviation Network.\nVoice over Mumble, network over FSD, flight data over SimConnect.\n\nLog: {log}",
+    "no_log": "(not written to a file)"
+  },
   "status": {
     "observing": "Observer (not on the network)",
-    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system"
+    "no_mouse_ptt": "Mouse side buttons cannot be used for PTT on this system",
+    "ready": "Ready"
   },
   "fsd": {
     "connecting": "FSD connecting…",
@@ -50,7 +76,6 @@
     "disconnect": "Disconnect"
   },
   "observer": {
-    "frequency": "Voice frequency",
     "frequency_placeholder": "Leave blank to follow COM1",
     "frequency_tip": "Observer mode only: type a frequency and voice stays on it. Clear it to follow the cockpit COM1 again.",
     "manual": "manual",
@@ -67,7 +92,6 @@
   "lists": {
     "traffic": "Nearby traffic ({count})",
     "controllers": "Online ATC ({count})",
-    "messages": "Text messages",
     "no_traffic": "No other aircraft nearby",
     "no_controllers": "No ATC online nearby",
     "no_messages": "No text messages yet"
@@ -111,7 +135,9 @@
     "observer": "Observers are not on the network; the captain files the flight plan"
   },
   "local": {
-    "tab": "Local setup",
+    "audio": "Audio",
+    "network": "Network",
+    "traffic": "Traffic",
     "inject": "Inject traffic into the simulator",
     "inject_note": "When off, you have the sky to yourself; voice is unaffected",
     "microphone": "Microphone",
