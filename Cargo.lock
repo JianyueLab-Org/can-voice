@@ -128,6 +128,7 @@ dependencies = [
  "can-voice-ptt",
  "can-voice-settings",
  "can-voice-token",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

@@ -15,12 +15,13 @@ import (
 // 与 can-api 同样的做法。一个语音服务端带着半份配置跑起来，
 // 比根本起不来危险得多。
 type Config struct {
-	Addr    string
-	Cert    string
-	Key     string
-	PubKey  ed25519.PublicKey
-	FeedURL string
-	MaxRX   int
+	Addr                 string
+	Cert                 string
+	Key                  string
+	PubKey               ed25519.PublicKey
+	FeedURL              string
+	MaxRX                int
+	MaxPendingHandshakes int
 	// Ranges 是席位后缀的兜底半径表。只在 datafeed 的 visual_range 为 0 时用得上。
 	Ranges *geo.Table
 }
@@ -79,6 +80,14 @@ func LoadConfig(get func(string) string) (Config, error) {
 			return Config{}, fmt.Errorf("CAN_VOICE_MAX_RX is %d, over the %d limit", n, maxMaxRX)
 		}
 		cfg.MaxRX = n
+	}
+	cfg.MaxPendingHandshakes = 128
+	if v := get("CAN_VOICE_MAX_PENDING_HANDSHAKES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 || n > 4096 {
+			return Config{}, fmt.Errorf("CAN_VOICE_MAX_PENDING_HANDSHAKES must be between 1 and 4096, got %q", v)
+		}
+		cfg.MaxPendingHandshakes = n
 	}
 
 	// 兜底半径表。逐条覆盖内置那份估出来的数值，形如 `CTR=300,FSS=700,*=120`。

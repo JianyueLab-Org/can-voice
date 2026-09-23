@@ -28,9 +28,12 @@ pub struct SubscriptionState {
     /// **已经发出去**的那一份。ACK 回答的是它，不是 `desired`——
     /// 这中间用户完全可能又改了台面。
     in_flight: Option<Sub>,
+    /// Declaration confirmed by the most recent ACK.
+    confirmed: Option<Sub>,
     /// 是否还没推给服务端。
     dirty: bool,
     connected: bool,
+    epoch: u64,
     /// 服务端最近确认的内容。掉线即清空。
     acked: SubAck,
     /// READY 带来的限额。掉线即清空：下一次 READY 可能是另一组数。
@@ -55,7 +58,7 @@ impl SubscriptionState {
 
     /// 取出待发送的声明。没有待发的、或链路不可用时返回 None。
     pub fn take_pending(&mut self) -> Option<Sub> {
-        if !self.connected || !self.dirty {
+        if !self.connected || !self.dirty || self.in_flight.is_some() {
             return None;
         }
         self.dirty = false;
@@ -66,7 +69,11 @@ impl SubscriptionState {
     /// 链路建立。会把当前意图重新标记为待发 ——
     /// 重连后服务端对我们一无所知，必须无条件重推。
     pub fn on_connected(&mut self, limits: Limits) {
+        self.epoch = self.epoch.wrapping_add(1);
         self.connected = true;
+        self.in_flight = None;
+        self.confirmed = None;
+        self.acked = SubAck::default();
         self.limits = Some(limits);
         if self.desired.is_some() {
             self.dirty = true;
@@ -77,13 +84,33 @@ impl SubscriptionState {
     /// 保留确认会让上层以为订阅还生效着，保留限额会按一组过期的数去夹。
     pub fn on_disconnected(&mut self) {
         self.connected = false;
+        self.in_flight = None;
+        self.confirmed = None;
         self.acked = SubAck::default();
         self.limits = None;
     }
 
     /// 记录服务端的确认。
     pub fn on_ack(&mut self, ack: SubAck) {
+        self.on_ack_epoch(self.epoch, ack);
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Returns false for an ACK from another connection or with no matching SUB.
+    pub fn on_ack_epoch(&mut self, epoch: u64, ack: SubAck) -> bool {
+        if !self.connected || epoch != self.epoch {
+            return false;
+        }
+        let Some(sent) = self.in_flight.take() else {
+            return false;
+        };
+        self.dirty = self.desired.as_ref() != Some(&sent);
+        self.confirmed = Some(sent);
         self.acked = ack;
+        true
     }
 
     /// 服务端实际接受了什么。上层显示这一份，而不是我们请求的那一份 ——
@@ -93,6 +120,26 @@ impl SubscriptionState {
     /// 差集公式管不到它，所以那一份要直接读。
     pub fn acknowledged(&self) -> &SubAck {
         &self.acked
+    }
+
+    pub fn effective_xc(&self) -> Vec<[u32; 2]> {
+        self.confirmed.as_ref().map_or_else(Vec::new, |sub| {
+            sub.xc
+                .iter()
+                .copied()
+                .filter(|pair| {
+                    self.acked.tx.contains(&pair[0])
+                        && self.acked.tx.contains(&pair[1])
+                        && !self.acked.rejected_xc.contains(pair)
+                })
+                .collect()
+        })
+    }
+
+    /// A later authority-loss notice revokes TX without changing RX.
+    pub fn revoke_tx(&mut self) {
+        self.acked.tx.clear();
+        self.acked.rejected_xc.clear();
     }
 
     /// READY 给出的限额，掉线后为 `None`。
@@ -112,12 +159,12 @@ impl SubscriptionState {
     /// "TX 被限额拒了，但 RX 给了"。按"出现在 rejected 里就当没订阅上"处理的
     /// 客户端会把一个能听的频率显示成失败。
     pub fn denied_rx(&self) -> Vec<u32> {
-        Self::difference(self.in_flight.as_ref().map(|s| &s.rx), &self.acked.rx)
+        Self::difference(self.confirmed.as_ref().map(|s| &s.rx), &self.acked.rx)
     }
 
     /// 声明了 TX 却没拿到的频率。规则同 [`Self::denied_rx`]。
     pub fn denied_tx(&self) -> Vec<u32> {
-        Self::difference(self.in_flight.as_ref().map(|s| &s.tx), &self.acked.tx)
+        Self::difference(self.confirmed.as_ref().map(|s| &s.tx), &self.acked.tx)
     }
 
     fn difference(declared: Option<&Vec<u32>>, granted: &[u32]) -> Vec<u32> {
@@ -190,6 +237,42 @@ mod tests {
         s.declare(sub(&[124_550]));
         assert_eq!(s.take_pending(), Some(sub(&[124_550])));
         assert!(s.take_pending().is_none());
+    }
+
+    #[test]
+    fn a_second_subscription_waits_for_the_first_ack() {
+        let mut s = online();
+        s.declare(sub(&[118_000]));
+        assert_eq!(s.take_pending(), Some(sub(&[118_000])));
+        s.declare(sub(&[121_800]));
+        assert_eq!(s.take_pending(), None);
+        s.on_ack(SubAck {
+            rx: vec![118_000],
+            ..Default::default()
+        });
+        assert_eq!(s.take_pending(), Some(sub(&[121_800])));
+    }
+
+    #[test]
+    fn an_ack_from_an_old_connection_cannot_change_current_state() {
+        let mut s = online();
+        s.declare(sub(&[118_000]));
+        s.take_pending();
+        let old_epoch = s.epoch();
+        s.on_disconnected();
+        s.on_connected(Limits {
+            max_tx: 32,
+            max_rx: 32,
+        });
+        s.take_pending();
+        assert!(!s.on_ack_epoch(
+            old_epoch,
+            SubAck {
+                rx: vec![118_000],
+                ..Default::default()
+            }
+        ));
+        assert!(s.acknowledged().rx.is_empty());
     }
 
     #[test]

@@ -14,6 +14,7 @@
 //! 但"整个下线"要是同一个意思——见 [`client::ReconnectPolicy`]。
 
 pub mod client;
+pub mod observer_client;
 pub mod packet;
 pub mod pilot;
 pub mod pilot_client;

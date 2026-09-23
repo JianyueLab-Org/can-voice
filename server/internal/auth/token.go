@@ -32,13 +32,17 @@ var (
 	ErrInvalid = errors.New("token invalid")
 )
 
-// Claims 是 token 的载荷。MaxTX 是这个会话允许同时发送的频率数上限，
-// 权威值就是这里——控制面 READY 里的同名字段只是回显。
+// Claims is the signed ticket payload. MaxTX is only a width bound; Role,
+// Callsign, Station, TX, and the live FSD feed determine actual TX authority.
 type Claims struct {
-	CID    string `json:"cid"`
-	Rating int    `json:"rating"`
-	MaxTX  int    `json:"max_tx"`
-	Exp    int64  `json:"exp"`
+	CID      string `json:"cid"`
+	Rating   int    `json:"rating"`
+	MaxTX    int    `json:"max_tx"`
+	Exp      int64  `json:"exp"`
+	Role     string `json:"role,omitempty"`
+	Callsign string `json:"callsign,omitempty"`
+	Station  string `json:"station,omitempty"`
+	TX       []int  `json:"tx,omitempty"`
 }
 
 // maxTokenLifetime 是 exp 允许比现在远出多少。超过就按 ErrInvalid 拒。
@@ -154,5 +158,46 @@ func Verify(pub ed25519.PublicKey, token string, now time.Time) (Claims, error) 
 	if c.CID == "" {
 		return Claims{}, fmt.Errorf("%w: token carries no cid", ErrInvalid)
 	}
+	if err := validateGrant(c); err != nil {
+		return Claims{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
 	return c, nil
+}
+
+func validateGrant(c Claims) error {
+	if len(c.TX) > 16 || len(c.TX) > c.MaxTX {
+		return errors.New("too many granted transmit frequencies")
+	}
+	seen := make(map[int]struct{}, len(c.TX))
+	for _, freq := range c.TX {
+		if freq < 118000 || freq > 136975 || freq%5 != 0 {
+			return errors.New("invalid granted transmit frequency")
+		}
+		if _, ok := seen[freq]; ok {
+			return errors.New("duplicate granted transmit frequency")
+		}
+		seen[freq] = struct{}{}
+	}
+	switch c.Role {
+	case "":
+		// Legacy tickets are admitted for reception only during rollout.
+		if c.Callsign != "" || c.Station != "" || len(c.TX) != 0 {
+			return errors.New("unscoped ticket carries a grant")
+		}
+	case "pilot", "observer":
+		if c.Callsign != "" || c.Station != "" || len(c.TX) > 1 {
+			return errors.New("pilot or observer ticket has invalid station or transmit scope")
+		}
+	case "controller":
+		if c.Callsign == "" || c.Station != "" || len(c.TX) != 1 {
+			return errors.New("controller ticket has invalid assignment")
+		}
+	case "atis":
+		if c.Station == "" || c.Callsign != "" || len(c.TX) != 1 {
+			return errors.New("ATIS ticket has invalid station")
+		}
+	default:
+		return errors.New("unsupported voice role")
+	}
+	return nil
 }

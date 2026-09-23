@@ -13,8 +13,10 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
+	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 )
 
 // Router 持有全部服务端状态。
@@ -58,8 +60,7 @@ func New() *Router {
 type SessionOpts struct {
 	// CID 是成员号，来自已验签的 token。
 	CID string
-	// Follow 只有观察员模式填：观察员没有 FSD 连接，
-	// 位置取自它跟随的那架飞机（spec 7.3）。
+	// Follow is for legacy router-only tests. Production rejects it at HELLO.
 	Follow string
 	// Station 是同一个账号下的第几个席位，空串表示"就一个"。
 	//
@@ -68,6 +69,11 @@ type SessionOpts struct {
 	// 再顶掉下一个，全队每秒互踢一轮，而两端日志都写着"成功"。
 	// 设计文档 §6 说的"普通会话，带一个 station 标记"就是这个。
 	Station string
+	// Signed voice scope. Empty role is reserved for router-only legacy tests.
+	Role         string
+	Callsign     string
+	TXGrant      []uint32
+	GrantExpires time.Time
 	// MaxTX 来自 token：最多能在几个频率上发送。
 	MaxTX int
 	// MaxRX 来自服务端配置：最多能订阅几个频率。
@@ -103,11 +109,19 @@ func evictionKey(cid, station string) string {
 // 新会话带着一个空声明入场，不是 nil——扇出完全可能在第一个 SUB 到达之前
 // 就看到它，那时 subs.Load() 必须已经可用。
 func (r *Router) Add(o SessionOpts) *Session {
+	grant := make(map[uint32]struct{}, len(o.TXGrant))
+	for _, f := range o.TXGrant {
+		grant[f] = struct{}{}
+	}
 	s := &Session{
 		ID:           newSessionID(),
 		CID:          o.CID,
 		Follow:       o.Follow,
 		Station:      o.Station,
+		Role:         o.Role,
+		Callsign:     o.Callsign,
+		TXGrant:      grant,
+		GrantExpires: o.GrantExpires,
 		MaxTX:        o.MaxTX,
 		MaxRX:        o.MaxRX,
 		send:         o.Send,
@@ -129,6 +143,9 @@ func (r *Router) Add(o SessionOpts) *Session {
 	}
 	r.sessions[s.ID] = s
 	r.mu.Unlock()
+	if o.Role != "" && !o.GrantExpires.IsZero() {
+		time.AfterFunc(time.Until(o.GrantExpires), r.ReconcileAuthority)
+	}
 
 	// 断连放在锁外：closeConn 是传输层的回调，它可能回头再调 router
 	// （比如它自己的 defer 里有 Remove），持锁调用就是自锁。
@@ -187,6 +204,9 @@ func (r *Router) removeLocked(id SessionID) {
 func (r *Router) noteTalker(listener, speaker SessionID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, ok := r.sessions[listener]; !ok {
+		return false
+	}
 	m := r.announced[listener]
 	if m == nil {
 		m = map[SessionID]struct{}{}
@@ -238,7 +258,8 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	sub.TX, excessTX, unreportedTX = truncateDeclaration(sub.TX, limit)
 	sub.RX, excessRX, unreportedRX = truncateDeclaration(sub.RX, limit)
 
-	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX)
+	snap, degraded := r.positions()
+	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX, snap, degraded, time.Now())
 	unreported += unreportedTX + unreportedRX
 	ack.RejectedTruncated = unreported > 0
 
@@ -258,7 +279,7 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 // 拆出来不是为了好看：调用方要在锁外记一条日志，而 `defer r.mu.Unlock()` 会
 // 让函数体里任何一句日志都落在锁内。把锁的范围变成一个函数，是这里唯一一种
 // 不依赖"defer 是 LIFO、所以这两条的注册顺序有讲究"这类细节的写法。
-func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32) (control.SubAck, int) {
+func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32, snap fsdfeed.Snapshot, degraded bool, now time.Time) (control.SubAck, int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -276,10 +297,18 @@ func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excess
 	r.bumpXC(old.xc, -1)
 
 	next := emptySubs()
+	txLimit := s.MaxTX
+	if (s.Role == "pilot" || s.Role == "observer") && txLimit > 1 {
+		txLimit = 1
+	}
 	for _, f := range dedup(sub.TX) {
+		if !s.allowsTX(f, snap, degraded, now) {
+			ack.Rejected = append(ack.Rejected, f)
+			continue
+		}
 		// TX 超出 token 里的 max_tx 就拒绝。权威值是 token，
 		// 控制面 READY 里的同名字段只是回显（spec 6）。
-		if len(next.tx) >= s.MaxTX {
+		if len(next.tx) >= txLimit {
 			ack.Rejected = append(ack.Rejected, f)
 			continue
 		}
@@ -363,6 +392,7 @@ func (r *Router) Listeners(freq uint32) []*Session {
 // MayTransmit 报告该会话有没有声明在这个频率上发送。
 // 这是上行包的第一道校验：没声明就丢弃，否则任何人都能往任意频率喊话。
 func (r *Router) MayTransmit(id SessionID, freq uint32) bool {
+	snap, degraded := r.positions()
 	r.mu.RLock()
 	s, ok := r.sessions[id]
 	r.mu.RUnlock()
@@ -370,7 +400,7 @@ func (r *Router) MayTransmit(id SessionID, freq uint32) bool {
 		return false
 	}
 	_, ok = s.subs.Load().tx[freq]
-	return ok
+	return ok && s.allowsTX(freq, snap, degraded, time.Now())
 }
 
 // SessionCount 返回当前登记的会话数。

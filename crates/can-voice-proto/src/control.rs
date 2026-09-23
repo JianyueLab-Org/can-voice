@@ -43,6 +43,8 @@ pub mod notice_kind {
     /// 说成某一个频率的问题——一次超额不归某一条频率，替用户指认一个元凶比不说
     /// 更糟。会话不断开，收敛靠客户端自己停下来。
     pub const RATE_LIMITED: &str = "rate_limited";
+    /// A live assignment or signed TX grant was lost; RX remains active.
+    pub const AUTHORITY_LOST: &str = "authority_lost";
 }
 
 /// 把 JSON 的 `null` 当成缺省值读。

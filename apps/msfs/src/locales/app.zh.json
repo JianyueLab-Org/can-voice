@@ -63,8 +63,8 @@
     "observer_note": "右座用：只连语音，不在网络上产生第二架飞机。两个人要用各自的账号。",
     "cid": "CAN 号",
     "password": "密码",
-    "follow": "跟随的呼号（机长的）",
-    "follow_tip": "机长那架飞机的呼号。语音服务端按它的位置给你算距离。",
+    "follow": "观察员呼号",
+    "follow_tip": "你自己的 FSD 观察员呼号。语音距离按本机模拟器位置计算。",
     "callsign": "呼号 CES123",
     "aircraft": "机型 A320",
     "real_name": "姓名",
@@ -72,7 +72,7 @@
   },
   "session": {
     "ident": "识别（8 秒）",
-    "following": "跟随",
+    "following": "观察员",
     "disconnect": "下线"
   },
   "observer": {

@@ -162,6 +162,7 @@
       "callsign": "The callsign does not meet the server's rules",
       "bad_frequency": "Unrecognised frequency: {frequency}",
       "send_failed": "Sending failed: {detail}",
+      "protocol": "FSD protocol error: {detail}",
       "retrying": "Reconnecting (attempt {attempt} of {limit})",
       "gave_up": "Reconnecting failed {limit} times; this station is now offline"
     }

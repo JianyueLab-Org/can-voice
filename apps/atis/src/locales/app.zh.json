@@ -162,6 +162,7 @@
       "callsign": "呼号不合服务端的规矩",
       "bad_frequency": "认不出这个频率：{frequency}",
       "send_failed": "发送失败：{detail}",
+      "protocol": "FSD 协议错误：{detail}",
       "retrying": "重连中（第 {attempt} / {limit} 次）",
       "gave_up": "重连 {limit} 次都没成，这个席位已下线"
     }

@@ -120,6 +120,12 @@ pub enum Event {
     /// `rejected` 里是**正常**的（TX 被限额拒了、RX 给了），混成一件会把一个
     /// 能听的频率显示成失败。
     RxDenied { freq_khz: u32 },
+    /// Effective radio state from the latest matching SUBACK.
+    SubscriptionAck {
+        rx: Vec<u32>,
+        tx: Vec<u32>,
+        xc: Vec<[u32; 2]>,
+    },
     /// 一对交叉耦合没有生效。
     ///
     /// 耦合对不在 `rx`/`tx` 里，差集公式管不到它，所以它必须有自己的事件。

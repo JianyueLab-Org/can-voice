@@ -61,6 +61,9 @@ pub struct Snapshot {
     pub denied_tx: BTreeSet<u32>,
     pub denied_rx: BTreeSet<u32>,
     pub denied_xc: BTreeSet<[u32; 2]>,
+    pub effective_rx: BTreeSet<u32>,
+    pub effective_tx: BTreeSet<u32>,
+    pub effective_xc: BTreeSet<[u32; 2]>,
     pub health: Option<Health>,
     /// 服务端的其它通知，最近的在最后。
     pub notices: Vec<(String, u32, String)>,
@@ -105,6 +108,9 @@ impl Default for Snapshot {
             denied_tx: BTreeSet::new(),
             denied_rx: BTreeSet::new(),
             denied_xc: BTreeSet::new(),
+            effective_rx: BTreeSet::new(),
+            effective_tx: BTreeSet::new(),
+            effective_xc: BTreeSet::new(),
             health: None,
             notices: Vec::new(),
             speakers: BTreeMap::new(),
@@ -188,6 +194,14 @@ impl Snapshot {
             Event::XcDenied { a_khz, b_khz, .. } => {
                 self.denied_xc.insert([*a_khz, *b_khz]);
             }
+            Event::SubscriptionAck { rx, tx, xc } => {
+                self.effective_rx = rx.iter().copied().collect();
+                self.effective_tx = tx.iter().copied().collect();
+                self.effective_xc = xc.iter().copied().collect();
+                self.denied_rx.clear();
+                self.denied_tx.clear();
+                self.denied_xc.clear();
+            }
             Event::Notice {
                 kind,
                 freq_khz,
@@ -229,6 +243,9 @@ impl Snapshot {
         // 链路一掉，这一条的上限就不作数了。`Online` 不清：`Limits` 在它之前到。
         if state != LinkState::Online {
             self.max_tx = None;
+            self.effective_rx.clear();
+            self.effective_tx.clear();
+            self.effective_xc.clear();
         }
         match state {
             LinkState::Online => {
@@ -271,6 +288,29 @@ mod tests {
         let mut s = Snapshot::default();
         s.apply(&Event::State(LinkState::Online));
         s
+    }
+
+    #[test]
+    fn effective_radios_follow_the_latest_server_ack() {
+        let mut snapshot = online();
+        snapshot.apply(&Event::SubscriptionAck {
+            rx: vec![118_000, 121_800],
+            tx: vec![118_000],
+            xc: vec![],
+        });
+        assert_eq!(snapshot.effective_rx, BTreeSet::from([118_000, 121_800]));
+        assert_eq!(snapshot.effective_tx, BTreeSet::from([118_000]));
+        snapshot.apply(&Event::TxDenied {
+            freq_khz: 121_800,
+            reason: String::new(),
+        });
+        snapshot.apply(&Event::SubscriptionAck {
+            rx: vec![121_800],
+            tx: vec![],
+            xc: vec![],
+        });
+        assert!(snapshot.effective_tx.is_empty());
+        assert!(snapshot.denied_tx.is_empty());
     }
 
     /// **每一行要记得最后一次通话是什么时候。**

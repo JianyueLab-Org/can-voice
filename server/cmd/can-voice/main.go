@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 	"github.com/JianyueLab-Org/can-voice/server/internal/geo"
@@ -46,14 +47,35 @@ func main() {
 
 	feed := fsdfeed.NewFeed(cfg.FeedURL)
 	r.SetLocator(feed)
+	feed.SetChangeHook(r.ReconcileAuthority)
 	go feed.Run(ctx)
+	admissionStats := &transport.AdmissionStats{}
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		var lastRejected uint64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.ReconcileAuthority()
+				if rejected := admissionStats.RejectedPending(); rejected != lastRejected {
+					slog.Warn("pending voice handshakes rejected", "total", rejected)
+					lastRejected = rejected
+				}
+			}
+		}
+	}()
 
 	slog.Info("starting", "addr", cfg.Addr, "feed", cfg.FeedURL, "max_rx", cfg.MaxRX)
 	if err := transport.Serve(ctx, transport.Config{
-		Addr:      cfg.Addr,
-		TLS:       certs.Config(),
-		PublicKey: cfg.PubKey,
-		MaxRX:     cfg.MaxRX,
+		Addr:                 cfg.Addr,
+		TLS:                  certs.Config(),
+		PublicKey:            cfg.PubKey,
+		MaxRX:                cfg.MaxRX,
+		MaxPendingHandshakes: cfg.MaxPendingHandshakes,
+		AdmissionStats:       admissionStats,
 	}, r); err != nil && ctx.Err() == nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)

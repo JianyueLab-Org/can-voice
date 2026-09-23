@@ -62,6 +62,7 @@
   },
   "notice": {
     "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
+    "authority_lost": "Transmit permission was revoked; reception remains available.",
     "range_unavailable": "Position service unavailable, range filtering is off: this frequency is audible network-wide right now",
     "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
     "rate_limited": "Uplink audio exceeded the server's rate limit and the excess was dropped: this is usually a client bug (a stuck PTT). Reconnect; if it keeps happening, send the log in.",
@@ -105,8 +106,9 @@
     "observer": {
       "unreadable": "Cannot read frequency {value}; write it like 121.800",
       "out_of_band": "Frequency {value} is outside 118.000–136.975",
-      "no_follow": "An observer needs a callsign to follow: the captain's aircraft, whose position voice range is measured from",
-      "bad_follow": "Follow callsign {callsign} is not valid: 2–10 characters, only letters, digits, - or _"
+      "off_raster": "Frequency {value} must be on a 5 kHz channel (for example, 121.450 or 121.455)",
+      "no_callsign": "An observer needs their own callsign for the FSD connection",
+      "bad_callsign": "Observer callsign {callsign} is not valid: 2–10 characters, only letters, digits, - or _"
     },
     "endpoint": {
       "url_scheme": {

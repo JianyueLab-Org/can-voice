@@ -1,8 +1,4 @@
-//! 观察员模式（双人机组的右座）：只连语音，不开 FSD 连接。
-//!
-//! 设计 §7.3：右座的人如果也上 FSD，网络上会多出一架和机长叠在一起的飞机。
-//! 所以他只连语音，在 `HELLO.follow` 里报机长那架飞机的呼号，服务端拿那架的
-//! 位置给他算射程。**两个人要用各自的账号**——同一个成员号第二次登录会顶掉第一条。
+//! Observer mode uses its own FSD facility-0 session and simulator position.
 //!
 //! 这里是 `xpc-for-can` 和 `msfs-for-can` 共用的那几条规则，照
 //! `can-audio/xpc/observer.py` 搬过来：
@@ -27,10 +23,12 @@ pub enum Problem {
     Unreadable(String),
     #[error("frequency {0:?} is outside 118.000-136.975")]
     OutOfBand(String),
-    #[error("an observer needs a callsign to follow")]
-    NoFollow,
-    #[error("follow callsign {0:?} is not a callsign: 2-10 chars of A-Z 0-9 - _")]
-    BadFollow(String),
+    #[error("frequency {0:?} is not on the 5-kHz voice channel raster")]
+    OffRaster(String),
+    #[error("an observer needs a callsign")]
+    NoCallsign,
+    #[error("observer callsign {0:?} is not a callsign: 2-10 chars of A-Z 0-9 - _")]
+    BadCallsign(String),
 }
 
 impl Problem {
@@ -44,9 +42,12 @@ impl Problem {
             Problem::OutOfBand(value) => {
                 Message::new("error.observer.out_of_band").with("value", value)
             }
-            Problem::NoFollow => Message::new("error.observer.no_follow"),
-            Problem::BadFollow(callsign) => {
-                Message::new("error.observer.bad_follow").with("callsign", callsign)
+            Problem::OffRaster(value) => {
+                Message::new("error.observer.off_raster").with("value", value)
+            }
+            Problem::NoCallsign => Message::new("error.observer.no_callsign"),
+            Problem::BadCallsign(callsign) => {
+                Message::new("error.observer.bad_callsign").with("callsign", callsign)
             }
         }
     }
@@ -56,7 +57,7 @@ impl Problem {
 ///
 /// 收 `121.8`、`121.800` 和六位的 `121800`；不带小数点的数小于 1000 当 MHz
 /// （`122` 是 122.000）。**先取整到 kHz 再判波段**：`136.9751` 取整之后是
-/// 136.975，是合法的。8.33 kHz 间隔不校验，旧版也不校验。
+/// 136.975，是合法的。服务器只接受 5 kHz 栅格上的频率。
 ///
 /// 只认数字和一个小数点：`f64` 自己的解析还收 `1e2`、`inf` 这类，打错的字不该
 /// 碰巧变成一个频率。
@@ -83,22 +84,26 @@ pub fn parse_frequency(text: &str) -> Result<Option<u32>, Problem> {
     if !in_band {
         return Err(Problem::OutOfBand(text.trim().to_string()));
     }
-    Ok(Some(khz as u32))
+    let khz = khz as u32;
+    if khz % 5 != 0 {
+        return Err(Problem::OffRaster(text.trim().to_string()));
+    }
+    Ok(Some(khz))
 }
 
-/// 跟随的呼号：去掉首尾空白、转大写、校验。
+/// The observer's own callsign: trim, uppercase, and validate.
 ///
 /// **大写要在这里转**：界面上的输入框只是用 CSS 显示成大写，值本身没变；而服务端
 /// 按呼号查位置是区分大小写的，`HELLO` 里的小写呼号会被当成非法直接拒掉。
 /// 规则是 [`can_voice_client::conn::is_valid_callsign`] 那一条（2–10 位），比 FSD
 /// 飞行员呼号的 12 位严——两边对不上时以语音服务端为准，它才是拿这个值的一方。
-pub fn follow_callsign(text: &str) -> Result<String, Problem> {
+pub fn observer_callsign(text: &str) -> Result<String, Problem> {
     let callsign = text.trim().to_ascii_uppercase();
     if callsign.is_empty() {
-        return Err(Problem::NoFollow);
+        return Err(Problem::NoCallsign);
     }
     if !can_voice_client::conn::is_valid_callsign(&callsign) {
-        return Err(Problem::BadFollow(callsign));
+        return Err(Problem::BadCallsign(callsign));
     }
     Ok(callsign)
 }
@@ -156,6 +161,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_frequency_off_the_five_khz_raster_is_refused_with_a_clear_message() {
+        assert!(parse_frequency("121451").is_err());
+        let message = parse_frequency("121.451").unwrap_err().message();
+        assert_eq!(message.key, "error.observer.off_raster");
+        assert_eq!(message.values["value"], "121.451");
+    }
+
     /// 先取整再判波段，和 COM1 那一条同一个顺序。
     #[test]
     fn rounding_happens_before_the_band_check() {
@@ -171,24 +184,27 @@ mod tests {
     }
 
     #[test]
-    fn the_follow_callsign_is_uppercased_before_it_is_checked() {
-        assert_eq!(follow_callsign("  cca1501 "), Ok("CCA1501".to_string()));
-        assert_eq!(follow_callsign("B-6789"), Ok("B-6789".to_string()));
+    fn the_observer_callsign_is_uppercased_before_it_is_checked() {
+        assert_eq!(observer_callsign("  cca1501 "), Ok("CCA1501".to_string()));
+        assert_eq!(observer_callsign("B-6789"), Ok("B-6789".to_string()));
     }
 
     #[test]
-    fn a_follow_callsign_the_voice_server_would_refuse_is_caught_here() {
-        assert_eq!(follow_callsign(""), Err(Problem::NoFollow));
-        assert_eq!(follow_callsign("   "), Err(Problem::NoFollow));
-        assert_eq!(follow_callsign("C"), Err(Problem::BadFollow("C".into())));
+    fn an_observer_callsign_the_voice_server_would_refuse_is_caught_here() {
+        assert_eq!(observer_callsign(""), Err(Problem::NoCallsign));
+        assert_eq!(observer_callsign("   "), Err(Problem::NoCallsign));
         assert_eq!(
-            follow_callsign("CCA1501 X"),
-            Err(Problem::BadFollow("CCA1501 X".into()))
+            observer_callsign("C"),
+            Err(Problem::BadCallsign("C".into()))
+        );
+        assert_eq!(
+            observer_callsign("CCA1501 X"),
+            Err(Problem::BadCallsign("CCA1501 X".into()))
         );
         // FSD 放得进 12 位，语音服务端只收 10 位。
         assert_eq!(
-            follow_callsign("ABCDEFGHIJK"),
-            Err(Problem::BadFollow("ABCDEFGHIJK".into()))
+            observer_callsign("ABCDEFGHIJK"),
+            Err(Problem::BadCallsign("ABCDEFGHIJK".into()))
         );
     }
 

@@ -22,7 +22,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "process", "sync", "fs"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time", "process", "sync", "fs", "io-util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
