@@ -21,6 +21,11 @@ type SessionID uint32
 type subs struct {
 	rx map[uint32]struct{}
 	tx map[uint32]struct{}
+	// requestedTX is the bounded intent from the last full SUB. It cannot
+	// authorize TX; it only lets authority reconciliation request a replay.
+	requestedTX     map[uint32]struct{}
+	replayPending   bool
+	restoreNotified bool
 	// xc 是这条会话声明的、且通过了校验的交叉耦合对，每对内部升序、整体去重
 	// （见 normaliseXC）。扇出不读它——耦合是全服务端的，查的是 Router.xc 那张
 	// 引用计数索引。留着它是为了知道下一次 Subscribe 或 Remove 该从索引里
@@ -81,8 +86,10 @@ type Session struct {
 	send func([]byte)
 
 	// notifyTalker 见 SessionOpts.NotifyTalker。
-	notifyTalker        func(speaker SessionID, cid string, freq uint32)
-	notifyAuthorityLost atomic.Pointer[authorityLostCallback]
+	notifyTalker          func(speaker SessionID, cid string, freq uint32)
+	notifyAuthorityChange atomic.Pointer[authorityChangeCallback]
+	subRevision           atomic.Uint64
+	lastLossRevision      atomic.Uint64
 
 	// closeConn 断开这条会话的底层连接。同一个 CID 再次登录时用它顶掉旧会话。
 	// 和 send 一样由传输层注入，router 因此仍然不认识 QUIC。
@@ -99,15 +106,18 @@ type Session struct {
 	subs atomic.Pointer[subs]
 }
 
-type authorityLostCallback struct{ fn func() }
+type authorityChangeCallback struct{ fn func(string, uint64) }
 
-func (s *Session) SetNotifyAuthorityLost(fn func()) {
-	s.notifyAuthorityLost.Store(&authorityLostCallback{fn: fn})
+func (s *Session) SetNotifyAuthorityChange(fn func(string, uint64)) {
+	s.notifyAuthorityChange.Store(&authorityChangeCallback{fn: fn})
 }
 
-func (s *Session) authorityLost() {
-	if cb := s.notifyAuthorityLost.Load(); cb != nil {
-		cb.fn()
+func (s *Session) SubscriptionRevision() uint64      { return s.subRevision.Load() }
+func (s *Session) LastAuthorityLossRevision() uint64 { return s.lastLossRevision.Load() }
+
+func (s *Session) authorityChange(kind string, revision uint64) {
+	if cb := s.notifyAuthorityChange.Load(); cb != nil {
+		cb.fn(kind, revision)
 	}
 }
 

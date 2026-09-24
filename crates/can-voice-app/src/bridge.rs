@@ -341,7 +341,33 @@ fn retryable_authority_error(error: &Error) -> bool {
     )
 }
 
+fn effective_gains(stack: &RadioStack) -> Vec<(u32, f32)> {
+    stack
+        .radios()
+        .iter()
+        .map(|r| (r.freq_khz, r.effective_gain()))
+        .collect()
+}
+
 impl Inner {
+    fn release_transmit(&self, generation: u64) {
+        let _transition = self.transition.lock().unwrap_or_else(|p| p.into_inner());
+        if self.generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        self.release_transmit_current();
+    }
+
+    /// Caller holds `transition`, so a replaced supervisor cannot release the new client.
+    fn release_transmit_current(&self) {
+        self.transmitting.store(false, Ordering::Relaxed);
+        if let Ok(client) = self.client.lock() {
+            if let Some(client) = client.as_ref() {
+                client.set_transmitting(false);
+            }
+        }
+    }
+
     /// 接管一条新连接：起监护任务、存起来、把台面重发一遍。
     ///
     /// **重连之后台面要重发**，而重发就是恢复——声明是幂等的全量声明，
@@ -356,10 +382,18 @@ impl Inner {
             old.request_shutdown();
         }
         let events = client.events();
+        let gains = self
+            .stack
+            .lock()
+            .map(|stack| effective_gains(&stack))
+            .unwrap_or_default();
         if let Ok(mut slot) = self.client.lock() {
             *slot = Some(client);
-            if transmitting {
-                if let Some(current) = slot.as_ref() {
+            if let Some(current) = slot.as_ref() {
+                for (freq_khz, gain) in gains {
+                    current.set_frequency_volume(freq_khz, gain);
+                }
+                if transmitting {
                     current.set_transmitting(true);
                 }
             }
@@ -380,10 +414,21 @@ impl Inner {
         }
     }
 
-    fn apply_event(&self, event: &Event) {
+    fn apply_event(&self, event: &Event, generation: u64) {
+        self.apply_event_with_hook(event, generation, || {});
+    }
+
+    fn apply_event_with_hook(&self, event: &Event, generation: u64, checked: impl FnOnce()) {
+        let _transition = self.transition.lock().unwrap_or_else(|p| p.into_inner());
+        if self.generation.load(Ordering::Relaxed) != generation {
+            return;
+        }
+        checked();
         if let Event::Notice { kind, .. } = event {
-            if kind == can_voice_proto::control::notice_kind::AUTHORITY_LOST {
-                self.transmitting.store(false, Ordering::Relaxed);
+            if kind == can_voice_proto::control::notice_kind::AUTHORITY_LOST
+                || kind == can_voice_proto::control::notice_kind::AUTHORITY_RESTORED
+            {
+                self.release_transmit_current();
             }
         }
         if let Ok(mut snapshot) = self.snapshot.lock() {
@@ -422,7 +467,7 @@ async fn supervise(
                 if inner.generation.load(Ordering::Relaxed) != generation {
                     return;
                 }
-                inner.apply_event(&e);
+                inner.apply_event(&e, generation);
                 let ended = {
                     let Ok(s) = inner.snapshot.lock() else {
                         return;
@@ -439,7 +484,11 @@ async fn supervise(
             }
             // 跟不上就继续：快照只关心最新的状态，丢掉的中间事件不影响它收敛。
             Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                if inner.generation.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 tracing::debug!(skipped = n, "the ui fell behind the event stream");
+                inner.release_transmit(generation);
             }
             Err(_) => return,
         }
@@ -497,6 +546,58 @@ mod tests {
     use super::*;
     use can_voice_client::conn::RefusedReason;
     use can_voice_client::session::Limits;
+
+    #[test]
+    fn stale_event_cannot_overwrite_replacement_snapshot_after_generation_check() {
+        let bridge = Bridge::new();
+        let inner = bridge.inner.clone();
+        let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let stale = std::thread::spawn(move || {
+            inner.apply_event_with_hook(
+                &Event::Limits(Limits {
+                    max_tx: 1,
+                    max_rx: 1,
+                }),
+                0,
+                || {
+                    checked_tx.send(()).expect("signal generation check");
+                    resume_rx.recv().expect("resume stale event");
+                },
+            );
+        });
+        checked_rx.recv().expect("stale event checked generation");
+
+        if let Ok(_transition) = bridge.inner.transition.try_lock() {
+            bridge.inner.generation.fetch_add(1, Ordering::Relaxed);
+            bridge
+                .inner
+                .snapshot
+                .lock()
+                .expect("snapshot")
+                .apply(&Event::Limits(Limits {
+                    max_tx: 2,
+                    max_rx: 2,
+                }));
+            resume_tx.send(()).expect("resume stale event");
+            stale.join().expect("stale event thread");
+        } else {
+            resume_tx.send(()).expect("resume stale event");
+            stale.join().expect("stale event thread");
+            let _transition = bridge.inner.transition.lock().expect("transition");
+            bridge.inner.generation.fetch_add(1, Ordering::Relaxed);
+            bridge
+                .inner
+                .snapshot
+                .lock()
+                .expect("snapshot")
+                .apply(&Event::Limits(Limits {
+                    max_tx: 2,
+                    max_rx: 2,
+                }));
+        }
+        assert_eq!(bridge.snapshot().max_tx, Some(2));
+    }
 
     #[tokio::test]
     async fn disconnect_cancels_an_authority_retry_before_it_can_reconnect() {
@@ -624,12 +725,106 @@ mod tests {
     fn authority_loss_clears_bridge_transmitting_state() {
         let b = Bridge::new();
         b.inner.transmitting.store(true, Ordering::Relaxed);
-        b.inner.apply_event(&Event::Notice {
-            kind: can_voice_proto::control::notice_kind::AUTHORITY_LOST.into(),
-            freq_khz: 118_000,
-            reason: "seat changed".into(),
-        });
+        b.inner.apply_event(
+            &Event::Notice {
+                kind: can_voice_proto::control::notice_kind::AUTHORITY_LOST.into(),
+                freq_khz: 118_000,
+                reason: "seat changed".into(),
+            },
+            0,
+        );
         assert!(!b.transmitting());
+    }
+
+    #[test]
+    fn authority_restoration_clears_bridge_transmitting_state() {
+        let b = Bridge::new();
+        b.inner.transmitting.store(true, Ordering::Relaxed);
+        b.inner.apply_event(
+            &Event::Notice {
+                kind: can_voice_proto::control::notice_kind::AUTHORITY_RESTORED.into(),
+                freq_khz: 0,
+                reason: String::new(),
+            },
+            0,
+        );
+        assert!(!b.transmitting());
+    }
+
+    #[tokio::test]
+    async fn event_lag_clears_ptt_before_a_replacement_can_resume_it() {
+        let b = Bridge::new();
+        b.inner.generation.store(1, Ordering::Relaxed);
+        b.inner.transmitting.store(true, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        for _ in 0..3 {
+            tx.send(Event::Notice {
+                kind: "range_unavailable".into(),
+                freq_khz: 0,
+                reason: String::new(),
+            })
+            .expect("receiver exists");
+        }
+        let task = tokio::spawn(supervise(b.inner.clone(), rx, 1));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while b.transmitting() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("lag must conservatively release PTT");
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn lagged_old_supervisor_cannot_release_a_replacement_ptt() {
+        let b = Bridge::new();
+        b.inner.generation.store(2, Ordering::Relaxed);
+        b.inner.transmitting.store(true, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::broadcast::channel(1);
+        for _ in 0..3 {
+            tx.send(Event::Notice {
+                kind: "range_unavailable".into(),
+                freq_khz: 0,
+                reason: String::new(),
+            })
+            .expect("receiver exists");
+        }
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(1), supervise(b.inner.clone(), rx, 1))
+            .await
+            .expect("stale supervisor should stop");
+        assert!(b.transmitting(), "only the replacement may release its PTT");
+    }
+
+    #[test]
+    fn stale_notice_checked_after_generation_change_cannot_release_new_ptt() {
+        let b = Bridge::new();
+        b.inner.generation.store(2, Ordering::Relaxed);
+        b.inner.transmitting.store(true, Ordering::Relaxed);
+        b.inner.apply_event(
+            &Event::Notice {
+                kind: can_voice_proto::control::notice_kind::AUTHORITY_LOST.into(),
+                freq_khz: 0,
+                reason: String::new(),
+            },
+            1,
+        );
+        assert!(b.transmitting());
+    }
+
+    #[test]
+    fn replacement_client_receives_effective_gains_including_mutes() {
+        let mut stack = RadioStack::new();
+        stack.add(118_000);
+        stack.add(121_800);
+        stack.set_gain(118_000, 0.6);
+        stack.set_gain(121_800, 0.8);
+        stack.set_muted(121_800, true);
+        assert_eq!(
+            effective_gains(&stack),
+            vec![(118_000, 0.6), (121_800, 0.0)]
+        );
     }
 
     // ——— 掉线之后该不该换票重连 ———
