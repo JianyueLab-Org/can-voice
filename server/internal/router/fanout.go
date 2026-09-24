@@ -37,6 +37,7 @@ func (r *Router) SetLocator(l Locator) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.locator = l
+	r.locatorEpoch++
 }
 
 // TxDeniedError 是"这个会话没有在这个频率上声明发射"。
@@ -225,10 +226,12 @@ func (r *Router) positions() (fsdfeed.Snapshot, bool) {
 	return positionsFromLocator(l)
 }
 
-// positionsLocked is used when an authority decision must be made atomically
-// with a subscription mutation. The caller must hold r.mu.
-func (r *Router) positionsLocked() (fsdfeed.Snapshot, bool) {
-	return positionsFromLocator(r.locator)
+func (r *Router) positionsWithEpoch() (fsdfeed.Snapshot, bool, uint64) {
+	r.mu.RLock()
+	l, epoch := r.locator, r.locatorEpoch
+	r.mu.RUnlock()
+	snap, degraded := positionsFromLocator(l)
+	return snap, degraded, epoch
 }
 
 func positionsFromLocator(l Locator) (fsdfeed.Snapshot, bool) {

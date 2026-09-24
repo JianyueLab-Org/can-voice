@@ -51,32 +51,39 @@ func (s *Session) allowsTX(freq uint32, snap fsdfeed.Snapshot, degraded bool, no
 // ReconcileAuthority removes effective TX/XC after feed loss, assignment
 // handoff, or ticket expiry. RX stays indexed until the next full SUB.
 func (r *Router) ReconcileAuthority() {
-	snap, degraded := r.positions()
-	now := time.Now()
-	var changed []*Session
-	r.mu.Lock()
-	for _, s := range r.sessions {
-		old := s.subs.Load()
-		if len(old.tx) == 0 {
+	for {
+		snap, degraded, epoch := r.positionsWithEpoch()
+		now := time.Now()
+		var changed []*Session
+		r.mu.Lock()
+		if r.locatorEpoch != epoch {
+			r.mu.Unlock()
 			continue
 		}
-		allowed := true
-		for f := range old.tx {
-			if !s.allowsTX(f, snap, degraded, now) {
-				allowed = false
-				break
+		for _, s := range r.sessions {
+			old := s.subs.Load()
+			if len(old.tx) == 0 {
+				continue
 			}
+			allowed := true
+			for f := range old.tx {
+				if !s.allowsTX(f, snap, degraded, now) {
+					allowed = false
+					break
+				}
+			}
+			if allowed {
+				continue
+			}
+			r.bumpXC(old.xc, -1)
+			next := &subs{rx: old.rx, tx: map[uint32]struct{}{}}
+			s.subs.Store(next)
+			changed = append(changed, s)
 		}
-		if allowed {
-			continue
+		r.mu.Unlock()
+		for _, s := range changed {
+			go s.authorityLost()
 		}
-		r.bumpXC(old.xc, -1)
-		next := &subs{rx: old.rx, tx: map[uint32]struct{}{}}
-		s.subs.Store(next)
-		changed = append(changed, s)
-	}
-	r.mu.Unlock()
-	for _, s := range changed {
-		go s.authorityLost()
+		return
 	}
 }

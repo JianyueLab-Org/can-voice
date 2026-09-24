@@ -84,18 +84,40 @@ func TestSubscribeHoldsAuthoritySnapshotAndMutationTogether(t *testing.T) {
 	}()
 	select {
 	case <-setDone:
-		t.Fatal("SetLocator raced ahead of the in-flight Subscribe authority decision")
-	case <-time.After(50 * time.Millisecond):
+	case <-time.After(time.Second):
+		t.Fatal("SetLocator was blocked by an in-flight Subscribe snapshot")
 	}
 	close(old.release)
 	ack := <-ackCh
-	if len(ack.TX) != 1 || len(s.subs.Load().tx) != 1 {
-		t.Fatalf("subscription did not use the live snapshot: %+v", ack)
+	if len(ack.TX) != 0 || len(s.subs.Load().tx) != 0 {
+		t.Fatalf("subscription used a stale locator snapshot: %+v", ack)
 	}
 	select {
 	case <-setDone:
 	case <-time.After(time.Second):
 		t.Fatal("SetLocator remained blocked after Subscribe completed")
+	}
+}
+
+func TestMayTransmitRejectsSnapshotFromReplacedLocator(t *testing.T) {
+	old := &blockingLocator{
+		started: make(chan struct{}), release: make(chan struct{}),
+		snap: fsdfeed.Snapshot{ByCallsign: map[string]fsdfeed.Position{
+			"ZSPD_TWR": {Callsign: "ZSPD_TWR", CID: "1000", IsATC: true, FrequencyKHz: 118500},
+		}},
+	}
+	r := New()
+	r.SetLocator(stubLocator{snap: old.snap})
+	s := r.Add(SessionOpts{CID: "1000", Role: "controller", Callsign: "ZSPD_TWR", TXGrant: []uint32{118500}, GrantExpires: time.Now().Add(time.Minute), MaxTX: 1, MaxRX: 1})
+	r.Subscribe(s.ID, control.Sub{TX: []uint32{118500}})
+	r.SetLocator(old)
+	result := make(chan bool, 1)
+	go func() { result <- r.MayTransmit(s.ID, 118500) }()
+	<-old.started
+	r.SetLocator(stubLocator{degraded: true})
+	close(old.release)
+	if <-result {
+		t.Fatal("MayTransmit accepted a snapshot from a replaced locator")
 	}
 }
 

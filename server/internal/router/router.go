@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
+	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 )
 
 // Router 持有全部服务端状态。
@@ -30,6 +31,9 @@ type Router struct {
 	byCID map[string]SessionID
 	// locator 是位置来源，扇出时查它。为 nil 等于永久降级：全部放行。
 	locator Locator
+	// locatorEpoch changes whenever the source changes. Authority decisions
+	// retry if the source was replaced while its snapshot was being read.
+	locatorEpoch uint64
 	// announced：听众 → 已经向他介绍过的发言者。每个听众对每个发言者只发一次
 	// talker 通知（#46）。键是会话号，断线就清。
 	announced map[SessionID]map[SessionID]struct{}
@@ -260,7 +264,16 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 	sub.TX, excessTX, unreportedTX = truncateDeclaration(sub.TX, limit)
 	sub.RX, excessRX, unreportedRX = truncateDeclaration(sub.RX, limit)
 
-	ack, unreported := r.subscribeLocked(id, sub, excessTX, excessRX, time.Now())
+	var ack control.SubAck
+	var unreported int
+	for {
+		snap, degraded, epoch := r.positionsWithEpoch()
+		var stable bool
+		ack, unreported, stable = r.subscribeLocked(id, sub, excessTX, excessRX, snap, degraded, epoch, time.Now())
+		if stable {
+			break
+		}
+	}
 	unreported += unreportedTX + unreportedRX
 	ack.RejectedTruncated = unreported > 0
 
@@ -280,15 +293,17 @@ func (r *Router) Subscribe(id SessionID, sub control.Sub) control.SubAck {
 // 拆出来不是为了好看：调用方要在锁外记一条日志，而 `defer r.mu.Unlock()` 会
 // 让函数体里任何一句日志都落在锁内。把锁的范围变成一个函数，是这里唯一一种
 // 不依赖"defer 是 LIFO、所以这两条的注册顺序有讲究"这类细节的写法。
-func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32, now time.Time) (control.SubAck, int) {
+func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excessRX []uint32, snap fsdfeed.Snapshot, degraded bool, epoch uint64, now time.Time) (control.SubAck, int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	snap, degraded := r.positionsLocked()
+	if r.locatorEpoch != epoch {
+		return control.SubAck{}, 0, false
+	}
 
 	ack := control.SubAck{RX: []uint32{}, TX: []uint32{}, Rejected: []uint32{}, RejectedXC: [][2]uint32{}}
 	s, ok := r.sessions[id]
 	if !ok {
-		return ack, 0
+		return ack, 0, true
 	}
 
 	// 先把旧的索引全部摘掉，再按新声明重建。
@@ -372,7 +387,7 @@ func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excess
 		unreported = len(ack.Rejected) - maxRejected
 		ack.Rejected = ack.Rejected[:maxRejected]
 	}
-	return ack, unreported
+	return ack, unreported, true
 }
 
 // Listeners 返回订阅了该频率的会话。
@@ -394,15 +409,21 @@ func (r *Router) Listeners(freq uint32) []*Session {
 // MayTransmit 报告该会话有没有声明在这个频率上发送。
 // 这是上行包的第一道校验：没声明就丢弃，否则任何人都能往任意频率喊话。
 func (r *Router) MayTransmit(id SessionID, freq uint32) bool {
-	snap, degraded := r.positions()
-	r.mu.RLock()
-	s, ok := r.sessions[id]
-	r.mu.RUnlock()
-	if !ok {
-		return false
+	for {
+		snap, degraded, epoch := r.positionsWithEpoch()
+		r.mu.RLock()
+		if r.locatorEpoch != epoch {
+			r.mu.RUnlock()
+			continue
+		}
+		s, ok := r.sessions[id]
+		r.mu.RUnlock()
+		if !ok {
+			return false
+		}
+		_, declared := s.subs.Load().tx[freq]
+		return declared && s.allowsTX(freq, snap, degraded, time.Now())
 	}
-	_, ok = s.subs.Load().tx[freq]
-	return ok && s.allowsTX(freq, snap, degraded, time.Now())
 }
 
 // SessionCount 返回当前登记的会话数。
