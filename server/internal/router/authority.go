@@ -3,6 +3,7 @@ package router
 import (
 	"time"
 
+	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
 )
 
@@ -54,7 +55,12 @@ func (r *Router) ReconcileAuthority() {
 	for {
 		snap, degraded, epoch := r.positionsWithEpoch()
 		now := time.Now()
-		var changed []*Session
+		type change struct {
+			session  *Session
+			kind     string
+			revision uint64
+		}
+		var changed []change
 		r.mu.Lock()
 		if r.locatorEpoch != epoch {
 			r.mu.Unlock()
@@ -62,27 +68,44 @@ func (r *Router) ReconcileAuthority() {
 		}
 		for _, s := range r.sessions {
 			old := s.subs.Load()
-			if len(old.tx) == 0 {
+			if len(old.tx) != 0 {
+				allowed := true
+				for f := range old.tx {
+					if !s.allowsTX(f, snap, degraded, now) {
+						allowed = false
+						break
+					}
+				}
+				if !allowed {
+					r.bumpXC(old.xc, -1)
+					s.subs.Store(&subs{rx: old.rx, tx: map[uint32]struct{}{}, requestedTX: old.requestedTX, replayPending: len(old.requestedTX) > 0})
+					revision := s.subRevision.Add(1)
+					s.lastLossRevision.Store(revision)
+					changed = append(changed, change{s, control.KindAuthorityLost, revision})
+				}
 				continue
 			}
-			allowed := true
-			for f := range old.tx {
-				if !s.allowsTX(f, snap, degraded, now) {
-					allowed = false
+			if !old.replayPending {
+				continue
+			}
+			eligible := false
+			for f := range old.requestedTX {
+				if s.allowsTX(f, snap, degraded, now) {
+					eligible = true
 					break
 				}
 			}
-			if allowed {
-				continue
+			if eligible && !old.restoreNotified {
+				s.subs.Store(&subs{rx: old.rx, tx: old.tx, requestedTX: old.requestedTX, replayPending: true, restoreNotified: true})
+				changed = append(changed, change{s, control.KindAuthorityRestored, s.subRevision.Add(1)})
+			} else if !eligible && old.restoreNotified {
+				s.subs.Store(&subs{rx: old.rx, tx: old.tx, requestedTX: old.requestedTX, replayPending: true})
+				s.subRevision.Add(1)
 			}
-			r.bumpXC(old.xc, -1)
-			next := &subs{rx: old.rx, tx: map[uint32]struct{}{}}
-			s.subs.Store(next)
-			changed = append(changed, s)
 		}
 		r.mu.Unlock()
-		for _, s := range changed {
-			go s.authorityLost()
+		for _, c := range changed {
+			go c.session.authorityChange(c.kind, c.revision)
 		}
 		return
 	}

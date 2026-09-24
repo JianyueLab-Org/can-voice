@@ -178,6 +178,34 @@ pub struct VoiceClient {
     /// 和通道一起建的那个接收端，留给**第一次** [`VoiceClient::events`]。见那里。
     first_events: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<Event>>>,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
+    injected_audio: std::sync::Arc<InjectedAudio>,
+}
+
+pub(crate) const MAX_INJECTED_AUDIO_SAMPLES: usize =
+    crate::rx::decode::FRAME_SAMPLES * crate::tx::capture::MAX_BUFFERED_FRAMES;
+
+#[derive(Debug, Default)]
+pub(crate) struct InjectedAudio {
+    pending: std::sync::Mutex<Vec<i16>>,
+}
+
+impl InjectedAudio {
+    fn push(&self, samples: &[i16]) {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() >= MAX_INJECTED_AUDIO_SAMPLES {
+            pending.clear();
+            pending.extend_from_slice(&samples[samples.len() - MAX_INJECTED_AUDIO_SAMPLES..]);
+        } else {
+            let excess = (pending.len() + samples.len()).saturating_sub(MAX_INJECTED_AUDIO_SAMPLES);
+            pending.drain(..excess);
+            pending.extend_from_slice(samples);
+        }
+    }
+
+    pub(crate) fn take(&self) -> Vec<i16> {
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *pending)
+    }
 }
 
 /// 上层发给后台任务的指令。内部类型。
@@ -189,8 +217,6 @@ pub(crate) enum Command {
         freq_khz: u32,
         gain: f32,
     },
-    /// 直接注入 48 kHz 单声道 PCM，绕过麦克风。
-    PushAudio(Vec<i16>),
     /// 换录音 / 播放设备。
     Devices {
         input: Option<String>,
@@ -232,7 +258,14 @@ impl VoiceClient {
         .await?;
 
         let (client, events_tx, cmd_rx) = Self::wired();
-        tokio::spawn(crate::pump::run(cfg, link, events_tx, cmd_rx));
+        let injected_audio = std::sync::Arc::clone(&client.injected_audio);
+        tokio::spawn(crate::pump::run(
+            cfg,
+            link,
+            events_tx,
+            cmd_rx,
+            injected_audio,
+        ));
         Ok(client)
     }
 
@@ -250,6 +283,7 @@ impl VoiceClient {
             events_tx: events_tx.clone(),
             first_events: std::sync::Mutex::new(Some(first)),
             commands: cmd_tx,
+            injected_audio: std::sync::Arc::new(InjectedAudio::default()),
         };
         (client, events_tx, cmd_rx)
     }
@@ -276,7 +310,7 @@ impl VoiceClient {
     /// 它的音频是 TTS 合成出来的。照样要按 [`Self::set_transmitting`] 开关 PTT
     /// ——序号、首帧尾帧、扇出到每个 TX 频率，走的是同一条路。
     pub fn push_audio(&self, pcm48: &[i16]) {
-        let _ = self.commands.send(Command::PushAudio(pcm48.to_vec()));
+        self.injected_audio.push(pcm48);
     }
 
     /// 换录音 / 播放设备。`None` 是跟系统默认。
@@ -334,6 +368,55 @@ async fn resolve(server: &str) -> Result<std::net::SocketAddr, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pushed_audio_does_not_accumulate_in_the_control_command_channel() {
+        let (client, _events, mut commands) = VoiceClient::wired();
+        for _ in 0..128 {
+            client.push_audio(&[1; 960]);
+        }
+        client.set_transmitting(true);
+        client.set_subscription(Sub {
+            tx: vec![118_000],
+            ..Default::default()
+        });
+
+        assert!(
+            matches!(commands.try_recv(), Ok(Command::Transmit(true))),
+            "audio must stay out of the unbounded control channel"
+        );
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::Declare(sub)) if sub.tx == [118_000]
+        ));
+        assert!(commands.try_recv().is_err(), "only controls were queued");
+        assert_eq!(client.injected_audio.take(), vec![1; 3840]);
+    }
+
+    #[test]
+    fn injected_audio_keeps_the_newest_samples_in_order() {
+        let (client, _events, _commands) = VoiceClient::wired();
+        client.push_audio(&vec![1; 3840]);
+        client.push_audio(&vec![2; 1920]);
+
+        let audio = client.injected_audio.take();
+        assert_eq!(audio.len(), 3840);
+        assert_eq!(&audio[..1920], &[1; 1920]);
+        assert_eq!(&audio[1920..], &[2; 1920]);
+        assert!(client.injected_audio.take().is_empty());
+    }
+
+    #[test]
+    fn oversized_injected_audio_keeps_only_its_tail() {
+        let (client, _events, _commands) = VoiceClient::wired();
+        let audio: Vec<i16> = (0..4000).collect();
+        client.push_audio(&audio);
+
+        let queued = client.injected_audio.take();
+        assert_eq!(queued.len(), 3840);
+        assert_eq!(queued.first(), Some(&160));
+        assert_eq!(queued.last(), Some(&3999));
+    }
 
     /// 编译期契约：公开 API 里不得出现 join/leave/channel。
     ///

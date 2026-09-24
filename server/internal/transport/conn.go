@@ -259,11 +259,8 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 	}()
 
 	cw := &controlWriter{st: st}
-	sess.SetNotifyAuthorityLost(func() {
-		b, err := control.Encode(&control.Notice{Kind: control.KindAuthorityLost})
-		if err == nil {
-			_ = cw.write(b)
-		}
+	sess.SetNotifyAuthorityChange(func(kind string, revision uint64) {
+		_ = cw.writeAuthorityNotice(sess, kind, revision)
 	})
 	sess.SetNotifyTalker(func(speaker router.SessionID, cid string, freq uint32) {
 		out, err := control.Encode(&control.Notice{
@@ -667,35 +664,17 @@ func readControl(st quic.Stream, cw *controlWriter, r *router.Router, sess *rout
 		}
 		switch v := m.(type) {
 		case *control.Sub:
-			ack := r.Subscribe(sess.ID, *v)
+			ack, err := cw.subscribe(r, sess, *v)
 			slog.Debug("subscription replaced", "session", sess.ID,
 				"rx", len(ack.RX), "tx", len(ack.TX),
 				"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC))
-			out, err := control.Encode(&ack)
 			if err != nil {
-				// 这条 SUB **已经生效了**，而它的回执发不出去。以前这里是
-				// `if err == nil` 一笔带过，于是走到外层那条 defer 的
-				// CloseNormal——实测的样子是 `Application error 0x0`、reason 为空、
-				// 日志只有一行 `session closed dropped=0`。而码 0 的意思是
-				// "你可以重连"，客户端于是重连、重放同一份 SUB，再一次静默失败：
-				// 两端都没有一个字说出发生了什么的死循环。
-				slog.Error("cannot encode the SUBACK for a subscription that already took effect",
-					"session", sess.ID, "cid", sess.CID,
-					"rx", len(ack.RX), "tx", len(ack.TX),
-					"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC),
-					"error", err)
-				return errAckUndeliverable
-			}
-			if err := cw.write(out); err != nil {
-				if len(out) > control.MaxFrame {
-					// 同上，另一半：编得出来但超过帧上限。声明有了上界之后这条路应当
-					// 不可达（声明本身有上界，maxRejected 和 maxXCPairs 又各自
-					// 封住了回报），**但防线要留着，而且要出声**——不可达是一个
-					// 会被下一次改动悄悄推翻的结论。
-					slog.Error("the SUBACK for a subscription that already took effect is too large to send",
-						"session", sess.ID, "cid", sess.CID, "bytes", len(out),
-						"limit", control.MaxFrame, "error", err)
-					return errAckUndeliverable
+				if errors.Is(err, errAckUndeliverable) {
+					slog.Error("the SUBACK for an applied subscription cannot be sent",
+						"session", sess.ID, "cid", sess.CID,
+						"rx", len(ack.RX), "tx", len(ack.TX),
+						"rejected", len(ack.Rejected), "rejected_xc", len(ack.RejectedXC),
+						"error", err)
 				}
 				return err
 			}
@@ -725,14 +704,69 @@ func readControl(st quic.Stream, cw *controlWriter, r *router.Router, sess *rout
 // 而 control.WriteFrame 是"长度前缀 + 载荷"两次 Write：两个 goroutine 交错写会把
 // 这条流写成乱码，症状是对端解析失败、断开、重连，没有一处指回这里。
 type controlWriter struct {
-	mu sync.Mutex
-	st quic.Stream
+	mu               sync.Mutex
+	st               quic.Stream
+	sentLossRevision uint64
 }
 
 func (w *controlWriter) write(b []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return writeControl(w.st, b)
+}
+
+// subscribe holds the control writer through state replacement and its ACK.
+// A concurrent authority notice cannot cross that pair on the wire.
+func (w *controlWriter) subscribe(r *router.Router, sess *router.Session, sub control.Sub) (control.SubAck, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ack := r.Subscribe(sess.ID, sub)
+	out, err := control.Encode(&ack)
+	if err != nil {
+		return ack, fmt.Errorf("%w: encode: %v", errAckUndeliverable, err)
+	}
+	if err := writeControl(w.st, out); err != nil {
+		if len(out) > control.MaxFrame {
+			return ack, fmt.Errorf("%w: %d-byte frame exceeds %d-byte limit: %v", errAckUndeliverable, len(out), control.MaxFrame, err)
+		}
+		return ack, err
+	}
+	return ack, nil
+}
+
+func (w *controlWriter) writeAuthorityNotice(sess *router.Session, kind string, revision uint64) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if err := w.flushAuthorityLossLocked(sess); err != nil {
+		return err
+	}
+	if kind == control.KindAuthorityLost {
+		return nil
+	}
+	if sess.SubscriptionRevision() != revision {
+		return nil
+	}
+	b, err := control.Encode(&control.Notice{Kind: kind})
+	if err != nil {
+		return err
+	}
+	return writeControl(w.st, b)
+}
+
+func (w *controlWriter) flushAuthorityLossLocked(sess *router.Session) error {
+	revision := sess.LastAuthorityLossRevision()
+	if revision <= w.sentLossRevision {
+		return nil
+	}
+	b, err := control.Encode(&control.Notice{Kind: control.KindAuthorityLost})
+	if err != nil {
+		return err
+	}
+	if err := writeControl(w.st, b); err != nil {
+		return err
+	}
+	w.sentLossRevision = revision
+	return nil
 }
 
 // txDeniedEvery 是同一个频率上两条 tx_denied 之间的最小间隔。

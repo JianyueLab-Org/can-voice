@@ -102,9 +102,10 @@ type Notice struct {
 
 // Notice 的 Kind 取值。
 const (
-	KindTxDenied         = "tx_denied"
-	KindAuthorityLost    = "authority_lost"
-	KindRangeUnavailable = "range_unavailable"
+	KindTxDenied          = "tx_denied"
+	KindAuthorityLost     = "authority_lost"
+	KindAuthorityRestored = "authority_restored"
+	KindRangeUnavailable  = "range_unavailable"
 	// KindTalker：某个会话开始对这个听众说话。每个听众对每个发言者只发一次。
 	KindTalker = "talker"
 	// **没有 sub_rejected，而且不该有。** 被拒的订阅走 SUBACK 的 Rejected /

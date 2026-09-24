@@ -3,6 +3,7 @@ package router
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/JianyueLab-Org/can-voice/server/internal/control"
 	"github.com/JianyueLab-Org/can-voice/server/internal/fsdfeed"
@@ -413,6 +414,53 @@ func TestFanoutSkipsListenersOutOfRange(t *testing.T) {
 	}
 	if n != 0 || len(b.got) != 0 {
 		t.Fatalf("delivered = %d, listener got %d — 480 NM apart with 40 NM of range must not be forwarded", n, len(b.got))
+	}
+}
+
+func TestFanoutFiltersDedicatedATISByStationPosition(t *testing.T) {
+	r := New()
+	station := r.Add(SessionOpts{
+		CID: "9000", Role: "atis", Station: "ZSPD_ATIS",
+		TXGrant: []uint32{118500}, GrantExpires: time.Now().Add(time.Minute),
+		MaxTX: 1, MaxRX: 4,
+	})
+	listener := newRecorder(t, r, "1001")
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{
+		ByCallsign: map[string]fsdfeed.Position{
+			"ZSPD_ATIS": {
+				Callsign: "ZSPD_ATIS", CID: "7000", Known: true,
+				Lat: 30, Lon: 120, RadiusNM: 40, IsATC: true, IsATIS: true,
+				FrequencyKHz: 118500,
+			},
+		},
+		ByCID: map[string]fsdfeed.Position{
+			"1001": airborne("CCA2", "1001", 38, 120, 20),
+		},
+	}})
+	ack := r.Subscribe(station.ID, control.Sub{TX: []uint32{118500}})
+	if len(ack.TX) != 1 {
+		t.Fatalf("ATIS transmit grant = %v, want [118500]", ack.TX)
+	}
+	r.Subscribe(listener.sess.ID, control.Sub{RX: []uint32{118500}})
+
+	n, err := r.Fanout(station.ID, packet(118500, 1, 0xAA))
+	if err != nil {
+		t.Fatalf("Fanout: %v", err)
+	}
+	if n != 0 || len(listener.got) != 0 {
+		t.Fatalf("delivered = %d, listener got %d packets; ATIS station is about 480 NM away with 40 NM radius", n, len(listener.got))
+	}
+}
+
+func TestLookupATISRequiresATISStationRecord(t *testing.T) {
+	station := &Session{CID: "9000", Role: "atis", Station: "ZSPD_ATIS"}
+	snap := fsdfeed.Snapshot{ByCallsign: map[string]fsdfeed.Position{
+		"ZSPD_ATIS": {Callsign: "ZSPD_ATIS", CID: "7000", Known: true, IsATC: true},
+	}, ByCID: map[string]fsdfeed.Position{
+		"9000": airborne("CCA1", "9000", 30, 120, 20),
+	}}
+	if _, ok := lookup(snap, station); ok {
+		t.Fatal("non-ATIS station record must leave range position unknown")
 	}
 }
 

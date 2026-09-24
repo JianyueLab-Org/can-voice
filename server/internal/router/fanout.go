@@ -246,6 +246,10 @@ func positionsFromLocator(l Locator) (fsdfeed.Snapshot, bool) {
 // lookup 找一个会话的位置。观察员模式下 Follow 指向它跟随的飞机，
 // 因为观察员自己没有 FSD 连接（spec 7.3）。
 func lookup(s fsdfeed.Snapshot, sess *Session) (fsdfeed.Position, bool) {
+	if sess.Role == "atis" {
+		p, ok := s.ByCallsign[sess.Station]
+		return p, ok && p.Callsign == sess.Station && p.IsATIS
+	}
 	if sess.Follow != "" {
 		p, ok := s.ByCallsign[sess.Follow]
 		return p, ok

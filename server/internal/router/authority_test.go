@@ -163,6 +163,112 @@ func TestReconcileAuthorityRemovesTXAndXCButKeepsRX(t *testing.T) {
 	}
 }
 
+func TestReconcileAuthorityRequestsReplayAfterRecovery(t *testing.T) {
+	r := New()
+	live := stubLocator{snap: fsdfeed.Snapshot{ByCallsign: map[string]fsdfeed.Position{
+		"ZSPD_TWR": {CID: "1000", Callsign: "ZSPD_TWR", IsATC: true, FrequencyKHz: 118500},
+	}}}
+	r.SetLocator(live)
+	s := r.Add(SessionOpts{CID: "1000", Role: "controller", Callsign: "ZSPD_TWR", TXGrant: []uint32{118500}, GrantExpires: time.Now().Add(time.Minute), MaxTX: 1, MaxRX: 4})
+	notices := make(chan string, 4)
+	s.SetNotifyAuthorityChange(func(kind string, _ uint64) { notices <- kind })
+	r.Subscribe(s.ID, control.Sub{RX: []uint32{121800}, TX: []uint32{118500}})
+	r.SetLocator(stubLocator{degraded: true})
+	r.ReconcileAuthority()
+	select {
+	case got := <-notices:
+		if got != control.KindAuthorityLost {
+			t.Fatalf("loss notice = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("loss notice missing")
+	}
+	r.SetLocator(live)
+	r.ReconcileAuthority()
+	select {
+	case got := <-notices:
+		if got != control.KindAuthorityRestored {
+			t.Fatalf("recovery notice = %q", got)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("recovery replay notice missing")
+	}
+	if r.MayTransmit(s.ID, 118500) {
+		t.Fatal("recovery enabled TX before a full SUB replay")
+	}
+	r.ReconcileAuthority()
+	select {
+	case <-notices:
+		t.Fatal("duplicate recovery notice")
+	case <-time.After(20 * time.Millisecond):
+	}
+	ack := r.Subscribe(s.ID, control.Sub{RX: []uint32{121800}, TX: []uint32{118500}})
+	if len(ack.TX) != 1 || ack.TX[0] != 118500 || !r.MayTransmit(s.ID, 118500) {
+		t.Fatalf("full SUB did not restore TX: %+v", ack)
+	}
+}
+
+func TestDegradedSubscribeKeepsBoundedReplayIntent(t *testing.T) {
+	r := New()
+	r.SetLocator(stubLocator{degraded: true})
+	s := r.Add(SessionOpts{CID: "1000", Role: "pilot", TXGrant: []uint32{118500}, GrantExpires: time.Now().Add(time.Minute), MaxTX: 1, MaxRX: 1})
+	notices := make(chan string, 1)
+	s.SetNotifyAuthorityChange(func(kind string, _ uint64) { notices <- kind })
+	tx := make([]uint32, 1000)
+	tx[0] = 118500
+	for i := 1; i < len(tx); i++ {
+		tx[i] = uint32(119000 + i*5)
+	}
+	r.Subscribe(s.ID, control.Sub{TX: tx})
+	if got := len(s.subs.Load().requestedTX); got > declaredSlack {
+		t.Fatalf("retained %d requested frequencies, limit %d", got, declaredSlack)
+	}
+	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{
+		"1000": {CID: "1000", Callsign: "CCA100"},
+	}}})
+	r.ReconcileAuthority()
+	select {
+	case got := <-notices:
+		if got != control.KindAuthorityRestored {
+			t.Fatalf("recovery notice = %q", got)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("recovery replay notice for rejected SUB missing")
+	}
+}
+
+func TestRecoveryNoticeRearmsAfterFeedDropsBeforeReplay(t *testing.T) {
+	r := New()
+	live := stubLocator{snap: fsdfeed.Snapshot{ByCallsign: map[string]fsdfeed.Position{
+		"ZSPD_TWR": {CID: "1000", Callsign: "ZSPD_TWR", IsATC: true, FrequencyKHz: 118500},
+	}}}
+	r.SetLocator(live)
+	s := r.Add(SessionOpts{CID: "1000", Role: "controller", Callsign: "ZSPD_TWR", TXGrant: []uint32{118500}, GrantExpires: time.Now().Add(time.Minute), MaxTX: 1, MaxRX: 1})
+	notices := make(chan string, 4)
+	s.SetNotifyAuthorityChange(func(kind string, _ uint64) { notices <- kind })
+	r.Subscribe(s.ID, control.Sub{TX: []uint32{118500}})
+	r.SetLocator(stubLocator{degraded: true})
+	r.ReconcileAuthority()
+	<-notices
+	r.SetLocator(live)
+	r.ReconcileAuthority()
+	if got := <-notices; got != control.KindAuthorityRestored {
+		t.Fatalf("first recovery notice = %q", got)
+	}
+	r.SetLocator(stubLocator{degraded: true})
+	r.ReconcileAuthority()
+	r.SetLocator(live)
+	r.ReconcileAuthority()
+	select {
+	case got := <-notices:
+		if got != control.KindAuthorityRestored {
+			t.Fatalf("second recovery notice = %q", got)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("second recovery notice missing")
+	}
+}
+
 func TestGrantExpiryAutomaticallyClearsEffectiveTX(t *testing.T) {
 	r := New()
 	r.SetLocator(stubLocator{snap: fsdfeed.Snapshot{ByCID: map[string]fsdfeed.Position{

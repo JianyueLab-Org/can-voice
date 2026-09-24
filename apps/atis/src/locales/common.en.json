@@ -63,6 +63,7 @@
   "notice": {
     "audio_unavailable": "Sound device lost (unplugged?), reopening: you can neither hear nor transmit right now",
     "authority_lost": "Transmit permission was revoked; reception remains available.",
+    "authority_restored": "Transmit permission returned; the radio is reconnecting. Press PTT again when ready.",
     "range_unavailable": "Position service unavailable, range filtering is off: this frequency is audible network-wide right now",
     "unknown_message": "The server did not understand a frame from this client ({reason}); the client may need an update",
     "rate_limited": "Uplink audio exceeded the server's rate limit and the excess was dropped: this is usually a client bug (a stuck PTT). Reconnect; if it keeps happening, send the log in.",

@@ -14,13 +14,14 @@
 //! **混音器每一拍都出恰好一帧**，不管有没有人在说话——声卡那头每 20 毫秒都要一帧。
 
 use crate::audio::{AudioIo, PlaybackStats};
-use crate::client::{Command, Config, Event};
+use crate::client::{Command, Config, Event, InjectedAudio};
 use crate::conn::{self, Disposition, Link, LinkState, ReconnectPolicy};
 use crate::rx::mixer::{RxEvent, RxMixer};
 use crate::session::{Limits, SubscriptionState};
 use crate::tx::TxPipeline;
 use can_voice_proto::control::{self, Message};
 use can_voice_proto::wire::Header;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// 主循环的节拍，等于一个 Opus 帧。
@@ -67,11 +68,71 @@ enum Outcome {
     Dropped(Disposition),
 }
 
+#[derive(Default)]
+struct SessionControls {
+    ptt: bool,
+    mic_gain: f32,
+    speaker_gain: f32,
+    gains: BTreeMap<u32, f32>,
+}
+
+impl SessionControls {
+    fn new() -> Self {
+        Self {
+            mic_gain: 1.0,
+            speaker_gain: 1.0,
+            ..Self::default()
+        }
+    }
+
+    fn apply(&mut self, command: &Command) {
+        match command {
+            Command::Transmit(on) => self.ptt = *on,
+            Command::Volume { freq_khz, gain } => {
+                self.gains.insert(*freq_khz, *gain);
+            }
+            Command::Master { mic, speaker } => {
+                self.mic_gain = *mic;
+                self.speaker_gain = *speaker;
+            }
+            _ => {}
+        }
+    }
+
+    fn restore_gains(&self, mixer: &mut RxMixer) {
+        for (&freq_khz, &gain) in &self.gains {
+            mixer.set_gain(freq_khz, gain);
+        }
+    }
+}
+
+fn drain_queued(
+    cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    subs: &mut SubscriptionState,
+    controls: &mut SessionControls,
+    audio: Option<&AudioIo>,
+) -> bool {
+    while let Ok(command) = cmds.try_recv() {
+        match command {
+            Command::Declare(sub) => subs.declare(sub),
+            Command::Devices { input, output } => {
+                if let Some(io) = audio {
+                    io.set_devices(input.as_deref(), output.as_deref());
+                }
+            }
+            Command::Shutdown => return false,
+            other => controls.apply(&other),
+        }
+    }
+    !cmds.is_closed()
+}
+
 pub(crate) async fn run(
     cfg: Config,
     first: Link,
     events: tokio::sync::broadcast::Sender<Event>,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<Command>,
+    injected_audio: std::sync::Arc<InjectedAudio>,
 ) {
     let mut policy = ReconnectPolicy::new();
     // 第一次拨号已经由 `VoiceClient::connect` 做掉了，而且它真的拿到了 READY。
@@ -98,6 +159,7 @@ pub(crate) async fn run(
     };
 
     let mut subs = SubscriptionState::new();
+    let mut controls = SessionControls::new();
     let mut state = LinkState::Connecting;
     let mut link = Some(first);
 
@@ -120,10 +182,22 @@ pub(crate) async fn run(
                     }
                     Err(e) => {
                         tracing::warn!(error = %e, "voice connect failed");
+                        if let Some(reason) = dial_failure(&e) {
+                            let _ = events.send(Event::Refused { reason });
+                            emit_state(&events, &mut state, LinkState::Offline);
+                            return;
+                        }
                         continue;
                     }
                 }
             }
+        };
+
+        if !drain_queued(&mut cmds, &mut subs, &mut controls, audio.as_ref()) {
+            l.conn
+                .close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
+            emit_state(&events, &mut state, LinkState::Offline);
+            return;
         };
 
         let limits = Limits {
@@ -136,7 +210,16 @@ pub(crate) async fn run(
         let _ = events.send(Event::Limits(limits));
         emit_state(&events, &mut state, LinkState::Online);
 
-        let outcome = pump(l, &mut subs, &events, &mut cmds, audio.as_ref()).await;
+        let outcome = pump(
+            l,
+            &mut subs,
+            &events,
+            &mut cmds,
+            audio.as_ref(),
+            &mut controls,
+            &injected_audio,
+        )
+        .await;
         subs.on_disconnected();
 
         match outcome {
@@ -176,6 +259,13 @@ pub(crate) async fn run(
     }
 }
 
+fn dial_failure(error: &conn::Error) -> Option<conn::RefusedReason> {
+    match error {
+        conn::Error::Refused(reason) => Some(reason.clone()),
+        _ => None,
+    }
+}
+
 /// 只在状态真的变了的时候发事件。
 ///
 /// 每轮都发一遍会把事件流灌满，而上层没法从中分辨"状态变了"和"心跳到了"。
@@ -210,6 +300,27 @@ async fn dial(cfg: &Config) -> Result<Link, conn::Error> {
     .await
 }
 
+enum PumpInput {
+    Command(Option<Command>),
+    Control(Option<Result<Message, conn::Error>>),
+    Datagram(Result<bytes::Bytes, quinn::ConnectionError>),
+    Tick,
+}
+
+async fn next_pump_input(
+    cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
+    control: &mut tokio::sync::mpsc::Receiver<Result<Message, conn::Error>>,
+    datagram: impl std::future::Future<Output = Result<bytes::Bytes, quinn::ConnectionError>>,
+    ticker: &mut tokio::time::Interval,
+) -> PumpInput {
+    tokio::select! {
+        cmd = cmds.recv() => PumpInput::Command(cmd),
+        msg = control.recv() => PumpInput::Control(msg),
+        dg = datagram => PumpInput::Datagram(dg),
+        _ = ticker.tick() => PumpInput::Tick,
+    }
+}
+
 /// 一条连接活着期间的主循环。
 async fn pump(
     link: Link,
@@ -217,6 +328,8 @@ async fn pump(
     events: &tokio::sync::broadcast::Sender<Event>,
     cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     audio: Option<&AudioIo>,
+    controls: &mut SessionControls,
+    injected_audio: &InjectedAudio,
 ) -> Outcome {
     let Link {
         conn: quic,
@@ -230,6 +343,7 @@ async fn pump(
     let mut control = conn::spawn_control_reader(control_recv);
 
     let mut mixer = RxMixer::new();
+    controls.restore_gains(&mut mixer);
     let mut tx = match TxPipeline::new() {
         Ok(t) => Some(t),
         Err(e) => {
@@ -237,9 +351,9 @@ async fn pump(
             None
         }
     };
-    let mut ptt = false;
-    let mut mic_gain = 1.0f32;
-    let mut speaker_gain = 1.0f32;
+    if let Some(tx) = tx.as_mut() {
+        tx.push(&injected_audio.take());
+    }
 
     let mut ticker = tokio::time::interval(TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -262,16 +376,13 @@ async fn pump(
             }
         }
 
-        tokio::select! {
-            cmd = cmds.recv() => match cmd {
+        match next_pump_input(cmds, &mut control, quic.read_datagram(), &mut ticker).await {
+            PumpInput::Command(cmd) => match cmd {
                 Some(Command::Declare(sub)) => subs.declare(sub),
-                Some(Command::Transmit(on)) => ptt = on,
-                Some(Command::Volume { freq_khz, gain }) => mixer.set_gain(freq_khz, gain),
-                // 给没有麦克风的调用方用（服务端 ATIS 机器人的音频来自 TTS）。
-                Some(Command::PushAudio(pcm)) => {
-                    if let Some(t) = tx.as_mut() {
-                        t.push(&pcm);
-                    }
+                Some(cmd @ Command::Transmit(_)) => controls.apply(&cmd),
+                Some(Command::Volume { freq_khz, gain }) => {
+                    mixer.set_gain(freq_khz, gain);
+                    controls.apply(&Command::Volume { freq_khz, gain });
                 }
                 // 换设备**立刻生效**，不必等到下一次连接：重建在音频线程上做，
                 // 因为 `cpal::Stream` 是 `!Send`。
@@ -280,23 +391,21 @@ async fn pump(
                         io.set_devices(input.as_deref(), output.as_deref());
                     }
                 }
-                Some(Command::Master { mic, speaker }) => {
-                    mic_gain = mic;
-                    speaker_gain = speaker;
-                }
+                Some(cmd @ Command::Master { .. }) => controls.apply(&cmd),
                 Some(Command::Shutdown) | None => {
                     quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
                     return Outcome::Shutdown;
                 }
             },
-
-            msg = control.recv() => match msg {
+            PumpInput::Control(msg) => match msg {
                 Some(Ok(Message::SubAck(ack))) => on_ack(subs, events, subscription_epoch, ack),
                 Some(Ok(Message::Pong(p))) => {
                     let now = epoch.elapsed().as_millis() as i64;
                     rtt_ms = now.saturating_sub(p.t).clamp(0, u32::MAX as i64) as u32;
                 }
-                Some(Ok(Message::Notice(n))) => on_notice(subs, events, &mut ptt, n),
+                Some(Ok(Message::Notice(n))) => {
+                    on_notice(subs, events, &mut controls.ptt, n);
+                }
                 Some(Ok(Message::Bye(b))) => {
                     // BYE **会丢**——真正丢不掉的是关闭码与原因串，它们和关闭
                     // 原子地一起送达。所以这里只记日志，处置交给 `drop_reason`。
@@ -313,8 +422,7 @@ async fn pump(
                     return Outcome::Dropped(drop_reason(&quic));
                 }
             },
-
-            dg = quic.read_datagram() => match dg {
+            PumpInput::Datagram(dg) => match dg {
                 Ok(bytes) => match Header::parse(&bytes) {
                     Ok((h, opus)) => {
                         counters.received += 1;
@@ -332,8 +440,7 @@ async fn pump(
                     return Outcome::Dropped(conn::classify(&e));
                 }
             },
-
-            _ = ticker.tick() => {
+            PumpInput::Tick => {
                 // **声卡掉了要说一句。** 只在日志里 warn 一行的后果是
                 // "能连上、状态绿、说话没人听见"，而拔一次耳机就是这样。
                 // 恢复也要说，那一条会把前一条撤掉（见 Snapshot::apply）。
@@ -344,7 +451,10 @@ async fn pump(
                         let (kind, reason) = if ok {
                             ("audio_restored", "the audio devices are open again")
                         } else {
-                            ("audio_unavailable", "the audio devices went away; reopening")
+                            (
+                                "audio_unavailable",
+                                "the audio devices went away; reopening",
+                            )
                         };
                         let _ = events.send(Event::Notice {
                             kind: kind.into(),
@@ -357,7 +467,7 @@ async fn pump(
                 // 接收：混音器每一拍都出恰好一帧，直接送去播放。
                 let (mut pcm, rx_events) = mixer.tick();
                 if let Some(io) = audio {
-                    scale_pcm(&mut pcm, speaker_gain);
+                    scale_pcm(&mut pcm, controls.speaker_gain);
                     io.play(&pcm);
                 }
                 for e in rx_events {
@@ -366,14 +476,15 @@ async fn pump(
 
                 // 发送：先把采集到的喂进去，再看这一拍有没有一帧要发。
                 if let Some(t) = tx.as_mut() {
+                    t.push(&injected_audio.take());
                     if let Some(io) = audio {
                         let mut captured = io.take_capture();
                         if !captured.is_empty() {
-                            scale_pcm(&mut captured, mic_gain);
+                            scale_pcm(&mut captured, controls.mic_gain);
                             t.push(&captured);
                         }
                     }
-                    if let Some(frame) = t.tick(ptt) {
+                    if let Some(frame) = t.tick(controls.ptt) {
                         // **每一个 TX 频率各发一份，每份带同一个 `seq`。** 服务端
                         // 检查不了这件事：只发一份的客户端在另一个频率上完全静默，
                         // 而两端日志都正常。
@@ -394,7 +505,10 @@ async fn pump(
                 if last_ping.elapsed() >= PING_EVERY {
                     last_ping = Instant::now();
                     let t = epoch.elapsed().as_millis() as i64;
-                    if conn::write_msg(&mut control_send, &Message::Ping(control::Ping { t })).await.is_err() {
+                    if conn::write_msg(&mut control_send, &Message::Ping(control::Ping { t }))
+                        .await
+                        .is_err()
+                    {
                         return Outcome::Dropped(drop_reason(&quic));
                     }
                     // **掉线必须自己解释。** RTT 和收发计数正是区分"上行真的扛不住"
@@ -407,7 +521,7 @@ async fn pump(
                         playback,
                     ));
                 }
-            },
+            }
         }
     }
 }
@@ -509,11 +623,20 @@ fn on_notice(
     } else if n.kind == notice_kind::AUTHORITY_LOST {
         *ptt = false;
         subs.revoke_tx();
+        subs.request_replay();
         let _ = events.send(Event::SubscriptionAck {
             rx: subs.acknowledged().rx.clone(),
             tx: Vec::new(),
             xc: Vec::new(),
         });
+        let _ = events.send(Event::Notice {
+            kind: n.kind,
+            freq_khz: n.freq,
+            reason: n.reason,
+        });
+    } else if n.kind == notice_kind::AUTHORITY_RESTORED {
+        *ptt = false;
+        subs.request_replay();
         let _ = events.send(Event::Notice {
             kind: n.kind,
             freq_khz: n.freq,
@@ -537,6 +660,51 @@ fn on_notice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn queued_commands_do_not_starve_control_datagrams_or_audio_ticks() {
+        let (send_command, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        for _ in 0..128 {
+            send_command
+                .send(Command::Transmit(true))
+                .expect("queue command");
+        }
+        let (send_control, mut control) = tokio::sync::mpsc::channel(1);
+        send_control
+            .send(Ok(Message::Pong(control::Pong { t: 0, server_t: 0 })))
+            .await
+            .expect("queue control message");
+        let mut ticker = tokio::time::interval(TICK);
+        ticker.tick().await;
+        tokio::time::sleep(TICK).await;
+        let mut saw_control = false;
+        let mut saw_datagram = false;
+        let mut saw_tick = false;
+
+        for _ in 0..128 {
+            match next_pump_input(
+                &mut commands,
+                &mut control,
+                std::future::ready(Ok(bytes::Bytes::new())),
+                &mut ticker,
+            )
+            .await
+            {
+                PumpInput::Command(Some(Command::Transmit(true))) => {}
+                PumpInput::Control(Some(Ok(Message::Pong(_)))) => saw_control = true,
+                PumpInput::Datagram(Ok(_)) => saw_datagram = true,
+                PumpInput::Tick => saw_tick = true,
+                _ => panic!("unexpected pump input"),
+            }
+            if saw_control && saw_datagram && saw_tick {
+                break;
+            }
+        }
+
+        assert!(saw_control, "a ready control message must be processed");
+        assert!(saw_datagram, "a ready datagram must be processed");
+        assert!(saw_tick, "the ready audio tick must be processed");
+    }
 
     /// **包头解不开不是丢包。** 前者是协议漂移（对端版本不对、字段改了名），
     /// 后者是网络。两者填进同一个字段的后果是 `lost` 在正常运行里恒为 0——
@@ -578,5 +746,162 @@ mod tests {
             },
         );
         assert!(!ptt, "authority loss must force a local PTT release");
+    }
+
+    #[test]
+    fn expired_handshake_refusal_reaches_the_supervisor() {
+        assert_eq!(
+            dial_failure(&conn::Error::Refused(conn::RefusedReason::TokenExpired)),
+            Some(conn::RefusedReason::TokenExpired)
+        );
+    }
+
+    #[test]
+    fn queued_release_and_volume_changes_survive_reconnect() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut subs = SubscriptionState::new();
+        let mut controls = SessionControls::new();
+        controls.apply(&Command::Transmit(true));
+        controls.apply(&Command::Volume {
+            freq_khz: 118_000,
+            gain: 0.5,
+        });
+        controls.apply(&Command::Master {
+            mic: 0.8,
+            speaker: 0.7,
+        });
+        sender
+            .send(Command::Transmit(false))
+            .expect("queue release");
+        sender
+            .send(Command::Volume {
+                freq_khz: 118_000,
+                gain: 0.0,
+            })
+            .expect("queue mute");
+        assert!(drain_queued(&mut receiver, &mut subs, &mut controls, None));
+        assert!(!controls.ptt);
+        assert_eq!(controls.gains.get(&118_000), Some(&0.0));
+        assert_eq!((controls.mic_gain, controls.speaker_gain), (0.8, 0.7));
+    }
+
+    #[test]
+    fn held_ptt_survives_ordinary_reconnect() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut subs = SubscriptionState::new();
+        let mut controls = SessionControls::new();
+        controls.apply(&Command::Transmit(true));
+        assert!(drain_queued(&mut receiver, &mut subs, &mut controls, None));
+        assert!(controls.ptt);
+        drop(sender);
+    }
+
+    #[test]
+    fn authority_restoration_replays_subscription_without_resuming_ptt() {
+        let (events, _rx) = tokio::sync::broadcast::channel(8);
+        let mut subs = SubscriptionState::new();
+        subs.on_connected(Limits {
+            max_tx: 2,
+            max_rx: 2,
+        });
+        let wanted = control::Sub {
+            rx: vec![118_000],
+            tx: vec![118_000],
+            ..Default::default()
+        };
+        subs.declare(wanted.clone());
+        let _ = subs.take_pending();
+        let mut ptt = true;
+        on_notice(
+            &mut subs,
+            &events,
+            &mut ptt,
+            control::Notice {
+                kind: control::notice_kind::AUTHORITY_LOST.into(),
+                freq: 118_000,
+                reason: "seat changed".into(),
+                session: 0,
+                cid: String::new(),
+            },
+        );
+        assert!(!ptt);
+        on_notice(
+            &mut subs,
+            &events,
+            &mut ptt,
+            control::Notice {
+                kind: control::notice_kind::AUTHORITY_RESTORED.into(),
+                freq: 0,
+                reason: String::new(),
+                session: 0,
+                cid: String::new(),
+            },
+        );
+        assert!(subs.take_pending().is_none());
+        assert!(subs.on_ack_epoch(subs.epoch(), control::SubAck::default()));
+        assert_eq!(subs.take_pending(), Some(wanted));
+        assert!(!ptt);
+    }
+
+    #[test]
+    fn restoration_before_delayed_loss_never_keeps_ptt_or_strands_replay() {
+        let (events, _rx) = tokio::sync::broadcast::channel(8);
+        let mut subs = SubscriptionState::new();
+        subs.on_connected(Limits {
+            max_tx: 1,
+            max_rx: 1,
+        });
+        let wanted = control::Sub {
+            tx: vec![118_000],
+            ..Default::default()
+        };
+        subs.declare(wanted.clone());
+        assert_eq!(subs.take_pending(), Some(wanted.clone()));
+        assert!(subs.on_ack_epoch(
+            subs.epoch(),
+            control::SubAck {
+                tx: vec![118_000],
+                ..Default::default()
+            }
+        ));
+
+        let mut ptt = true;
+        on_notice(
+            &mut subs,
+            &events,
+            &mut ptt,
+            control::Notice {
+                kind: control::notice_kind::AUTHORITY_RESTORED.into(),
+                freq: 0,
+                reason: String::new(),
+                session: 0,
+                cid: String::new(),
+            },
+        );
+        assert!(!ptt, "restoration must be safe even when loss is delayed");
+        assert_eq!(subs.take_pending(), Some(wanted.clone()));
+        assert!(subs.on_ack_epoch(
+            subs.epoch(),
+            control::SubAck {
+                tx: vec![118_000],
+                ..Default::default()
+            }
+        ));
+
+        ptt = true; // a new explicit press after restoration
+        on_notice(
+            &mut subs,
+            &events,
+            &mut ptt,
+            control::Notice {
+                kind: control::notice_kind::AUTHORITY_LOST.into(),
+                freq: 0,
+                reason: String::new(),
+                session: 0,
+                cid: String::new(),
+            },
+        );
+        assert!(!ptt, "a delayed loss still releases a newer press");
+        assert_eq!(subs.take_pending(), Some(wanted));
     }
 }

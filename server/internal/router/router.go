@@ -192,6 +192,7 @@ func (r *Router) removeLocked(id SessionID) {
 	// 而声明它的人已经不在了。
 	r.bumpXC(old.xc, -1)
 	s.subs.Store(emptySubs())
+	s.subRevision.Add(1)
 	// cid 索引也要清，否则留下一个指向已注销会话的条目，下一次同 cid 登录
 	// 会对着它调 Close，而那个闭包捕获的是一条已经关掉的连接。
 	// 只在它确实指向这条会话时才删——顶号路径上新条目稍后才写入，
@@ -314,6 +315,10 @@ func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excess
 	r.bumpXC(old.xc, -1)
 
 	next := emptySubs()
+	next.requestedTX = make(map[uint32]struct{}, len(sub.TX))
+	for _, f := range sub.TX {
+		next.requestedTX[f] = struct{}{}
+	}
 	txLimit := s.MaxTX
 	if (s.Role == "pilot" || s.Role == "observer") && txLimit > 1 {
 		txLimit = 1
@@ -351,8 +356,10 @@ func (r *Router) subscribeLocked(id SessionID, sub control.Sub, excessTX, excess
 	var rejectedXC [][2]uint32
 	next.xc, rejectedXC = normaliseXC(sub.XC, next.tx)
 	ack.RejectedXC = append(ack.RejectedXC, rejectedXC...)
+	next.replayPending = s.MaxTX > 0 && len(next.requestedTX) > 0 && len(next.tx) == 0
 
 	s.subs.Store(next)
+	s.subRevision.Add(1)
 
 	for f := range next.rx {
 		r.index(f, id)

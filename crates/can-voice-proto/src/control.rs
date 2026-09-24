@@ -45,6 +45,8 @@ pub mod notice_kind {
     pub const RATE_LIMITED: &str = "rate_limited";
     /// A live assignment or signed TX grant was lost; RX remains active.
     pub const AUTHORITY_LOST: &str = "authority_lost";
+    /// Authority returned; the client should replay its full subscription.
+    pub const AUTHORITY_RESTORED: &str = "authority_restored";
 }
 
 /// 把 JSON 的 `null` 当成缺省值读。

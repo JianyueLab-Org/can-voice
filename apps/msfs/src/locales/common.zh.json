@@ -63,6 +63,7 @@
   "notice": {
     "audio_unavailable": "声卡不见了（拔了设备？），正在重开：现在听不见也发不出",
     "authority_lost": "发射权限已撤销，仍可继续收听。",
+    "authority_restored": "发射权限已恢复，正在重新订阅频率；准备好后请重新按下 PTT。",
     "range_unavailable": "位置服务不可用，射程过滤已关闭：现在这条频率是全网可听",
     "unknown_message": "服务端不认识客户端发的一帧（{reason}），可能需要更新客户端",
     "rate_limited": "上行语音超过了服务端的速率上限，多出来的被丢掉了：这通常是客户端的 bug（PTT 卡住），重连一次；反复出现请回传日志。",

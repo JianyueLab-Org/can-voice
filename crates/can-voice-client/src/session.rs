@@ -32,6 +32,7 @@ pub struct SubscriptionState {
     confirmed: Option<Sub>,
     /// 是否还没推给服务端。
     dirty: bool,
+    replay_pending: bool,
     connected: bool,
     epoch: u64,
     /// 服务端最近确认的内容。掉线即清空。
@@ -56,6 +57,15 @@ impl SubscriptionState {
         self.dirty = true;
     }
 
+    /// Send the latest full declaration again after authority is restored.
+    /// If a previous SUB is awaiting its ACK, replay follows that ACK.
+    pub fn request_replay(&mut self) {
+        if self.desired.is_some() {
+            self.dirty = true;
+            self.replay_pending = self.in_flight.is_some();
+        }
+    }
+
     /// 取出待发送的声明。没有待发的、或链路不可用时返回 None。
     pub fn take_pending(&mut self) -> Option<Sub> {
         if !self.connected || !self.dirty || self.in_flight.is_some() {
@@ -72,6 +82,7 @@ impl SubscriptionState {
         self.epoch = self.epoch.wrapping_add(1);
         self.connected = true;
         self.in_flight = None;
+        self.replay_pending = false;
         self.confirmed = None;
         self.acked = SubAck::default();
         self.limits = Some(limits);
@@ -85,6 +96,7 @@ impl SubscriptionState {
     pub fn on_disconnected(&mut self) {
         self.connected = false;
         self.in_flight = None;
+        self.replay_pending = false;
         self.confirmed = None;
         self.acked = SubAck::default();
         self.limits = None;
@@ -107,7 +119,8 @@ impl SubscriptionState {
         let Some(sent) = self.in_flight.take() else {
             return false;
         };
-        self.dirty = self.desired.as_ref() != Some(&sent);
+        self.dirty = self.replay_pending || self.desired.as_ref() != Some(&sent);
+        self.replay_pending = false;
         self.confirmed = Some(sent);
         self.acked = ack;
         true
@@ -237,6 +250,19 @@ mod tests {
         s.declare(sub(&[124_550]));
         assert_eq!(s.take_pending(), Some(sub(&[124_550])));
         assert!(s.take_pending().is_none());
+    }
+
+    #[test]
+    fn restore_replay_waits_for_old_ack_then_sends_full_desired_subscription() {
+        let mut state = online();
+        let wanted = sub(&[118_000]);
+        state.declare(wanted.clone());
+        assert_eq!(state.take_pending(), Some(wanted.clone()));
+        let epoch = state.epoch();
+        state.request_replay();
+        assert!(state.take_pending().is_none());
+        assert!(state.on_ack_epoch(epoch, SubAck::default()));
+        assert_eq!(state.take_pending(), Some(wanted));
     }
 
     #[test]
