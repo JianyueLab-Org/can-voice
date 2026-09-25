@@ -16,7 +16,7 @@ RUN cargo build --release -p can-voice-listen
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates libasound2 \
     && useradd --system --uid 1000 --create-home --home-dir /home/listen listen \
     && rm -rf /var/lib/apt/lists/*
 
