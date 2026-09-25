@@ -324,6 +324,7 @@ async fn next_pump_input(
 }
 
 /// 一条连接活着期间的主循环。
+#[allow(clippy::too_many_arguments)]
 async fn pump(
     link: Link,
     subs: &mut SubscriptionState,
