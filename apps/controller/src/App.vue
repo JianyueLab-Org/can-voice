@@ -89,6 +89,7 @@ interface Snapshot {
   notices: [string, number, string][];
   /** 每个频率上最近一次通话。键是频率（kHz）的十进制写法。 */
   last_talk: Record<string, { speaker: number; cid?: string; at: number }>;
+  talker_volumes: Record<string, number>;
   /** 服务端给这条链路的发射上限。没连上、掉了线是 `null`。 */
   max_tx: number | null;
   /**
@@ -376,6 +377,10 @@ function isTransmitting(r: Radio): boolean {
 function lastTalk(khz: number) {
   return snap.value?.last_talk?.[String(khz)] ?? null;
 }
+function talkerVolume(talk: { cid?: string } | null): number {
+  const cid = talk?.cid;
+  return cid ? snap.value?.talker_volumes?.[cid] ?? 100 : 100;
+}
 function isReceiving(khz: number): boolean {
   return (snap.value?.receiving?.[String(khz)]?.length ?? 0) > 0;
 }
@@ -599,8 +604,10 @@ async function act(name: string, args: Record<string, unknown>) {
             :locked="locked(r.freq_khz)"
             :transmitting="isTransmitting(r)"
             :last-talk="lastTalk(r.freq_khz)"
+            :talker-volume="talkerVolume(lastTalk(r.freq_khz))"
             :roster="feed?.roster ?? {}"
             :compact="compact"
+            @talker-volume="(volume, cid) => act('set_talker_volume', { cid, volume })"
             :transmit-allowed="mayTransmit"
             :over-tx-limit="overTxLimit(r.freq_khz)"
             :max-tx="txBudget?.max_tx ?? null"

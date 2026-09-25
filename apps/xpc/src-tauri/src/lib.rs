@@ -38,6 +38,7 @@ use can_voice_sim::csl::ModelSet;
 use can_voice_sim::traffic::{Entry, TrafficTable};
 use can_voice_sim::{bridge, xplane, Snapshot};
 use can_voice_token::TokenSource;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Manager;
@@ -84,6 +85,8 @@ pub struct Settings {
     pub mic_volume: can_voice_settings::VolumePercent,
     #[serde(default)]
     pub speaker_volume: can_voice_settings::VolumePercent,
+    #[serde(default)]
+    pub talker_volume: BTreeMap<String, can_voice_settings::VolumePercent>,
     /// 往模拟器里注入他机。**默认开**，但要能关：想只用语音不看他机的人
     /// 现在关不掉，而注入是最吃帧数的那一部分。
     #[serde(default = "yes")]
@@ -1316,6 +1319,15 @@ fn set_master_volume(app: tauri::State<'_, App>, mic: u32, speaker: u32) {
     app.voice.set_master_volume(mic, speaker);
 }
 
+#[tauri::command]
+fn set_talker_volume(app: tauri::State<'_, App>, cid: String, volume: u32) {
+    let volume = can_voice_settings::VolumePercent::new(volume);
+    app.update_settings(|settings| {
+        settings.talker_volume.insert(cid.clone(), volume);
+    });
+    app.voice.set_talker_volume(cid, volume.gain());
+}
+
 /// 换一组 PTT 绑定。
 ///
 /// **监听是懒起的，而且起了就停不掉**（`rdev::listen` 没有 stop）。所以只有
@@ -2137,6 +2149,9 @@ pub fn run() {
             let saved = app.settings_snapshot();
             app.voice
                 .set_master_volume(saved.mic_volume.get(), saved.speaker_volume.get());
+            for (cid, volume) in &saved.talker_volume {
+                app.voice.set_talker_volume(cid.clone(), volume.gain());
+            }
             app.install_ptt(saved.ptt);
             let appearance = app.settings_snapshot().appearance;
             if let Some(window) = handle.get_webview_window("main") {
@@ -2188,6 +2203,7 @@ pub fn run() {
             audio_devices,
             set_transmitting,
             set_master_volume,
+            set_talker_volume,
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,

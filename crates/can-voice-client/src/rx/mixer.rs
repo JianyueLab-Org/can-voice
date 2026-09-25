@@ -16,6 +16,7 @@
 //! **任何一条"这一拍没东西可放"的路径都必须产出 960 个采样**，
 //! 否则声卡拿到的是一个短缓冲，听感是咔哒声。
 
+use super::agc::Agc;
 use super::decode::{Decoder, FRAME_SAMPLES};
 use super::jitter::{self, Frame, JitterBuffer};
 use super::mix::{apply_quality, interfere, mix_into, NoiseGen};
@@ -59,6 +60,7 @@ struct RxStream {
     /// 最近一包的信号质量。服务端每包都填，越低说明越接近射程边缘。
     qual: u8,
     frames: u32,
+    agc: Agc,
 }
 
 /// 一条连接上所有接收流的混音器。
@@ -72,6 +74,7 @@ pub struct RxMixer {
     learned: HashMap<(u32, u32), usize>,
     /// 每频率音量。缺省 1.0。
     gains: HashMap<u32, f32>,
+    speaker_gains: HashMap<(u32, u32), f32>,
     noise: NoiseGen,
     /// 干扰音的拍频相位，跨 tick 连续——每帧从零开始的话，拍频会变成
     /// 每 20 毫秒一次的周期性咔哒，而不是一段连续的啸叫。
@@ -90,6 +93,7 @@ impl RxMixer {
             streams: HashMap::new(),
             learned: HashMap::new(),
             gains: HashMap::new(),
+            speaker_gains: HashMap::new(),
             // 固定种子：静噪是确定性的，测试才不会时灵时不灵。
             noise: NoiseGen::new(0x5EED),
             phase: 0.0,
@@ -127,6 +131,7 @@ impl RxMixer {
                     decoder,
                     qual: h.qual,
                     frames: 0,
+                    agc: Agc::default(),
                 })
             }
         };
@@ -142,6 +147,7 @@ impl RxMixer {
             streams,
             learned,
             gains,
+            speaker_gains,
             noise,
             phase,
         } = self;
@@ -178,7 +184,20 @@ impl RxMixer {
             }
             // 射程衰减与静噪。服务端**根本不投递**射程外的包，所以 qual 恒在 1–255，
             // 这里不给 0 写分支（和 mix::quality_gain 同一条理由）。
+            stream.agc.process(&mut buf);
+            let manual = speaker_gains
+                .get(&(speaker, freq_khz))
+                .copied()
+                .unwrap_or(1.0);
             apply_quality(&mut buf, stream.qual, noise);
+            if (manual - 1.0).abs() > f32::EPSILON {
+                for sample in &mut buf {
+                    *sample = (*sample as f32 * manual)
+                        .round()
+                        .clamp(i16::MIN as f32, i16::MAX as f32)
+                        as i16;
+                }
+            }
             by_freq.entry(freq_khz).or_default().push(buf);
         }
 
@@ -211,6 +230,12 @@ impl RxMixer {
     /// 设置某个频率的播放音量。
     pub fn set_gain(&mut self, freq_khz: u32, gain: f32) {
         self.gains.insert(freq_khz, gain.clamp(0.0, MAX_GAIN));
+    }
+
+    /// Sets the manual coefficient for one speaker on one frequency.
+    pub fn set_speaker_gain(&mut self, speaker: u32, freq_khz: u32, gain: f32) {
+        self.speaker_gains
+            .insert((speaker, freq_khz), gain.clamp(0.0, MAX_GAIN));
     }
 
     /// 当前还活着的接收流数。
@@ -609,6 +634,29 @@ mod tests {
             d < rms(&only_one) * 0.25,
             "a muted frequency still leaked: {d}"
         );
+    }
+
+    #[test]
+    fn each_speaker_can_have_an_independent_manual_gain() {
+        let mut enc = Encoder::new().expect("encoder");
+        let mut quiet = RxMixer::new();
+        quiet.set_speaker_gain(7, 121_800, 0.0);
+        for seq in 0..4u16 {
+            for speaker in [7u32, 9] {
+                let (h, opus) = packet(&mut enc, 121_800, speaker, seq, 255, 0);
+                quiet.feed(&h, &opus);
+            }
+        }
+        let muted = quiet.tick().0;
+
+        let mut only = RxMixer::new();
+        let mut enc2 = Encoder::new().expect("encoder");
+        for seq in 0..4u16 {
+            let (h, opus) = packet(&mut enc2, 121_800, 9, seq, 255, 0);
+            only.feed(&h, &opus);
+        }
+        let reference = only.tick().0;
+        assert!((rms(&muted) - rms(&reference)).abs() < rms(&reference) * 0.35);
     }
 
     /// 服务端**根本不投递**射程外的包，所以下行 `qual` 恒在 1–255。

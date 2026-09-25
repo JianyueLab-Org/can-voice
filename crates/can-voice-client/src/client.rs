@@ -217,6 +217,11 @@ pub(crate) enum Command {
         freq_khz: u32,
         gain: f32,
     },
+    SpeakerVolume {
+        speaker: u32,
+        freq_khz: u32,
+        gain: f32,
+    },
     /// 换录音 / 播放设备。
     Devices {
         input: Option<String>,
@@ -302,6 +307,15 @@ impl VoiceClient {
     /// 设置某个频率的播放音量。
     pub fn set_frequency_volume(&self, freq_khz: u32, gain: f32) {
         let _ = self.commands.send(Command::Volume { freq_khz, gain });
+    }
+
+    /// Sets the manual playback coefficient for one remote speaker on one frequency.
+    pub fn set_speaker_volume(&self, speaker: u32, freq_khz: u32, gain: f32) {
+        let _ = self.commands.send(Command::SpeakerVolume {
+            speaker,
+            freq_khz,
+            gain,
+        });
     }
 
     /// 直接送一段 48 kHz 单声道 PCM 去发送，绕过麦克风。

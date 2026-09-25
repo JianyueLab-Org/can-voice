@@ -70,6 +70,9 @@ pub struct Snapshot {
     /// 会话 id → CAN 号。来自 NOTICE talker，每个发言者只来一次。
     #[serde(default)]
     pub speakers: BTreeMap<u32, String>,
+    /// Manual remote receive coefficients keyed by stable CAN id.
+    #[serde(default)]
+    pub talker_volumes: BTreeMap<String, f32>,
     /// 每个频率上最近一次通话。
     ///
     /// **绿点只说"此刻有没有人在讲"。** 管制员真正要判断的是"这个频率还活着
@@ -114,6 +117,7 @@ impl Default for Snapshot {
             health: None,
             notices: Vec::new(),
             speakers: BTreeMap::new(),
+            talker_volumes: BTreeMap::new(),
             last_talk: BTreeMap::new(),
             max_tx: None,
             tx_budget: None,

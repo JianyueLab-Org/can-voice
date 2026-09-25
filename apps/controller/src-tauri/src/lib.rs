@@ -20,7 +20,7 @@ use can_voice_client::Config;
 use can_voice_datafeed::Position;
 use can_voice_i18n::Message;
 use can_voice_token::{TokenScope, TokenSource};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Manager;
@@ -58,6 +58,8 @@ pub struct Settings {
     /// 喇叭总音量，0–200，100 是原声。
     #[serde(default)]
     pub speaker_volume: can_voice_settings::VolumePercent,
+    #[serde(default)]
+    pub talker_volume: BTreeMap<String, can_voice_settings::VolumePercent>,
     /// 用户说过"这一版不用再问我"的那个版本号。**跳过的是那一个版本，
     /// 不是从此闭嘴**——下一版照样提示。
     #[serde(default)]
@@ -100,6 +102,9 @@ impl App {
         // 台面不从磁盘恢复。原来 voice 每次启动都是空的：频率从数据源来，
         // 上一场的临时频道多半已经没人，留着看起来一切正常。
         bridge.set_master_volume(settings.mic_volume.get(), settings.speaker_volume.get());
+        for (cid, volume) in &settings.talker_volume {
+            bridge.set_talker_volume(cid.clone(), volume.gain());
+        }
         Self {
             bridge,
             http: reqwest::Client::builder()
@@ -522,6 +527,15 @@ fn set_master_volume(state: tauri::State<'_, App>, mic: u32, speaker: u32) {
         s.speaker_volume = can_voice_settings::VolumePercent::new(speaker);
     });
     state.bridge.set_master_volume(mic, speaker);
+}
+
+#[tauri::command]
+fn set_talker_volume(state: tauri::State<'_, App>, cid: String, volume: u32) {
+    let volume = can_voice_settings::VolumePercent::new(volume);
+    state.update_settings(|settings| {
+        settings.talker_volume.insert(cid.clone(), volume);
+    });
+    state.bridge.set_talker_volume(cid, volume.gain());
 }
 
 /// 换一组 PTT 绑定。
@@ -971,6 +985,7 @@ pub fn run() {
             set_selected,
             set_transmitting,
             set_master_volume,
+            set_talker_volume,
             set_ptt_bindings,
             ptt_pressed,
             begin_ptt_capture,

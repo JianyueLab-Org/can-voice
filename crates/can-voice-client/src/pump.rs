@@ -16,6 +16,7 @@
 use crate::audio::{AudioIo, PlaybackStats};
 use crate::client::{Command, Config, Event, InjectedAudio};
 use crate::conn::{self, Disposition, Link, LinkState, ReconnectPolicy};
+use crate::rx::agc;
 use crate::rx::mixer::{RxEvent, RxMixer};
 use crate::session::{Limits, SubscriptionState};
 use crate::tx::TxPipeline;
@@ -74,6 +75,7 @@ struct SessionControls {
     mic_gain: f32,
     speaker_gain: f32,
     gains: BTreeMap<u32, f32>,
+    speaker_gains: BTreeMap<(u32, u32), f32>,
 }
 
 impl SessionControls {
@@ -91,6 +93,13 @@ impl SessionControls {
             Command::Volume { freq_khz, gain } => {
                 self.gains.insert(*freq_khz, *gain);
             }
+            Command::SpeakerVolume {
+                speaker,
+                freq_khz,
+                gain,
+            } => {
+                self.speaker_gains.insert((*speaker, *freq_khz), *gain);
+            }
             Command::Master { mic, speaker } => {
                 self.mic_gain = *mic;
                 self.speaker_gain = *speaker;
@@ -102,6 +111,9 @@ impl SessionControls {
     fn restore_gains(&self, mixer: &mut RxMixer) {
         for (&freq_khz, &gain) in &self.gains {
             mixer.set_gain(freq_khz, gain);
+        }
+        for (&(speaker, freq_khz), &gain) in &self.speaker_gains {
+            mixer.set_speaker_gain(speaker, freq_khz, gain);
         }
     }
 }
@@ -384,6 +396,18 @@ async fn pump(
                     mixer.set_gain(freq_khz, gain);
                     controls.apply(&Command::Volume { freq_khz, gain });
                 }
+                Some(Command::SpeakerVolume {
+                    speaker,
+                    freq_khz,
+                    gain,
+                }) => {
+                    mixer.set_speaker_gain(speaker, freq_khz, gain);
+                    controls.apply(&Command::SpeakerVolume {
+                        speaker,
+                        freq_khz,
+                        gain,
+                    });
+                }
                 // 换设备**立刻生效**，不必等到下一次连接：重建在音频线程上做，
                 // 因为 `cpal::Stream` 是 `!Send`。
                 Some(Command::Devices { input, output }) => {
@@ -468,6 +492,7 @@ async fn pump(
                 let (mut pcm, rx_events) = mixer.tick();
                 if let Some(io) = audio {
                     scale_pcm(&mut pcm, controls.speaker_gain);
+                    agc::limit(&mut pcm);
                     io.play(&pcm);
                 }
                 for e in rx_events {

@@ -19,6 +19,7 @@ use crate::snapshot::{Ended, Snapshot};
 use can_voice_client::stack::RadioStack;
 use can_voice_client::{Config, Event, VoiceClient};
 use can_voice_token::{TokenScope, TokenSource};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -65,6 +66,9 @@ struct Inner {
     /// 麦克风 / 喇叭总音量，百分比 0–200。连上之后和换设备一样立刻推给语音层。
     mic: AtomicU32,
     speaker: AtomicU32,
+    /// Manual receive coefficient by CAN id. Runtime session ids are short-lived;
+    /// the user setting is keyed by the stable CAN id and applied on TALKER.
+    talker_gains: Mutex<BTreeMap<String, f32>>,
 }
 
 impl Default for Bridge {
@@ -86,6 +90,7 @@ impl Bridge {
                 transmitting: AtomicBool::new(false),
                 mic: AtomicU32::new(100),
                 speaker: AtomicU32::new(100),
+                talker_gains: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -106,6 +111,7 @@ impl Bridge {
             Ok(s) => s.tx_budget(max_tx),
             Err(p) => p.into_inner().tx_budget(max_tx),
         });
+        snap.talker_volumes = self.talker_volumes();
         snap
     }
 
@@ -280,6 +286,55 @@ impl Bridge {
         self.inner.push_master();
     }
 
+    /// Sets a persistent manual coefficient for one remote CAN id.
+    pub fn set_talker_volume(&self, cid: impl Into<String>, gain: f32) {
+        let cid = cid.into();
+        let gain = gain.clamp(0.0, 2.0);
+        let _transition = self
+            .inner
+            .transition
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        self.inner
+            .talker_gains
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(cid.clone(), gain);
+        let sessions: Vec<(u32, u32)> = self
+            .inner
+            .snapshot
+            .lock()
+            .map(|snapshot| {
+                snapshot
+                    .receiving
+                    .iter()
+                    .flat_map(|(freq, speakers)| {
+                        speakers.iter().filter_map(|speaker| {
+                            (snapshot.speakers.get(speaker) == Some(&cid))
+                                .then_some((*speaker, *freq))
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Ok(client) = self.inner.client.lock() {
+            if let Some(client) = client.as_ref() {
+                for (session, freq_khz) in sessions {
+                    client.set_speaker_volume(session, freq_khz, gain);
+                }
+            }
+        }
+    }
+
+    /// Returns the persisted manual coefficients for settings/UI layers.
+    pub fn talker_volumes(&self) -> BTreeMap<String, f32> {
+        self.inner
+            .talker_gains
+            .lock()
+            .map(|gains| gains.clone())
+            .unwrap_or_default()
+    }
+
     /// 换录音 / 播放设备。
     ///
     /// **两件事都要做**：转给正在跑的那条连接（立刻生效），并改掉存着的
@@ -429,6 +484,25 @@ impl Inner {
                 || kind == can_voice_proto::control::notice_kind::AUTHORITY_RESTORED
             {
                 self.release_transmit_current();
+            }
+        }
+        if let Event::Talker {
+            session,
+            cid,
+            freq_khz,
+        } = event
+        {
+            let gain = self
+                .talker_gains
+                .lock()
+                .ok()
+                .and_then(|gains| gains.get(cid).copied());
+            if let Some(gain) = gain {
+                if let Ok(client) = self.client.lock() {
+                    if let Some(client) = client.as_ref() {
+                        client.set_speaker_volume(*session, *freq_khz, gain);
+                    }
+                }
             }
         }
         if let Ok(mut snapshot) = self.snapshot.lock() {
@@ -824,6 +898,19 @@ mod tests {
         assert_eq!(
             effective_gains(&stack),
             vec![(118_000, 0.6), (121_800, 0.0)]
+        );
+    }
+
+    #[test]
+    fn manual_talker_volume_is_clamped_and_keyed_by_cid() {
+        let bridge = Bridge::new();
+        bridge.set_talker_volume("110", 3.0);
+        bridge.set_talker_volume("111", -1.0);
+        assert_eq!(
+            bridge.talker_volumes(),
+            [("110".to_string(), 2.0), ("111".to_string(), 0.0)]
+                .into_iter()
+                .collect()
         );
     }
 

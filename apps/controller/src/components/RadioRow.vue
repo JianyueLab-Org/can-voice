@@ -27,6 +27,7 @@ const props = defineProps<{
   maxTx: number | null;
   transmitting: boolean;
   lastTalk: { speaker: number; cid?: string; at: number } | null;
+  talkerVolume: number;
   /** CAN 号 → 呼号。最后通话的 who 从这里翻。 */
   roster: Record<string, string>;
   compact?: boolean;
@@ -38,6 +39,7 @@ const emit = defineEmits<{
   mute: [on: boolean];
   select: [];
   remove: [];
+  "talker-volume": [volume: number, cid: string];
 }>();
 
 const mhz = (khz: number) => (khz / 1000).toFixed(3);
@@ -165,6 +167,18 @@ const lastTalkText = () => {
     </div>
 
     <p v-if="!compact" class="text-[11px] opacity-50">{{ lastTalkText() }}</p>
+    <input
+      v-if="!compact && lastTalk?.cid"
+      type="range"
+      min="0"
+      max="200"
+      step="1"
+      :value="Math.round(talkerVolume)"
+      class="h-[14px] w-full"
+      :aria-label="`Remote volume ${lastTalk?.cid}`"
+      @click.stop
+      @input="$emit('talker-volume', Number(($event.target as HTMLInputElement).value), lastTalk!.cid!)"
+    />
 
     <p v-if="txDenied" class="text-xs text-amber-600" :title="t('radio.tx_denied_tip')">
       {{ t("radio.tx_denied") }}
