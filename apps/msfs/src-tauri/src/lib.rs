@@ -2290,6 +2290,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn simconnect_runtime_is_bundled_with_the_msfs_client() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let config: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(manifest.join("tauri.conf.json")).expect("tauri.conf.json"),
+        )
+        .expect("tauri.conf.json must be valid JSON");
+        assert_eq!(
+            config["bundle"]["resources"]["../resources/SimConnect.dll"],
+            "SimConnect.dll"
+        );
+        assert!(
+            manifest.join("../resources/SimConnect.dll").is_file(),
+            "the bundled SimConnect.dll source is missing"
+        );
+    }
+
+    #[test]
     fn lifecycle_rejects_overlap_and_invalidates_a_pending_connect() {
         let gate = LifeGate::new();
         let (first, cancel) = gate.begin().expect("first connect");

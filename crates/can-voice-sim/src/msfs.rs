@@ -675,6 +675,7 @@ mod ffi {
 
     extern "system" {
         fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+        fn LoadLibraryW(name: *const u16) -> *mut c_void;
         fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     }
 
@@ -692,8 +693,10 @@ mod ffi {
     }
 
     impl Api {
-        /// 加载一次。**DLL 由模拟器提供**：MSFS 装好就在 PATH 上找得到，
-        /// 没装的话这里就是"找不到 SimConnect.dll"——那正是要对用户说的话。
+        /// 加载一次。优先使用安装包随带的 DLL，再退回系统搜索路径。
+        ///
+        /// Tauri 的资源目录通常在 exe 旁边的 `resources/`；开发运行时也可能
+        /// 把资源直接放在 exe 目录。两处都试，最后才让 Windows 自己查 PATH。
         fn load() -> Result<&'static Api, String> {
             use std::sync::OnceLock;
             static API: OnceLock<Result<Api, String>> = OnceLock::new();
@@ -704,14 +707,11 @@ mod ffi {
         }
 
         fn load_once() -> Result<Api, String> {
-            let name = std::ffi::CString::new("SimConnect.dll").expect("static");
-            let module = unsafe { LoadLibraryA(name.as_ptr()) };
-            if module.is_null() {
-                return Err(
-                    "could not load SimConnect.dll; is Microsoft Flight Simulator installed?"
-                        .into(),
-                );
-            }
+            let module = Self::load_bundled().or_else(Self::load_system).ok_or_else(|| {
+                "could not load SimConnect.dll; the bundled runtime is missing and Microsoft Flight Simulator is not installed"
+                    .to_string()
+            })?;
+            tracing::debug!("loaded SimConnect.dll");
             // 取一个入口。**取不到要说出是哪一个**——一个笼统的"打不开"会让人
             // 去查模拟器有没有开，而实际问题是 DLL 版本太老、少了这个导出。
             fn symbol(module: *mut c_void, name: &str) -> Result<*mut c_void, String> {
@@ -768,6 +768,39 @@ mod ffi {
                     )?),
                 })
             }
+        }
+
+        fn load_bundled() -> Option<*mut c_void> {
+            use std::os::windows::ffi::OsStrExt;
+
+            let exe = std::env::current_exe().ok()?;
+            let dir = exe.parent()?;
+            let candidates = [
+                dir.join("SimConnect.dll"),
+                dir.join("resources/SimConnect.dll"),
+            ];
+            for path in candidates {
+                if !path.is_file() {
+                    continue;
+                }
+                let wide: Vec<u16> = path
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let module = unsafe { LoadLibraryW(wide.as_ptr()) };
+                if !module.is_null() {
+                    return Some(module);
+                }
+                tracing::warn!(path = %path.display(), "could not load bundled SimConnect.dll");
+            }
+            None
+        }
+
+        fn load_system() -> Option<*mut c_void> {
+            let name = std::ffi::CString::new("SimConnect.dll").expect("static");
+            let module = unsafe { LoadLibraryA(name.as_ptr()) };
+            (!module.is_null()).then_some(module)
         }
     }
 
