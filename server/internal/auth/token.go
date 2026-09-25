@@ -184,6 +184,10 @@ func validateGrant(c Claims) error {
 		if c.Callsign != "" || c.Station != "" || len(c.TX) != 0 {
 			return errors.New("unscoped ticket carries a grant")
 		}
+	case "listener":
+		if c.MaxTX != 0 || c.Callsign != "" || c.Station != "" || len(c.TX) != 0 {
+			return errors.New("listener ticket carries transmit authority")
+		}
 	case "pilot", "observer":
 		if c.Callsign != "" || c.Station != "" || len(c.TX) > 1 {
 			return errors.New("pilot or observer ticket has invalid station or transmit scope")

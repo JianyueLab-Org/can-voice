@@ -54,6 +54,23 @@ func TestVerifyPreservesScopedGrant(t *testing.T) {
 	}
 }
 
+func TestVerifyAcceptsAReceiveOnlyListenerGrant(t *testing.T) {
+	pub, priv := keys(t)
+	now := time.Unix(1757000000, 0)
+	in := Claims{CID: "listener-1000", Rating: 1, MaxTX: 0, Role: "listener", Exp: now.Add(time.Minute).Unix()}
+	tok, err := Sign(priv, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Verify(pub, tok, now)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if !reflect.DeepEqual(got, in) {
+		t.Fatalf("claims = %+v, want %+v", got, in)
+	}
+}
+
 func TestVerifyRejectsMalformedSignedVoiceScopes(t *testing.T) {
 	pub, priv := keys(t)
 	now := time.Unix(1757000000, 0)
@@ -66,6 +83,7 @@ func TestVerifyRejectsMalformedSignedVoiceScopes(t *testing.T) {
 		{"controller with ATIS station", Claims{Role: "controller", Callsign: "ZSPD_TWR", Station: "ZSPD_ATIS", TX: []int{118500}}},
 		{"duplicate grant", Claims{Role: "controller", Callsign: "ZSPD_TWR", TX: []int{118500, 118500}}},
 		{"out of band grant", Claims{Role: "atis", Station: "ZSPD_ATIS", TX: []int{200000}}},
+		{"listener transmit grant", Claims{Role: "listener", MaxTX: 1, TX: []int{118500}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.claim
