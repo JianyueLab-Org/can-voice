@@ -1,0 +1,11 @@
+[package]
+name = "can-voice-listen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+can-voice-client = { path = "../can-voice-client" }
+can-voice-proto = { path = "../can-voice-proto" }
+thiserror.workspace = true
+tokio = { version = "1.52", features = ["sync", "net", "rt-multi-thread", "macros", "io-util"] }

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/can-voice-proto",
     "crates/can-voice-client",
+    "crates/can-voice-listen",
     "crates/can-voice-ptt",
     "crates/can-voice-atis",
     "crates/can-voice-fsd",

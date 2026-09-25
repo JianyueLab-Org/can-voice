@@ -177,6 +177,8 @@ pub struct VoiceClient {
     events_tx: tokio::sync::broadcast::Sender<Event>,
     /// 和通道一起建的那个接收端，留给**第一次** [`VoiceClient::events`]。见那里。
     first_events: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<Event>>>,
+    audio_tx: tokio::sync::broadcast::Sender<Vec<i16>>,
+    first_audio: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<Vec<i16>>>>,
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     injected_audio: std::sync::Arc<InjectedAudio>,
 }
@@ -257,12 +259,13 @@ impl VoiceClient {
         )
         .await?;
 
-        let (client, events_tx, cmd_rx) = Self::wired();
+        let (client, events_tx, audio_tx, cmd_rx) = Self::wired();
         let injected_audio = std::sync::Arc::clone(&client.injected_audio);
         tokio::spawn(crate::pump::run(
             cfg,
             link,
             events_tx,
+            audio_tx,
             cmd_rx,
             injected_audio,
         ));
@@ -275,17 +278,21 @@ impl VoiceClient {
     fn wired() -> (
         Self,
         tokio::sync::broadcast::Sender<Event>,
+        tokio::sync::broadcast::Sender<Vec<i16>>,
         tokio::sync::mpsc::UnboundedReceiver<Command>,
     ) {
         let (events_tx, first) = tokio::sync::broadcast::channel(256);
+        let (audio_tx, first_audio) = tokio::sync::broadcast::channel(128);
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let client = VoiceClient {
             events_tx: events_tx.clone(),
             first_events: std::sync::Mutex::new(Some(first)),
+            audio_tx: audio_tx.clone(),
+            first_audio: std::sync::Mutex::new(Some(first_audio)),
             commands: cmd_tx,
             injected_audio: std::sync::Arc::new(InjectedAudio::default()),
         };
-        (client, events_tx, cmd_rx)
+        (client, events_tx, audio_tx, cmd_rx)
     }
 
     /// 声明完整的收发意图。反复调用是廉价的 —— 每次都是全量，
@@ -345,6 +352,17 @@ impl VoiceClient {
         first.unwrap_or_else(|| self.events_tx.subscribe())
     }
 
+    /// Receive mixed 48 kHz mono PCM frames without opening a local audio device.
+    pub fn audio_frames(&self) -> tokio::sync::broadcast::Receiver<Vec<i16>> {
+        match self.first_audio.lock() {
+            Ok(mut slot) => slot.take().unwrap_or_else(|| self.audio_tx.subscribe()),
+            Err(p) => p
+                .into_inner()
+                .take()
+                .unwrap_or_else(|| self.audio_tx.subscribe()),
+        }
+    }
+
     /// 关闭。
     pub fn request_shutdown(&self) {
         let _ = self.commands.send(Command::Shutdown);
@@ -371,7 +389,7 @@ mod tests {
 
     #[test]
     fn pushed_audio_does_not_accumulate_in_the_control_command_channel() {
-        let (client, _events, mut commands) = VoiceClient::wired();
+        let (client, _events, _audio, mut commands) = VoiceClient::wired();
         for _ in 0..128 {
             client.push_audio(&[1; 960]);
         }
@@ -395,7 +413,7 @@ mod tests {
 
     #[test]
     fn injected_audio_keeps_the_newest_samples_in_order() {
-        let (client, _events, _commands) = VoiceClient::wired();
+        let (client, _events, _audio, _commands) = VoiceClient::wired();
         client.push_audio(&vec![1; 3840]);
         client.push_audio(&vec![2; 1920]);
 
@@ -408,7 +426,7 @@ mod tests {
 
     #[test]
     fn oversized_injected_audio_keeps_only_its_tail() {
-        let (client, _events, _commands) = VoiceClient::wired();
+        let (client, _events, _audio, _commands) = VoiceClient::wired();
         let audio: Vec<i16> = (0..4000).collect();
         client.push_audio(&audio);
 
@@ -500,7 +518,7 @@ mod tests {
     /// 于是上层订阅得晚一拍，这一整条会话就既没有"已连接"也没有发射上限。
     #[test]
     fn the_first_subscriber_sees_what_was_sent_before_it_subscribed() {
-        let (client, events_tx, _cmds) = VoiceClient::wired();
+        let (client, events_tx, _audio, _cmds) = VoiceClient::wired();
         let limits = Limits {
             max_tx: 8,
             max_rx: 32,
@@ -690,5 +708,14 @@ mod tests {
             matches!(err, Error::Conn(crate::conn::Error::BadCallsign(_))),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn the_first_audio_subscriber_receives_a_mixed_pcm_frame() {
+        let (client, _events, audio_tx, _cmds) = VoiceClient::wired();
+        let _ = audio_tx.send(vec![1, 2, 3]);
+
+        let mut frames = client.audio_frames();
+        assert_eq!(frames.try_recv().expect("audio frame"), vec![1, 2, 3]);
     }
 }

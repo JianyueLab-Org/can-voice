@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CAN Live Radio</title>
+<style>body{font:16px system-ui;max-width:32rem;margin:4rem auto;padding:0 1rem}button{padding:.6rem 1rem}#status{margin-top:1rem}</style>
+<h1>CAN Live Radio</h1>
+<p>Receive-only live radio audio.</p>
+<label>Frequency (kHz) <input id="frequency" value="118500" inputmode="numeric"></label>
+<button id="play">Listen</button><p id="status">Stopped</p>
+<script>
+const status=document.querySelector('#status'), input=document.querySelector('#frequency'); let audio, source, nextTime=0;
+document.querySelector('#play').onclick=async()=>{const f=Number(input.value);if(!Number.isInteger(f)||f<118000||f>136975||f%5){status.textContent='Enter a valid 5 kHz frequency.';return}audio??=new AudioContext({sampleRate:48000});await audio.resume();const r=await fetch(`/audio?frequency=${f}`);if(!r.ok){status.textContent='Please sign in first.';return}status.textContent='Listening';const reader=r.body.getReader();let pending=new Uint8Array();for(;;){const n=await reader.read();if(n.done)break;const joined=new Uint8Array(pending.length+n.value.length);joined.set(pending);joined.set(n.value,pending.length);pending=joined;while(pending.length>=1920){const frame=pending.slice(0,1920);pending=pending.slice(1920);const pcm=new Int16Array(frame.buffer);const b=audio.createBuffer(1,pcm.length,48000),ch=b.getChannelData(0);for(let i=0;i<pcm.length;i++)ch[i]=pcm[i]/32768;source=audio.createBufferSource();source.buffer=b;source.connect(audio.destination);const start=Math.max(audio.currentTime,nextTime);source.start(start);nextTime=start+b.duration}}};
+</script>

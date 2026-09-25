@@ -159,3 +159,22 @@ go build -o can-voice ./server/cmd/can-voice
 - `rating is below the minimum`：未定级，不是故障。
 - 证书 `no such file`：`CAN_VOICE_DOMAIN` 和 certbot 不一致，或没挂整个 letsencrypt。
 - 外面超时、容器里正常：映射漏了 `/udp`，或安全组没放。
+
+## 网页收听
+
+`can-voice-listen` 是 `listen.ceruleanavi.net` 的 receive-only 网关。它不占用
+`audio.ceruleanavi.net:64738/udp`，而是由 HTTPS 反向代理转发到本地 HTTP 端口。
+
+```bash
+CAN_VOICE_SERVER=audio.ceruleanavi.net:64738 \
+CAN_API_ORIGIN=http://app.can-api.svc.cluster.local \
+LISTEN_ADDR=0.0.0.0:8080 \
+cargo run -p can-voice-listen --release
+```
+
+网页请求必须携带 `can_session`。网关把 Cookie 转发给
+`POST /api/v1/voice/listen-token`，拿到短期 listener token 后连接语音服务。
+浏览器只收到 48 kHz PCM 音频流，不能发射，也看不到 CAN 网络密码。
+
+生产反向代理只需要把 `listen.ceruleanavi.net` 的 HTTPS 流量转到 8080；
+`audio.ceruleanavi.net` 继续直连 UDP 64738，不要放进 Cloudflare Tunnel。

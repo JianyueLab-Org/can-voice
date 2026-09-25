@@ -131,6 +131,7 @@ pub(crate) async fn run(
     cfg: Config,
     first: Link,
     events: tokio::sync::broadcast::Sender<Event>,
+    audio_frames: tokio::sync::broadcast::Sender<Vec<i16>>,
     mut cmds: tokio::sync::mpsc::UnboundedReceiver<Command>,
     injected_audio: std::sync::Arc<InjectedAudio>,
 ) {
@@ -214,6 +215,7 @@ pub(crate) async fn run(
             l,
             &mut subs,
             &events,
+            &audio_frames,
             &mut cmds,
             audio.as_ref(),
             &mut controls,
@@ -326,6 +328,7 @@ async fn pump(
     link: Link,
     subs: &mut SubscriptionState,
     events: &tokio::sync::broadcast::Sender<Event>,
+    audio_frames: &tokio::sync::broadcast::Sender<Vec<i16>>,
     cmds: &mut tokio::sync::mpsc::UnboundedReceiver<Command>,
     audio: Option<&AudioIo>,
     controls: &mut SessionControls,
@@ -466,6 +469,7 @@ async fn pump(
 
                 // 接收：混音器每一拍都出恰好一帧，直接送去播放。
                 let (mut pcm, rx_events) = mixer.tick();
+                let _ = audio_frames.send(pcm.clone());
                 if let Some(io) = audio {
                     scale_pcm(&mut pcm, controls.speaker_gain);
                     io.play(&pcm);

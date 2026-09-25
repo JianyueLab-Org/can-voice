@@ -1,0 +1,31 @@
+name: Deploy listen gateway
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/can-voice-client/**
+      - crates/can-voice-proto/**
+      - crates/can-voice-listen/**
+      - Dockerfile
+      - .dockerignore
+      - deploy/listen-k8s.yaml
+      - .github/workflows/listen-deploy.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  deployments: write
+
+jobs:
+  deploy:
+    uses: JianyueLab-Org/actions/.github/workflows/deploy-k8s.yml@main
+    with:
+      image: ghcr.io/jianyuelab-org/can-voice-listen
+      namespace: can-voice-listen
+      manifest: deploy/listen-k8s.yaml
+      environment_url: https://listen.ceruleanavi.net
+    secrets: inherit
