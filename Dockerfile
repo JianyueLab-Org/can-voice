@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.80-bookworm AS build
+FROM rust:1.85-bookworm AS build
 WORKDIR /src
 
 RUN apt-get update \
