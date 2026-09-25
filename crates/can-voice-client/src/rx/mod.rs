@@ -4,6 +4,7 @@
 
 pub mod agc;
 pub mod decode;
+pub mod filter;
 pub mod jitter;
 pub mod mix;
 pub mod mixer;

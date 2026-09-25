@@ -6,6 +6,12 @@
 //! 因为硬截断听起来像 bug（spec 7.1、7.4）。客户端完全不知道任何人的位置，
 //! 它只拿到服务端算好的一个 `qual` 字节。
 
+use super::agc::rms_dbfs;
+
+/// Synthetic radio hiss is intentionally quiet and disabled for gated frames.
+pub const SQUELCH_MAX_LEVEL: f32 = 0.001;
+pub const SQUELCH_GATE_DBFS: f32 = -50.0;
+
 /// `qual` 到增益。
 ///
 /// **下行的 `qual` 恒在 1–255，永远不会是 0**（射程之外服务端根本不投递，
@@ -19,21 +25,15 @@ pub fn quality_gain(qual: u8) -> f32 {
     0.35 + 0.65 * (qual as f32 / 255.0)
 }
 
-/// `qual` 到静噪强度。满格无噪。
+/// `qual` 到静噪强度。满格无噪，弱信号最多约 -60 dBFS 峰值。
 pub fn squelch_level(qual: u8) -> f32 {
-    // `qual == 255` 而不是 `>= 255`：后者在 u8 上是
-    // `clippy::absurd_extreme_comparisons`，deny-by-default，过不了 `-D warnings`。
     if qual == u8::MAX {
         return 0.0;
     }
-    // 越弱噪声越大，最强约为满量程的 6%。
-    0.06 * (1.0 - qual as f32 / 255.0)
+    SQUELCH_MAX_LEVEL * (1.0 - qual as f32 / 255.0)
 }
 
-/// 确定性伪随机，供静噪使用。
-///
-/// 刻意不用 `rand`：测试需要可复现的噪声，否则断言会时灵时不灵，
-/// 而一个偶尔失败的音频测试最终会被人关掉。
+/// 确定性伪随机，供受门控的静噪使用。
 #[derive(Debug, Clone)]
 pub struct NoiseGen {
     state: u32,
@@ -44,13 +44,7 @@ impl NoiseGen {
         Self { state: seed | 1 }
     }
 
-    /// 下一个 -1.0..1.0 的样本。
-    ///
-    /// **叫 `sample` 而不是 `next`**：`clippy::should_implement_trait` 是
-    /// warn-by-default，而门禁是 `-D warnings`，一个叫 `next` 的固有方法会让
-    /// 这个模块过不了自己的门。
     pub fn sample(&mut self) -> f32 {
-        // xorshift32
         self.state ^= self.state << 13;
         self.state ^= self.state >> 17;
         self.state ^= self.state << 5;
@@ -58,28 +52,28 @@ impl NoiseGen {
     }
 }
 
-/// 按信号质量做衰减并混入静噪。
+/// 按信号质量做衰减，并只对有真实信号的帧混入低电平静噪。
 pub fn apply_quality(samples: &mut [i16], qual: u8, noise: &mut NoiseGen) {
     let gain = quality_gain(qual);
-    let squelch = squelch_level(qual);
+    let squelch = if rms_dbfs(samples) > SQUELCH_GATE_DBFS {
+        squelch_level(qual)
+    } else {
+        0.0
+    };
     for s in samples.iter_mut() {
-        let mut v = *s as f32 * gain;
+        let mut value = *s as f32 * gain;
         if squelch > 0.0 {
-            v += noise.sample() * squelch * 32767.0;
+            value += noise.sample() * squelch * 32767.0;
         }
-        *s = v.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        *s = value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
     }
 }
 
-/// 拍频啸叫的频率，单位赫兹。真实 AM 无线电上两个载波差频落在这个量级。
-const BEAT_HZ: f32 = 1200.0;
-
-/// 同频多路信号叠加成干扰音。
+/// 同频多路信号叠加。
 ///
-/// 一路时原样通过 —— 一个人在讲话不是干扰。
-/// 两路及以上时相加后注入拍频啸叫并轻微削波，听感上就是
-/// "有人在压我的话"，而不是两段可分辨的语音。
-pub fn interfere(sources: &[&[i16]], out: &mut [i16], phase: &mut f32) {
+/// 一路时原样通过；两路及以上时做软限幅后的叠加，不再凭空生成
+/// 1200 Hz 拍频或幅度调制，避免把同频重叠变成持续电音。
+pub fn interfere(sources: &[&[i16]], out: &mut [i16]) {
     if sources.is_empty() {
         out.fill(0);
         return;
@@ -92,21 +86,12 @@ pub fn interfere(sources: &[&[i16]], out: &mut [i16], phase: &mut f32) {
         return;
     }
 
-    let step = 2.0 * std::f32::consts::PI * BEAT_HZ / 48_000.0;
     for (i, o) in out.iter_mut().enumerate() {
         let sum: f32 = sources
             .iter()
             .map(|s| s.get(i).copied().unwrap_or(0) as f32)
             .sum();
-        // 拍频调制：幅度随啸叫起伏，这是"两个载波在打架"的听感来源。
-        let beat = phase.sin();
-        *phase += step;
-        if *phase > 2.0 * std::f32::consts::PI {
-            *phase -= 2.0 * std::f32::consts::PI;
-        }
-        let modulated = sum * (1.0 + 0.45 * beat) + beat * 0.08 * 32767.0;
-        // 轻微削波：过载失真是真实无线电互相压制时的另一半听感。
-        *o = soft_clip(modulated * 1.15);
+        *o = soft_clip(sum);
     }
 }
 
@@ -178,10 +163,15 @@ mod tests {
     fn squelch_rises_as_quality_falls() {
         assert!(squelch_level(255) < squelch_level(128));
         assert!(squelch_level(128) < squelch_level(1));
-        assert_eq!(
-            squelch_level(255),
-            0.0,
-            "a full-quality signal carries no squelch"
+        assert_eq!(squelch_level(255), 0.0);
+    }
+
+    #[test]
+    fn weak_quality_hiss_stays_below_the_voice_floor() {
+        assert!(
+            squelch_level(1) <= 0.001,
+            "synthetic hiss must stay below -60 dBFS: {}",
+            squelch_level(1)
         );
     }
 
@@ -203,7 +193,6 @@ mod tests {
             quality_gain(0) > 0.0,
             "a zero branch that silences audio would never be exercised"
         );
-        assert!(squelch_level(0) > squelch_level(1));
     }
 
     #[test]
@@ -223,14 +212,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_quality_adds_noise_to_a_weak_signal() {
-        // 全静音输入下，低 qual 应当产生非零输出 —— 那就是静噪。
+    fn apply_quality_keeps_silence_silent_at_weak_quality() {
+        // 没有真实噪声采样时，不能凭空制造会被 AGC 放大的静噪。
         let mut silence = vec![0i16; 960];
         let mut n = NoiseGen::new(7);
         apply_quality(&mut silence, 40, &mut n);
         assert!(
-            rms(&silence) > 0.0,
-            "a weak signal must carry audible squelch noise"
+            rms(&silence) == 0.0,
+            "weak-quality silence must not contain synthetic noise"
         );
     }
 
@@ -250,29 +239,23 @@ mod tests {
     fn a_single_source_passes_through_interfere_unchanged() {
         let src = tone(1000.0, 960, 0.4);
         let mut out = vec![0i16; 960];
-        let mut phase = 0.0;
-        interfere(&[&src], &mut out, &mut phase);
+        interfere(&[&src], &mut out);
         assert_eq!(out, src, "one speaker on a frequency is not interference");
     }
 
     #[test]
-    fn two_sources_produce_a_heterodyne_beat() {
-        // 两路同频信号相加会产生拍频啸叫——这正是真实 AM 无线电上
-        // 两个载波差频的声音，也是"听得出有两个人在压"的依据。
+    fn two_sources_are_mixed_without_a_synthetic_beat() {
+        // 同频重叠保留为软限幅后的叠加，不额外合成 1200 Hz 电音。
         let a = tone(500.0, 4800, 0.3);
         let b = tone(700.0, 4800, 0.3);
         let plain: Vec<i16> = a
             .iter()
             .zip(&b)
-            .map(|(x, y)| x.saturating_add(*y))
+            .map(|(x, y)| soft_clip(*x as f32 + *y as f32))
             .collect();
         let mut out = vec![0i16; 4800];
-        let mut phase = 0.0;
-        interfere(&[&a, &b], &mut out, &mut phase);
-        assert_ne!(
-            out, plain,
-            "interfere must do more than add the two sources"
-        );
+        interfere(&[&a, &b], &mut out);
+        assert_eq!(out, plain, "interfere must not synthesize an audible beat");
         assert!(rms(&out) > 0.0);
     }
 
@@ -281,8 +264,7 @@ mod tests {
         let a = tone(500.0, 960, 0.3);
         let b = tone(700.0, 960, 0.3);
         let mut out = vec![0i16; 960];
-        let mut phase = 0.0;
-        interfere(&[&a, &b], &mut out, &mut phase);
+        interfere(&[&a, &b], &mut out);
         assert!(
             rms(&out) > rms(&a),
             "two people talking over each other should be more, not less"
@@ -294,8 +276,7 @@ mod tests {
         let a = tone(500.0, 960, 0.3);
         let b = tone(700.0, 480, 0.3);
         let mut out = vec![0i16; 960];
-        let mut phase = 0.0;
-        interfere(&[&a, &b], &mut out, &mut phase);
+        interfere(&[&a, &b], &mut out);
         // 不 panic 即可；短的那一路后半段按静音处理。
         assert_eq!(out.len(), 960);
     }
@@ -322,8 +303,7 @@ mod tests {
         assert!(rms(&half) < rms(&full));
     }
 
-    /// 修订件 H5：这个方法叫 `sample` 而不是 `next`。
-    ///
+    /// Noise generator tests remain deterministic and bounded.
     /// `clippy::should_implement_trait` 是 warn-by-default，而每个任务的门禁是
     /// `cargo clippy --workspace -- -D warnings`——一个叫 `next` 的固有方法会让
     /// 这个任务过不了它自己的门。

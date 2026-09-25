@@ -18,6 +18,7 @@
 
 use super::agc::Agc;
 use super::decode::{Decoder, FRAME_SAMPLES};
+use super::filter::VoiceFilter;
 use super::jitter::{self, Frame, JitterBuffer};
 use super::mix::{apply_quality, interfere, mix_into, NoiseGen};
 use can_voice_proto::wire::Header;
@@ -61,6 +62,7 @@ struct RxStream {
     qual: u8,
     frames: u32,
     agc: Agc,
+    filter: VoiceFilter,
 }
 
 /// 一条连接上所有接收流的混音器。
@@ -76,9 +78,6 @@ pub struct RxMixer {
     gains: HashMap<u32, f32>,
     speaker_gains: HashMap<(u32, u32), f32>,
     noise: NoiseGen,
-    /// 干扰音的拍频相位，跨 tick 连续——每帧从零开始的话，拍频会变成
-    /// 每 20 毫秒一次的周期性咔哒，而不是一段连续的啸叫。
-    phase: f32,
 }
 
 impl Default for RxMixer {
@@ -94,9 +93,7 @@ impl RxMixer {
             learned: HashMap::new(),
             gains: HashMap::new(),
             speaker_gains: HashMap::new(),
-            // 固定种子：静噪是确定性的，测试才不会时灵时不灵。
             noise: NoiseGen::new(0x5EED),
-            phase: 0.0,
         }
     }
 
@@ -132,6 +129,7 @@ impl RxMixer {
                     qual: h.qual,
                     frames: 0,
                     agc: Agc::default(),
+                    filter: VoiceFilter::default(),
                 })
             }
         };
@@ -142,14 +140,13 @@ impl RxMixer {
 
     /// 这一拍的 PCM（**恒为 [`FRAME_SAMPLES`] 个采样**）与这一拍产生的事件。
     pub fn tick(&mut self) -> (Vec<i16>, Vec<RxEvent>) {
-        // 拆开借用：下面要同时可变地用 streams、noise 和 phase。
+        // 拆开借用：下面要同时可变地用 streams 和 noise。
         let Self {
             streams,
             learned,
             gains,
             speaker_gains,
             noise,
-            phase,
         } = self;
 
         let mut events = Vec::new();
@@ -182,8 +179,9 @@ impl RxMixer {
                 // 还没攒够水位。这一路这一拍不出声，但音频时钟照走。
                 None => continue,
             }
-            // 射程衰减与静噪。服务端**根本不投递**射程外的包，所以 qual 恒在 1–255，
+            // 射程衰减。服务端**根本不投递**射程外的包，所以 qual 恒在 1–255，
             // 这里不给 0 写分支（和 mix::quality_gain 同一条理由）。
+            stream.filter.process(&mut buf);
             stream.agc.process(&mut buf);
             let manual = speaker_gains
                 .get(&(speaker, freq_khz))
@@ -220,7 +218,7 @@ impl RxMixer {
             let mut per_freq = vec![0i16; FRAME_SAMPLES];
             let refs: Vec<&[i16]> = sources.iter().map(|s| s.as_slice()).collect();
             // 一路是一个人在讲；两路及以上才是"有人在压我的话"。
-            interfere(&refs, &mut per_freq, phase);
+            interfere(&refs, &mut per_freq);
             mix_into(&mut out, &per_freq, gain);
         }
 

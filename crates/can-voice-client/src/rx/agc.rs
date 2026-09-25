@@ -27,16 +27,18 @@ impl Agc {
 
     pub fn process(&mut self, samples: &mut [i16]) {
         let level = rms_dbfs(samples);
-        if level > GATE_DBFS {
-            let wanted = (TARGET_DBFS - level).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
-            let tau = if wanted > self.gain_db {
-                ATTACK_SECS
-            } else {
-                RELEASE_SECS
-            };
-            let alpha = 1.0 - (-FRAME_SECS / tau).exp();
-            self.gain_db += (wanted - self.gain_db) * alpha;
+        if level <= GATE_DBFS {
+            return;
         }
+        let wanted = (TARGET_DBFS - level).clamp(MIN_GAIN_DB, MAX_GAIN_DB);
+        let tau = if wanted > self.gain_db {
+            ATTACK_SECS
+        } else {
+            RELEASE_SECS
+        };
+        let alpha = 1.0 - (-FRAME_SECS / tau).exp();
+        self.gain_db += (wanted - self.gain_db) * alpha;
+
         let gain = db_to_linear(self.gain_db);
         if (gain - 1.0).abs() > f32::EPSILON {
             for sample in samples {
@@ -129,6 +131,20 @@ mod tests {
         assert!(rms_dbfs(&frame) < GATE_DBFS);
         agc.process(&mut frame);
         assert_eq!(agc.gain_db(), 0.0);
+    }
+
+    #[test]
+    fn below_gate_frame_is_not_amplified_by_previous_gain() {
+        let mut agc = Agc::default();
+        for _ in 0..120 {
+            let mut speech = tone(0.05, 960);
+            agc.process(&mut speech);
+        }
+        assert!(agc.gain_db() > 0.0);
+        let mut noise = tone(0.001, 960);
+        let before = noise.clone();
+        agc.process(&mut noise);
+        assert_eq!(noise, before);
     }
 
     #[test]
