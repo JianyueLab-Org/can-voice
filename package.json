@@ -1,0 +1,7 @@
+{
+  "name": "can-voice-listen-deploy",
+  "private": true,
+  "scripts": {
+    "lint": "git diff --check"
+  }
+}
