@@ -503,6 +503,17 @@ mod tests {
         assert_eq!(s.trimmed_ms, 0, "{s:?}");
     }
 
+    /// Windows 共享模式可能一次交给回调超过 60 ms 的数据。
+    ///
+    /// 固定 60 ms 目标会让这种回调每次都吃空播放环，即使生产者和声卡时钟
+    /// 完全一致。目标水位必须跟着回调大小增长，才能保留一个完整回调的余量。
+    #[test]
+    fn a_large_output_callback_does_not_drain_the_playback_ring() {
+        let s = drift(96_000, 8_192, 100, 1.0);
+        assert_eq!(s.underruns, 0, "大回调把环吃空了: {s:?}");
+        assert_eq!(s.silence_ms, 0, "大回调补进了静音: {s:?}");
+    }
+
     /// 生产者慢 0.5% 要被转向吃掉，环不能空。
     ///
     /// **回调缓冲取 128 帧是有意的。** 每个回调只改一个样本，所以转向的权限
@@ -725,7 +736,7 @@ mod tests {
 // 都在 tokio 那一侧，回调里一行都没有。
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 环形缓冲最多存多少毫秒。
@@ -737,9 +748,10 @@ const RING_MS: usize = 200;
 /// 播放环要稳住的水位。
 ///
 /// 60 毫秒正好是三个 Opus 帧：够吃掉一次调度抖动，又短到没人会把它当成延迟。
-/// 它和 [`RING_MS`] 是两件事——这个是**要稳在**的水位，那个是**绝不能超过**的
-/// 延迟。只有上限没有目标，就是这个缺陷本身：水位在 0 和 200 毫秒之间自由漂，
-/// 而两端都难听。
+/// 它是普通声卡的基准；Windows 共享模式可能一次交给回调更大的缓冲，运行时会
+/// 把目标提高到至少两个回调缓冲。它和 [`RING_MS`] 是两件事——这个是**要稳在**
+/// 的水位，那个是**绝不能超过**的延迟。只有上限没有目标，就是这个缺陷本身：
+/// 水位在 0 和 200 毫秒之间自由漂，而两端都难听。
 const TARGET_MS: usize = 60;
 
 /// 一拍的长度，等于一个 Opus 帧。
@@ -813,6 +825,8 @@ pub(crate) struct PlaybackClock {
     added: AtomicU64,
     removed: AtomicU64,
     depth: AtomicU64,
+    /// 当前声卡回调一次要多少帧。Windows 共享模式可能给出大于 60 ms 的缓冲。
+    callback_frames: AtomicUsize,
     /// 这一段欠载的第一行报过了吗。
     reported: AtomicBool,
     /// 报第一行时的段数与静音数。汇总行减掉它们才是"这之后又发生了多少"。
@@ -835,6 +849,7 @@ impl PlaybackClock {
         self.ever_primed.store(false, Ordering::Relaxed);
         self.dry.store(false, Ordering::Relaxed);
         self.depth.store(0, Ordering::Relaxed);
+        self.callback_frames.store(0, Ordering::Relaxed);
     }
 
     fn rate(&self) -> usize {
@@ -843,7 +858,11 @@ impl PlaybackClock {
 
     /// 目标水位，样本数。
     fn target(&self) -> usize {
-        self.rate() * TARGET_MS / 1000
+        let base = self.rate() * TARGET_MS / 1000;
+        let callback = self.callback_frames.load(Ordering::Relaxed);
+        // 一次回调至少要有两次回调量的余量：消费一整块之后，生产者才有时间
+        // 在下一次回调前补回同样多的音频。仍受 RING_MS 硬上限约束。
+        base.max(callback.saturating_mul(2)).min(self.cap())
     }
 
     /// 硬上限，样本数。
@@ -874,6 +893,10 @@ impl PlaybackClock {
 
     fn set_depth(&self, depth: usize) {
         self.depth.store(depth as u64, Ordering::Relaxed);
+    }
+
+    fn note_callback_frames(&self, frames: usize) {
+        self.callback_frames.fetch_max(frames, Ordering::Relaxed);
     }
 
     fn note_trimmed(&self, n: u64) {
@@ -937,7 +960,7 @@ impl PlaybackClock {
                 self.mark_underruns.store(s.underruns, Ordering::Relaxed);
                 self.mark_silence.store(s.silence_ms, Ordering::Relaxed);
                 tracing::warn!(
-                    target_ms = TARGET_MS,
+                    target_ms = self.target().saturating_mul(1000) / self.rate(),
                     trimmed_ms = s.trimmed_ms,
                     steer_added = s.steer_added,
                     steer_removed = s.steer_removed,
@@ -1514,6 +1537,7 @@ fn fill_output_reuse(
     if frames == 0 {
         return;
     }
+    clock.note_callback_frames(frames);
 
     mono.clear();
     let take;
