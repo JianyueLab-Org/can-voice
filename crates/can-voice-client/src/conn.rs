@@ -276,6 +276,8 @@ pub enum Error {
     Refused(RefusedReason),
     #[error("server replied with {0} instead of READY")]
     UnexpectedReply(String),
+    #[error("voice server does not support datagrams")]
+    DatagramsUnavailable,
     #[error("follow callsign {0:?} is not a callsign: 2-10 chars of A-Z 0-9 - _")]
     BadCallsign(String),
 }
@@ -390,6 +392,10 @@ pub async fn connect(
     endpoint.set_default_client_config(client_cfg);
 
     let conn = endpoint.connect(addr, server_name)?.await?;
+    if conn.max_datagram_size().is_none() {
+        conn.close(0u32.into(), b"datagrams required");
+        return Err(Error::DatagramsUnavailable);
+    }
     let (mut send, mut recv) = conn.open_bi().await?;
 
     let hello = Message::Hello(control::Hello {

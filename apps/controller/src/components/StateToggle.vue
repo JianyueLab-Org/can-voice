@@ -18,11 +18,18 @@ const props = defineProps<{
   width: number;
   height: number;
   disabled?: boolean;
+  interactive?: boolean;
 }>();
 
-defineEmits<{ press: [] }>();
+const emit = defineEmits<{ press: [] }>();
 
 const fill = () => `var(--can-${props.state})`;
+function press() {
+  if (props.interactive !== false) emit("press");
+}
+function suppressPassiveKey(e: KeyboardEvent) {
+  if (props.interactive === false && (e.key === " " || e.key === "Enter")) e.preventDefault();
+}
 </script>
 
 <template>
@@ -37,7 +44,10 @@ const fill = () => `var(--can-${props.state})`;
       height: `${height}px`,
     }"
     :disabled="disabled"
-    @click.stop="$emit('press')"
+    :tabindex="props.interactive === false ? -1 : undefined"
+    :aria-hidden="props.interactive === false ? 'true' : undefined"
+    @click.stop="press"
+    @keydown="suppressPassiveKey"
   >
     {{ label }}
   </button>

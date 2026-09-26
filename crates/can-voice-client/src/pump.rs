@@ -120,7 +120,12 @@ fn drain_queued(
                     io.set_devices(input.as_deref(), output.as_deref());
                 }
             }
-            Command::Shutdown => return false,
+            Command::Shutdown { done } => {
+                if let Some(done) = done {
+                    let _ = done.send(());
+                }
+                return false;
+            }
             other => controls.apply(&other),
         }
     }
@@ -396,7 +401,14 @@ async fn pump(
                     }
                 }
                 Some(cmd @ Command::Master { .. }) => controls.apply(&cmd),
-                Some(Command::Shutdown) | None => {
+                Some(Command::Shutdown { done }) => {
+                    quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
+                    if let Some(done) = done {
+                        let _ = done.send(());
+                    }
+                    return Outcome::Shutdown;
+                }
+                None => {
                     quic.close(conn::CLOSE_NORMAL.try_into().unwrap_or_default(), b"bye");
                     return Outcome::Shutdown;
                 }

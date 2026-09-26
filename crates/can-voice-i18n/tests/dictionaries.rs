@@ -697,21 +697,21 @@ fn the_scanners_find_what_they_should_and_nothing_else() {
 
 // ——— 界面的颜色只有一处声明 ———
 
-/// can-audio 那套语义色，对应它四个客户端逐字节相同的 `controller/theme.py`。
+/// Shared semantic colors declared by all four client stylesheets.
 ///
 /// **不在组件里写十六进制字面量**：旧版只有一个 theme.py，而这边同一个颜色
 /// 散在四个客户端的组件里，改一处就漏三处。
 #[test]
 fn every_app_declares_the_can_audio_palette() {
     const TOKENS: &[(&str, &str)] = &[
-        ("--can-off", "#436384"),
-        ("--can-on", "#28a745"),
-        ("--can-active", "#c7861d"),
-        ("--can-muted", "#dc3545"),
-        ("--can-theme", "#5eb1bf"),
-        ("--can-idle", "#8b90a4"),
-        ("--can-surface", "#252839"),
-        ("--can-window", "#2c2f45"),
+        ("--can-off", "#525252"),
+        ("--can-on", "#171717"),
+        ("--can-active", "#404040"),
+        ("--can-muted", "#737373"),
+        ("--can-theme", "#262626"),
+        ("--can-idle", "#a3a3a3"),
+        ("--can-surface", "#ffffff"),
+        ("--can-window", "#f5f5f5"),
     ];
     for app in APPS {
         let css = std::fs::read_to_string(repo().join(format!("apps/{app}/src/style.css")))

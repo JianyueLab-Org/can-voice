@@ -12,7 +12,7 @@ const box = ref<HTMLElement | null>(null);
 // **新消息要自己滚到底**：不滚的话，管制员的回话贴在看不见的下面，
 // 而飞行员正盯着屏幕等它。
 watch(
-  () => props.messages.length,
+  () => props.messages.map((m) => `${m.at}\u0000${m.from}\u0000${m.to}\u0000${m.text}`).join("\u0001"),
   async () => {
     await nextTick();
     const el = box.value;

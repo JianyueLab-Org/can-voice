@@ -104,6 +104,8 @@ impl App {
             bridge,
             http: reqwest::Client::builder()
                 .user_agent(concat!("audio-for-can/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_default(),
             ptt: std::sync::Mutex::new(None), // setup 里按已存绑定拉起来，和原来 voice 一样
@@ -336,7 +338,13 @@ fn spawn_feed(app: &App, cid: String) {
                     }
                 }
                 // 取不到就只把"查不到"这件事说出来，别的一律不动。
-                None => locked(&slot).reachable = false,
+                None => {
+                    let mut current = locked(&slot);
+                    current.reachable = false;
+                    current.online.clear();
+                    current.roster.clear();
+                    current.duty = DutyView::default();
+                }
             }
         }
     });
@@ -448,13 +456,21 @@ fn radios(state: tauri::State<'_, App>) -> Vec<Radio> {
 /// 加回来就把"用户删过它"那条记录清掉：不然自动加频率对这个频率永久失效，
 /// 而那只有下一次重开程序才会恢复。
 #[tauri::command]
-fn add_frequency(state: tauri::State<'_, App>, freq_khz: u32, callsign: Option<String>) {
+fn add_frequency(
+    state: tauri::State<'_, App>,
+    freq_khz: u32,
+    callsign: Option<String>,
+) -> Result<(), String> {
+    if !(118_000..=136_975).contains(&freq_khz) || freq_khz % 5 != 0 {
+        return Err("frequency must be between 118000 and 136975 kHz on a 5 kHz raster".into());
+    }
     let callsign = callsign.unwrap_or_default();
     state
         .bridge
         .with_stack(|s| s.add_named(freq_khz, &callsign));
     locked(&state.user_removed).remove(&freq_khz);
     state.update_settings(|_| {});
+    Ok(())
 }
 
 /// 删一个频率。

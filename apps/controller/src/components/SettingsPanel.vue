@@ -43,6 +43,13 @@ const testing = ref<"speaker" | "mic" | null>(null);
 const testErr = ref("");
 
 let captureTimer: number | undefined;
+let deviceRefreshInFlight = false;
+let capturePollInFlight = false;
+let captureGeneration = 0;
+
+function setCaptureActive(active: boolean) {
+  window.dispatchEvent(new CustomEvent("can-voice:ptt-capture", { detail: active }));
+}
 
 async function load() {
   const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
@@ -58,10 +65,16 @@ async function load() {
 }
 
 async function refreshDevices() {
-  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
-  inputs.value = devices.input ?? [];
-  outputs.value = devices.output ?? [];
-  await dropGoneDevices();
+  if (deviceRefreshInFlight) return;
+  deviceRefreshInFlight = true;
+  try {
+    const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+    inputs.value = devices.input ?? [];
+    outputs.value = devices.output ?? [];
+    await dropGoneDevices();
+  } finally {
+    deviceRefreshInFlight = false;
+  }
 }
 
 /** 下拉框里已经没有的设备当成拔掉了，改回系统默认。 */
@@ -79,15 +92,21 @@ async function dropGoneDevices() {
 }
 
 let deviceTimer: number | undefined;
-onMounted(async () => {
-  mouseOk.value = await invoke<boolean>("mouse_ptt_supported");
-  keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported");
-  await load();
+onMounted(() => void init());
+async function init() {
+  try { mouseOk.value = await invoke<boolean>("mouse_ptt_supported"); } catch { mouseOk.value = false; }
+  try { keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported"); } catch { keyboardOk.value = false; }
+  try { await load(); } catch (e) { testErr.value = String(e); }
   deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
-});
+}
 onUnmounted(() => {
   window.clearInterval(captureTimer);
   window.clearInterval(deviceTimer);
+  const wasCapturing = capturing.value;
+  captureGeneration += 1;
+  capturing.value = false;
+  setCaptureActive(false);
+  if (wasCapturing) void invoke("cancel_ptt_capture");
 });
 
 async function applyDevices() {
@@ -140,18 +159,38 @@ async function push() {
  */
 async function capture() {
   if (capturing.value) return;
+  const generation = ++captureGeneration;
   capturing.value = true;
+  setCaptureActive(true);
+  testErr.value = "";
   (document.activeElement as HTMLElement | null)?.blur();
-  await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
-  await invoke("begin_ptt_capture");
+  try {
+    await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
+    if (generation !== captureGeneration || !capturing.value) return;
+    await invoke("begin_ptt_capture");
+    if (generation !== captureGeneration || !capturing.value) {
+      await invoke("cancel_ptt_capture");
+      return;
+    }
+  } catch (e) {
+    capturing.value = false;
+    setCaptureActive(false);
+    testErr.value = String(e);
+    void invoke("cancel_ptt_capture");
+    return;
+  }
 
   let waited = 0;
   captureTimer = window.setInterval(async () => {
+    if (capturePollInFlight) return;
+    capturePollInFlight = true;
+    try {
     const got = await invoke<unknown | null>("take_captured_binding");
     waited += 150;
     if (got) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      setCaptureActive(false);
       bindings.value = [...bindings.value, { token: "", unresolved: false, binding: got }];
       await push();
       return;
@@ -160,7 +199,17 @@ async function capture() {
     if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      setCaptureActive(false);
       void invoke("cancel_ptt_capture");
+    }
+    } catch (e) {
+      window.clearInterval(captureTimer);
+      capturing.value = false;
+      setCaptureActive(false);
+      testErr.value = String(e);
+      void invoke("cancel_ptt_capture");
+    } finally {
+      capturePollInFlight = false;
     }
   }, 150);
 }

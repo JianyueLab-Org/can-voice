@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 飞行计划对话框（spec §6）。`PilotPanel` 的飞行计划页搬进 `Modal`，
+ * 飞行计划对话框（spec §6）。飞行计划页搬进 `Modal`，
  * 从原生菜单「文件 → 飞行计划…」进，不再是主界面上的一个页签。
  *
  * 用到它的客户端：xpc、msfs。**登记在 `SHARED_FRONTEND` 上**——不登记的副本
@@ -43,7 +43,7 @@ async function file() {
 
 <template>
   <!-- 宽度用 `Modal` 的默认 44rem，四列表单在 980 宽的窗口里正好。外面补一个
-       `text-xs`：`Modal` 的盒子是 `text-sm`，而这一页此前长在 `PilotPanel` 的
+       `text-xs`：`Modal` 的盒子是 `text-sm`，而这一页此前使用的
        `text-xs` 里，不补的话整张表单比今天大一号。 -->
   <Modal :open="props.open" :title="t('plan.tab')" @close="emit('close')">
     <div class="grid grid-cols-4 gap-2 text-xs">

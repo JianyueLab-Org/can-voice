@@ -48,6 +48,10 @@ const (
 	CloseProtocolViolation quic.ApplicationErrorCode = 3
 )
 
+// ReasonDatagramsRequired is sent before authentication when the peer did not
+// negotiate QUIC datagrams. A control-only connection cannot carry voice.
+const ReasonDatagramsRequired = "datagrams_required"
+
 // 握手被拒的原因。和上面三个关闭码一样，这几个字符串是**协议的一部分**：
 // 客户端靠它们决定"去换一张新 token 再试"还是"别试了"，改动等于改协议。
 //

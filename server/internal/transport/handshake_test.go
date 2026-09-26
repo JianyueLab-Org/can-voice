@@ -67,6 +67,14 @@ type stubConn struct {
 
 func (c *stubConn) SendDatagram([]byte) error { return nil }
 
+// The production handshake rejects peers that did not negotiate QUIC
+// datagrams. The in-memory connection is used by tests that exercise the
+// later handshake and teardown paths, so model the capability explicitly
+// instead of delegating ConnectionState to the nil embedded interface.
+func (c *stubConn) ConnectionState() quic.ConnectionState {
+	return quic.ConnectionState{SupportsDatagrams: true}
+}
+
 // ReceiveDatagram 只是挂住：handleConn 起的 readDatagrams goroutine 会调它，
 // 而 stubConn 里嵌的 quic.Connection 是 nil，不实现它就是空指针 panic——
 // 那个 panic 还发生在**另一个 goroutine 上**，整个测试进程跟着走。

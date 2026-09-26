@@ -1,9 +1,13 @@
 use can_voice_listen::{Config as GatewayConfig, ListenGateway};
 use std::env;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const INDEX: &str = include_str!("index.html");
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const TOKEN_RESPONSE_LIMIT: usize = 64 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -12,15 +16,22 @@ async fn main() {
         .await
         .expect("LISTEN_ADDR must bind");
     loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            continue;
-        };
-        tokio::spawn(handle(stream));
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else { continue };
+                tokio::spawn(handle(stream));
+            }
+            _ = tokio::signal::ctrl_c() => break,
+        }
     }
 }
 
 async fn handle(mut stream: TcpStream) {
-    let Some(request) = read_request(&mut stream).await else {
+    let Some(request) = tokio::time::timeout(REQUEST_TIMEOUT, read_request(&mut stream))
+        .await
+        .ok()
+        .flatten()
+    else {
         return;
     };
     let (method, target, cookie) = request;
@@ -99,7 +110,11 @@ async fn handle(mut stream: TcpStream) {
         client_id: format!("can-listen/{frequency}"),
         extra_roots: Vec::new(),
     };
-    let Ok(mut gateway) = ListenGateway::connect(config, frequency).await else {
+    let Some(Ok(mut gateway)) =
+        tokio::time::timeout(CONNECT_TIMEOUT, ListenGateway::connect(config, frequency))
+            .await
+            .ok()
+    else {
         let _ = response(
             &mut stream,
             "503 Service Unavailable",
@@ -110,20 +125,33 @@ async fn handle(mut stream: TcpStream) {
         return;
     };
     let header = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nCache-Control: no-store\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
-    if stream.write_all(header).await.is_err() {
+    if tokio::time::timeout(IO_TIMEOUT, stream.write_all(header))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_none()
+    {
         return;
     }
-    while let Ok(frame) = gateway.frames().recv().await {
-        let mut bytes = Vec::with_capacity(frame.len() * 2);
-        for sample in frame {
-            bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        let prefix = format!("{:X}\r\n", bytes.len());
-        if stream.write_all(prefix.as_bytes()).await.is_err()
-            || stream.write_all(&bytes).await.is_err()
-            || stream.write_all(b"\r\n").await.is_err()
-        {
-            break;
+    let mut closed = [0u8; 1];
+    loop {
+        tokio::select! {
+            frame = gateway.frames().recv() => {
+                let Ok(frame) = frame else { break };
+                let mut bytes = Vec::with_capacity(frame.len() * 2);
+                for sample in frame {
+                    bytes.extend_from_slice(&sample.to_le_bytes());
+                }
+                if !write_stream_chunk(&mut stream, &bytes).await {
+                    break;
+                }
+            }
+            result = stream.read(&mut closed) => {
+                match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
         }
     }
     gateway.shutdown().await;
@@ -161,25 +189,88 @@ async fn response(
     body: &[u8],
 ) -> std::io::Result<()> {
     let header = format!("HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len());
-    stream.write_all(header.as_bytes()).await?;
-    stream.write_all(body).await
+    tokio::time::timeout(IO_TIMEOUT, stream.write_all(header.as_bytes()))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "response header timeout")
+        })??;
+    tokio::time::timeout(IO_TIMEOUT, stream.write_all(body))
+        .await
+        .map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "response body timeout")
+        })??;
+    Ok(())
+}
+
+async fn write_stream_chunk<W>(stream: &mut W, bytes: &[u8]) -> bool
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let prefix = format!("{:X}\r\n", bytes.len());
+    if tokio::time::timeout(IO_TIMEOUT, stream.write_all(prefix.as_bytes()))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_none()
+    {
+        return false;
+    }
+    if tokio::time::timeout(IO_TIMEOUT, stream.write_all(bytes))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_none()
+    {
+        return false;
+    }
+    tokio::time::timeout(IO_TIMEOUT, stream.write_all(b"\r\n"))
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some()
 }
 
 async fn issue_listener_token(cookie: &str, frequency: u32) -> Option<String> {
     let origin = env::var("CAN_API_ORIGIN")
         .unwrap_or_else(|_| "http://app.can-api.svc.cluster.local".into());
     let authority = origin.strip_prefix("http://")?;
-    let mut stream = TcpStream::connect(authority).await.ok()?;
+    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(authority))
+        .await
+        .ok()
+        .and_then(Result::ok)?;
     let body = format!("{{\"frequency\":{frequency}}}");
     let request = format!("POST /api/v1/voice/listen-token HTTP/1.1\r\nHost: {authority}\r\nCookie: {cookie}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-    stream.write_all(request.as_bytes()).await.ok()?;
-    let mut bytes = Vec::new();
-    stream.read_to_end(&mut bytes).await.ok()?;
+    tokio::time::timeout(IO_TIMEOUT, stream.write_all(request.as_bytes()))
+        .await
+        .ok()
+        .and_then(Result::ok)?;
+    let bytes = tokio::time::timeout(IO_TIMEOUT, read_token_response(&mut stream))
+        .await
+        .ok()
+        .flatten()?;
     let text = String::from_utf8(bytes).ok()?;
     if !text.starts_with("HTTP/1.1 200") {
         return None;
     }
     json_string(&text, "token")
+}
+
+async fn read_token_response<R>(stream: &mut R) -> Option<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(4096);
+    loop {
+        let mut chunk = [0u8; 4096];
+        let n = stream.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return Some(bytes);
+        }
+        if bytes.len().saturating_add(n) > TOKEN_RESPONSE_LIMIT {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
 }
 
 fn json_string(body: &str, key: &str) -> Option<String> {
@@ -209,5 +300,25 @@ mod tests {
     fn frequency_validation_matches_the_voice_raster() {
         assert!(valid_frequency(118500));
         assert!(!valid_frequency(118501));
+    }
+
+    #[tokio::test]
+    async fn stream_chunk_write_reports_a_closed_connection() {
+        let (mut writer, reader) = tokio::io::duplex(1);
+        drop(reader);
+
+        assert!(!write_stream_chunk(&mut writer, b"audio").await);
+    }
+
+    #[tokio::test]
+    async fn token_response_is_bounded_even_when_peer_sends_more() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let send = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; TOKEN_RESPONSE_LIMIT + 1])
+                .await
+        });
+        assert!(read_token_response(&mut reader).await.is_none());
+        send.await.unwrap().unwrap();
     }
 }

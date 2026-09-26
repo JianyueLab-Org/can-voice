@@ -29,12 +29,26 @@ const showAbout = ref(false);
 const version = ref("");
 const logPath = ref("");
 
+function openFlightPlan() {
+  showPrefs.value = false;
+  showAbout.value = false;
+  showPlan.value = true;
+}
+
+function openPreferences() {
+  showPlan.value = false;
+  showAbout.value = false;
+  showPrefs.value = true;
+}
+
 /**
  * 「帮助 → 关于」。版本号和日志路径**打开时才读**，不在 `onMounted` 里读：
  * `onMounted` 里一条 reject 的 invoke 会把它后面的 `setInterval` 和 PTT 绑定
  * 一起带走，界面连上之后画一帧就不动了。
  */
 async function openAbout() {
+  showPlan.value = false;
+  showPrefs.value = false;
   try {
     version.value = await invoke<string>("app_version");
   } catch {
@@ -178,6 +192,7 @@ const recipient = ref("");
 const message = ref("");
 
 let timer: number | undefined;
+let refreshInFlight = false;
 
 /** 以观察员身份连着。观察员没有 FSD 链路，`link` 恒为 null——只看它的话连上之后登录表单不消失。 */
 const observing = computed(() => view.value?.observer != null);
@@ -193,6 +208,7 @@ const boxText = (khz: number | null) => (khz === null ? "" : khzText(khz));
  * 会在人还按着键的时候把话切断——那时候他正在说话，而界面上一点异样都没有。
  */
 function pttDown(e: PointerEvent) {
+  if (!online.value) return;
   // 指针捕获：按住说话时手是会动的，滑出按钮之后 `pointerup` 就落到别的元素上，
   // 松手事件永远不来，麦克风一直开着。
   (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
@@ -240,16 +256,29 @@ async function pushMenu() {
 watch(language, () => void pushMenu(), { immediate: true });
 
 async function refresh() {
-  view.value = await invoke<View>("view");
-  pressed.value = await invoke<boolean>("ptt_pressed");
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const viewRequest = invoke<View>("view");
+  const pressedRequest = invoke<boolean>("ptt_pressed");
+  const request = Promise.all([viewRequest, pressedRequest]);
+  void Promise.allSettled([viewRequest, pressedRequest]).then(() => {
+    refreshInFlight = false;
+  });
+  try {
+    const [nextView, nextPressed] = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("refresh timeout")), 1500)),
+    ]);
+    view.value = nextView;
+    pressed.value = nextPressed;
   // 菜单那一项是**取走就没了**：上面这一次 `view` 已经把它从 Rust 侧清掉，
   // 这一拍不处理就没有下一拍。
-  switch (view.value.menu) {
+  switch (nextView.menu) {
     case "flight_plan":
-      showPlan.value = true;
+      openFlightPlan();
       break;
     case "settings":
-      showPrefs.value = true;
+      openPreferences();
       break;
     case "update":
       void checkUpdate();
@@ -259,32 +288,50 @@ async function refresh() {
       break;
     default:
       break;
+    }
+  } catch (e) {
+    error.value = e;
   }
 }
 
 let detachPtt: (() => void) | undefined;
-onMounted(async () => {
-  void loadAppearance();
-  // 上次用的那一组预填。密码不存：它换的是一张短寿命的票。
-  const saved = await invoke<import("./types").Settings>("settings");
-  cid.value = saved.cid;
-  callsign.value = saved.callsign;
-  aircraft.value = saved.aircraft;
-  realName.value = saved.real_name;
-  observer.value = saved.observer;
-  observerCallsign.value = saved.observer_callsign;
-  manualFrequency.value = boxText(saved.observer_frequency);
-  mouseSupported.value = await invoke<boolean>("mouse_ptt_supported");
-  await refresh();
-  // 轮询而不是订阅：事件流是广播，窗口重开之前发生的事收不到。
-  timer = window.setInterval(refresh, 250);
-  detachPtt = attachPttKeys();
+onMounted(() => {
+  void init();
 });
+
+async function init() {
+  void loadAppearance().catch((e) => { error.value = e; });
+  timer = window.setInterval(() => void refresh(), 250);
+  detachPtt = attachPttKeys();
+  window.addEventListener("blur", pttUp);
+  document.addEventListener("visibilitychange", pttUp);
+  // 上次用的那一组预填。密码不存：它换的是一张短寿命的票。
+  try {
+    const saved = await invoke<import("./types").Settings>("settings");
+    cid.value = saved.cid;
+    callsign.value = saved.callsign;
+    aircraft.value = saved.aircraft;
+    realName.value = saved.real_name;
+    observer.value = saved.observer;
+    observerCallsign.value = saved.observer_callsign;
+    manualFrequency.value = boxText(saved.observer_frequency);
+  } catch (e) {
+    error.value = e;
+  }
+  try {
+    mouseSupported.value = await invoke<boolean>("mouse_ptt_supported");
+  } catch (e) {
+    error.value = e;
+  }
+  await refresh();
+}
 onUnmounted(() => {
   window.clearInterval(timer);
   // 不清的话它会朝着一个已经拆掉的组件写值。
   window.clearTimeout(updateClear);
   detachPtt?.();
+  window.removeEventListener("blur", pttUp);
+  document.removeEventListener("visibilitychange", pttUp);
 });
 
 async function guard(fn: () => Promise<unknown>) {
@@ -364,12 +411,12 @@ const send = () =>
 <template>
   <StartupGate>
     <main
-      class="mx-auto flex h-screen max-w-5xl flex-col text-sm"
+      class="app-shell mx-auto flex h-screen max-w-5xl flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
     >
       <header class="flex items-center gap-2">
         <!-- 精简时也在：藏掉的话精简之后就切不回来了。 -->
-        <WindowToggles class="ml-auto" @settings="showPrefs = true" />
+        <WindowToggles class="ml-auto" @settings="openPreferences" />
       </header>
 
       <!-- `key` 是「帮助 → 检查更新」那条路：横幅自己只在挂载时查一次，换掉 `key`
@@ -599,8 +646,8 @@ const send = () =>
         <!-- 排不下就换行，不是裁掉：900×600 的最小尺寸只管正常模式，精简时窗口能
              拖到 320px 宽。 -->
         <div class="flex flex-wrap items-center gap-2">
-          <StateToggle label="TX" :state="txState" :width="52" :height="26" />
-          <StateToggle label="RX" :state="rxState" :width="52" :height="26" />
+          <StateToggle label="TX" :state="txState" :width="52" :height="26" :interactive="false" />
+          <StateToggle label="RX" :state="rxState" :width="52" :height="26" :interactive="false" />
 
           <!-- 电门关着时照样显示调在哪：这是座舱里的读数，而「听不见」由左边两块
                色块转暗去说。 -->
@@ -665,6 +712,7 @@ const send = () =>
           </button>
 
           <button
+            :disabled="!online || busy"
             class="rounded border px-4 py-2 text-xs"
             :class="talking ? 'text-white' : ''"
             :style="talking ? { background: 'var(--can-active)' } : {}"
@@ -706,10 +754,10 @@ const send = () =>
         </span>
       </StatusBar>
 
-      <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
       <SettingsDialog :open="showPrefs" @close="showPrefs = false">
         <PilotSettings :cid="cid" :csl="view?.csl" />
       </SettingsDialog>
+      <FlightPlanDialog :open="showPlan" :observer="observer" @close="showPlan = false" />
 
       <!-- `about.body` 里有 `\n`。`whitespace-pre-line` 让浏览器照着换行就够了，
            **不要 `v-html`**：那句话里插着版本号和日志文件路径，都是从程序外面来的字符串。 -->

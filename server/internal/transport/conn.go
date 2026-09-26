@@ -201,6 +201,13 @@ func handleConn(ctx context.Context, conn quic.Connection, cfg Config, r *router
 		return
 	}
 	armHandshakeDeadlines(st, time.Now().Add(handshakeTimeout.Get()))
+	if !conn.ConnectionState().SupportsDatagrams {
+		slog.Info("handshake refused: peer did not negotiate QUIC datagrams",
+			"peer", conn.RemoteAddr().String())
+		sendBye(st, ReasonDatagramsRequired)
+		conn.CloseWithError(CloseHandshakeRefused, ReasonDatagramsRequired)
+		return
+	}
 
 	// 每条会话一个有界发送队列。把 SessionOpts.Send 直接接到 conn.SendDatagram 上
 	// 是不行的：那个函数在 quic-go 自己的 32 帧队列满时**阻塞**，而 router.Fanout

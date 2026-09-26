@@ -14,6 +14,9 @@ const open = ref(false);
 const state = ref<State>({ phase: "checking" });
 
 let timer: number | null = null;
+const MAX_WAIT_MS = 10_000;
+let startedAt = 0;
+let pollInFlight = false;
 
 function mb(bytes: number): string {
   return `${(bytes / 1_000_000).toFixed(0)} MB`;
@@ -48,8 +51,29 @@ function stop() {
  * 问不出来就放行：启动不能被更新拖住。
  */
 async function poll() {
+  if (pollInFlight) return;
+  if (startedAt !== 0 && Date.now() - startedAt >= MAX_WAIT_MS) {
+    open.value = true;
+    stop();
+    return;
+  }
+  pollInFlight = true;
+  const request = invoke<State>("update_state");
+  void request.then(
+    () => {
+      pollInFlight = false;
+    },
+    () => {
+      pollInFlight = false;
+    },
+  );
   try {
-    state.value = await invoke<State>("update_state");
+    state.value = await Promise.race([
+      request,
+      new Promise<never>((_, reject) =>
+        window.setTimeout(() => reject(new Error("update check timeout")), 1500),
+      ),
+    ]);
     if (state.value.phase === "done") {
       open.value = true;
       stop();
@@ -61,6 +85,7 @@ async function poll() {
 }
 
 onMounted(() => {
+  startedAt = Date.now();
   void poll();
   // 和各应用主刷新循环同一拍。
   timer = window.setInterval(() => void poll(), 200);
