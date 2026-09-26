@@ -64,45 +64,71 @@ const testErr = ref("");
 
 let captureTimer: number | undefined;
 let deviceTimer: number | undefined;
+let deviceRefreshInFlight = false;
+let capturePollInFlight = false;
+let captureGeneration = 0;
 
-onMounted(async () => {
-  keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported");
-  mouseOk.value = await invoke<boolean>("mouse_ptt_supported");
-  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
-  inputs.value = devices.input ?? [];
-  outputs.value = devices.output ?? [];
-  const s = await invoke<Settings>("settings");
-  input.value = s.input_device ?? "";
-  output.value = s.output_device ?? "";
-  inject.value = s.inject;
-  chime.value = s.message_sound;
-  chimeAll.value = s.message_sound_all;
-  chimeVolume.value = s.message_sound_volume;
-  mic.value = s.mic_volume ?? 100;
-  speaker.value = s.speaker_volume ?? 100;
-  range.value = s.traffic_range_nm;
-  cslDir.value = s.csl_dir;
-  bindings.value = await invoke<BindingView[]>("ptt_bindings");
-  await dropGoneDevices();
+function setCaptureActive(active: boolean) {
+  window.dispatchEvent(new CustomEvent("can-voice:ptt-capture", { detail: active }));
+}
+
+onMounted(() => void init());
+async function init() {
+  try { keyboardOk.value = await invoke<boolean>("keyboard_ptt_supported"); } catch { keyboardOk.value = false; }
+  try { mouseOk.value = await invoke<boolean>("mouse_ptt_supported"); } catch { mouseOk.value = false; }
+  let devicesLoaded = false;
+  try {
+    const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+    inputs.value = devices.input ?? [];
+    outputs.value = devices.output ?? [];
+    devicesLoaded = true;
+  } catch (e) { testErr.value = String(e); }
+  try {
+    const s = await invoke<Settings>("settings");
+    input.value = s.input_device ?? "";
+    output.value = s.output_device ?? "";
+    inject.value = s.inject;
+    chime.value = s.message_sound;
+    chimeAll.value = s.message_sound_all;
+    chimeVolume.value = s.message_sound_volume;
+    mic.value = s.mic_volume ?? 100;
+    speaker.value = s.speaker_volume ?? 100;
+    range.value = s.traffic_range_nm;
+    cslDir.value = s.csl_dir;
+  } catch (e) { testErr.value = String(e); }
+  try { bindings.value = await invoke<BindingView[]>("ptt_bindings"); } catch (e) { testErr.value = String(e); }
+  if (devicesLoaded) {
+    try { await dropGoneDevices(); } catch (e) { testErr.value = String(e); }
+  }
   deviceTimer = window.setInterval(() => void refreshDevices(), 2000);
-});
+}
 onUnmounted(() => {
   window.clearInterval(captureTimer);
   window.clearInterval(deviceTimer);
+  const wasCapturing = capturing.value;
+  captureGeneration += 1;
+  capturing.value = false;
+  setCaptureActive(false);
   // 关掉对话框就销毁这个组件，所以「录到一半」是关得掉的——而清掉那个 150 ms
   // 轮询并不会让 Rust 侧退出录制。不取消的话，对话框关着的时候按下的键会留在
   // 那里，下次一点「录制」立刻抓到它。
-  if (capturing.value) void invoke("cancel_ptt_capture");
+  if (wasCapturing) void invoke("cancel_ptt_capture");
 });
 
 const applyDevices = () =>
   invoke("set_audio_devices", { input: input.value || null, output: output.value || null });
 
 async function refreshDevices() {
-  const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
-  inputs.value = devices.input ?? [];
-  outputs.value = devices.output ?? [];
-  await dropGoneDevices();
+  if (deviceRefreshInFlight) return;
+  deviceRefreshInFlight = true;
+  try {
+    const devices = await invoke<{ input: DeviceInfo[]; output: DeviceInfo[] }>("audio_devices");
+    inputs.value = devices.input ?? [];
+    outputs.value = devices.output ?? [];
+    await dropGoneDevices();
+  } finally {
+    deviceRefreshInFlight = false;
+  }
 }
 
 async function dropGoneDevices() {
@@ -185,23 +211,53 @@ async function push() {
 /** 空栈也要听得到正在绑的那个键。 */
 async function capture() {
   if (capturing.value) return;
+  const generation = ++captureGeneration;
   capturing.value = true;
+  setCaptureActive(true);
+  testErr.value = "";
   (document.activeElement as HTMLElement | null)?.blur();
-  await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
-  await invoke("begin_ptt_capture");
+  try {
+    await invoke("set_ptt_bindings", { bindings: bindings.value.map((b) => b.binding) });
+    if (generation !== captureGeneration || !capturing.value) return;
+    await invoke("begin_ptt_capture");
+    if (generation !== captureGeneration || !capturing.value) {
+      await invoke("cancel_ptt_capture");
+      return;
+    }
+  } catch (e) {
+    capturing.value = false;
+    setCaptureActive(false);
+    testErr.value = String(e);
+    void invoke("cancel_ptt_capture");
+    return;
+  }
   let waited = 0;
   captureTimer = window.setInterval(async () => {
+    if (capturePollInFlight) return;
+    capturePollInFlight = true;
+    try {
     const got = await invoke<unknown | null>("take_captured_binding");
     waited += 150;
     if (got) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      setCaptureActive(false);
       bindings.value = [...bindings.value, { token: "", unresolved: false, binding: got }];
       await push();
     } else if (waited >= 10_000) {
       window.clearInterval(captureTimer);
       capturing.value = false;
+      setCaptureActive(false);
       void invoke("cancel_ptt_capture");
+    }
+    } catch (e) {
+      window.clearInterval(captureTimer);
+      capturing.value = false;
+      setCaptureActive(false);
+      testErr.value = String(e);
+      void invoke("cancel_ptt_capture");
+    } finally {
+      capturePollInFlight = false;
     }
   }, 150);
 }
@@ -214,7 +270,7 @@ async function remove(i: number) {
 
 <template>
   <section class="flex flex-col gap-3 text-xs">
-    <!-- 枢轴就是 `PilotPanel` 那个页签的写法：一个 ref、几个按钮、v-if/v-else。
+    <!-- 枢轴沿用原来的页签写法：一个 ref、几个按钮、v-if/v-else。
          三页值不上一个分页组件。 -->
     <div class="flex gap-2">
       <button class="rounded border px-2 py-1" :class="page === 'audio' ? 'border-sky-500' : ''" @click="page = 'audio'">

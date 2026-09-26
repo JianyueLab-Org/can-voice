@@ -1088,6 +1088,10 @@ pub struct AudioIo {
     input_rate: Arc<AtomicU32>,
     /// 此刻有没有活着的流。
     running: Arc<AtomicBool>,
+    /// 此刻有没有活着的输入流。
+    input_running: Arc<AtomicBool>,
+    /// 此刻有没有活着的输出流。
+    output_running: Arc<AtomicBool>,
     /// 想用哪两个设备。
     wanted: Arc<Mutex<(Option<String>, Option<String>)>>,
     /// 换设备的代数。变了就重建。
@@ -1108,6 +1112,8 @@ impl AudioIo {
         let capture: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let running = Arc::new(AtomicBool::new(false));
+        let input_running = Arc::new(AtomicBool::new(false));
+        let output_running = Arc::new(AtomicBool::new(false));
         let failed = Arc::new(AtomicBool::new(false));
         let output_rate = Arc::new(AtomicU32::new(48_000));
         let input_rate = Arc::new(AtomicU32::new(48_000));
@@ -1120,7 +1126,12 @@ impl AudioIo {
 
         let (tx, rx) = std::sync::mpsc::channel::<Result<(), Error>>();
         let (pb, cap, st) = (playback.clone(), capture.clone(), stop.clone());
-        let (run, fail) = (running.clone(), failed.clone());
+        let (run, in_run, out_run, fail) = (
+            running.clone(),
+            input_running.clone(),
+            output_running.clone(),
+            failed.clone(),
+        );
         let (orate, irate) = (output_rate.clone(), input_rate.clone());
         let (want, gen) = (wanted.clone(), generation.clone());
         let clk = clock.clone();
@@ -1163,6 +1174,8 @@ impl AudioIo {
                         }
                     };
                     attempt = 0;
+                    out_run.store(out_stream.is_some(), Ordering::Relaxed);
+                    in_run.store(in_stream.is_some(), Ordering::Relaxed);
                     orate.store(o, Ordering::Relaxed);
                     irate.store(i, Ordering::Relaxed);
                     fail.store(false, Ordering::Relaxed);
@@ -1190,6 +1203,8 @@ impl AudioIo {
                         }
                     }
                     run.store(false, Ordering::Relaxed);
+                    out_run.store(false, Ordering::Relaxed);
+                    in_run.store(false, Ordering::Relaxed);
                     drop(in_stream);
                     drop(out_stream);
                     if stopping {
@@ -1206,6 +1221,8 @@ impl AudioIo {
                 output_rate,
                 input_rate,
                 running,
+                input_running,
+                output_running,
                 wanted,
                 generation,
                 stop,
@@ -1231,6 +1248,16 @@ impl AudioIo {
     /// 说话没人听见"是这个项目反复要躲开的那类故障。
     pub fn running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    /// 此刻有没有活着的输入流。
+    pub fn input_running(&self) -> bool {
+        self.input_running.load(Ordering::Relaxed)
+    }
+
+    /// 此刻有没有活着的输出流。
+    pub fn output_running(&self) -> bool {
+        self.output_running.load(Ordering::Relaxed)
     }
 
     /// 换设备。**立刻生效**，不必等到下一次连接。
@@ -1308,21 +1335,29 @@ fn scale_pcm(samples: &mut [i16], gain: f32) {
     }
 }
 
-fn wait_running(io: &AudioIo, ms: u64) -> bool {
+fn wait_input_running(io: &AudioIo, ms: u64) -> bool {
+    wait_until(ms, || io.input_running())
+}
+
+fn wait_output_running(io: &AudioIo, ms: u64) -> bool {
+    wait_until(ms, || io.output_running())
+}
+
+fn wait_until(ms: u64, mut ready: impl FnMut() -> bool) -> bool {
     let steps = (ms / 50).max(1);
     for _ in 0..steps {
-        if io.running() {
+        if ready() {
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    io.running()
+    ready()
 }
 
 /// 喇叭试音。走和通话同一条开流路径。
 pub fn speaker_test(output: Option<&str>, gain: f32) -> Result<(), Error> {
     let io = AudioIo::start(None, output)?;
-    if !wait_running(&io, 2000) {
+    if !wait_output_running(&io, 2000) {
         return Err(Error::NoDevice("output"));
     }
     let mut pcm = test_tone(600);
@@ -1340,7 +1375,7 @@ pub fn mic_test(
     speaker_gain: f32,
 ) -> Result<(), Error> {
     let io = AudioIo::start(input, output)?;
-    if !wait_running(&io, 2000) {
+    if !wait_input_running(&io, 2000) {
         return Err(Error::NoDevice("input"));
     }
     let _ = io.take_capture();
@@ -1374,7 +1409,7 @@ impl Drop for AudioIo {
     }
 }
 
-type Streams = (cpal::Stream, cpal::Stream, (u32, u32));
+type Streams = (Option<cpal::Stream>, Option<cpal::Stream>, (u32, u32));
 
 const MAX_CALLBACK_FRAMES: usize = 8192;
 
@@ -1389,34 +1424,11 @@ fn build_streams(
     use cpal::traits::{DeviceTrait, StreamTrait};
 
     let host = cpal::default_host();
-    let out_dev = pick(&host, output, false).ok_or(Error::NoDevice("output"))?;
-    let in_dev = pick(&host, input, true).ok_or(Error::NoDevice("input"))?;
-
-    let out_cfg = preferred_config(&out_dev, false)?;
-    let in_cfg = preferred_config(&in_dev, true)?;
-    let out_rate = out_cfg.sample_rate().0;
-    let in_rate = in_cfg.sample_rate().0;
-    let out_ch = out_cfg.channels();
-    let in_ch = in_cfg.channels();
-    let output_chunk = MAX_CALLBACK_FRAMES * usize::from(out_ch.max(1));
-    let input_chunk = MAX_CALLBACK_FRAMES * usize::from(in_ch.max(1));
-    // Input callbacks never grow this ring; capacity is reserved before streams start.
-    if let Ok(mut ring) = capture.lock() {
-        let cap = in_rate as usize * RING_MS / 1000;
-        let additional = cap.saturating_sub(ring.len());
-        ring.reserve(additional);
+    let out_dev = pick(&host, output, false);
+    let in_dev = pick(&host, input, true);
+    if out_dev.is_none() && in_dev.is_none() {
+        return Err(Error::NoDevice("input/output"));
     }
-
-    // **重建出来的设备采样率可能和原来那个不一样**，而目标水位、硬上限和死区
-    // 都是按采样率算的。顺带把"攒水位"重新置上：重建之后环里那点东西是按旧
-    // 采样率重采样过的，不该被当成已经攒好的水位。
-    clock.on_rebuild(out_rate);
-    let out_clock = clock;
-
-    // **回调报错要被记下来**，光 warn 一行的后果是"突然听不见了而界面全绿"：
-    // 拔一次耳机就是这样。音频线程看这个标志决定要不要重开。
-    //
-    // 是一个工厂而不是一个闭包：四种采样格式各建一条流，而闭包不是 Copy。
     let make_err_fn = || {
         let failed = failed.clone();
         move |e| {
@@ -1424,65 +1436,120 @@ fn build_streams(
             failed.store(true, Ordering::Relaxed);
         }
     };
+    let output = if let Some(out_dev) = out_dev {
+        let out_clock = clock.clone();
+        (|| -> Result<(u32, u16, cpal::Stream), Error> {
+            let out_cfg = preferred_config(&out_dev, false)?;
+            let out_rate = out_cfg.sample_rate().0;
+            let out_ch = out_cfg.channels();
+            let output_chunk = MAX_CALLBACK_FRAMES * usize::from(out_ch.max(1));
+            let out_stream = match out_cfg.sample_format() {
+                cpal::SampleFormat::I16 => {
+                    let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
+                    out_dev.build_output_stream(
+                        &out_cfg.config(),
+                        move |buf: &mut [i16], _| {
+                            for chunk in buf.chunks_mut(output_chunk) {
+                                fill_output_reuse(chunk, out_ch, &playback, &out_clock, &mut mono);
+                            }
+                        },
+                        make_err_fn(),
+                        None,
+                    )
+                }
+                cpal::SampleFormat::F32 => {
+                    let mut pcm = vec![0i16; output_chunk];
+                    let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
+                    out_dev.build_output_stream(
+                        &out_cfg.config(),
+                        move |buf: &mut [f32], _| {
+                            for chunk in buf.chunks_mut(output_chunk) {
+                                render_f32(
+                                    chunk, out_ch, &playback, &out_clock, &mut pcm, &mut mono,
+                                );
+                            }
+                        },
+                        make_err_fn(),
+                        None,
+                    )
+                }
+                other => return Err(Error::SampleFormat(other)),
+            }
+            .map_err(|e| Error::Build(e.to_string()))?;
+            out_stream.play().map_err(|e| Error::Play(e.to_string()))?;
+            Ok((out_rate, out_ch, out_stream))
+        })()
+    } else {
+        Err(Error::NoDevice("output"))
+    };
+    let (out_rate, out_ch, out_stream) = match output {
+        Ok((rate, channels, stream)) => {
+            clock.on_rebuild(rate);
+            (rate, channels, Some(stream))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "could not open the output device; continuing without playback");
+            clock.on_rebuild(48_000);
+            (48_000, 1, None)
+        }
+    };
 
-    let out_stream = match out_cfg.sample_format() {
-        cpal::SampleFormat::I16 => {
-            let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
-            out_dev.build_output_stream(
-                &out_cfg.config(),
-                move |buf: &mut [i16], _| {
-                    for chunk in buf.chunks_mut(output_chunk) {
-                        fill_output_reuse(chunk, out_ch, &playback, &out_clock, &mut mono);
-                    }
-                },
-                make_err_fn(),
-                None,
-            )
+    let input = if let Some(in_dev) = in_dev {
+        (|| -> Result<(u32, u16, cpal::Stream), Error> {
+            let in_cfg = preferred_config(&in_dev, true)?;
+            let in_rate = in_cfg.sample_rate().0;
+            let in_ch = in_cfg.channels();
+            let input_chunk = MAX_CALLBACK_FRAMES * usize::from(in_ch.max(1));
+            // Input callbacks never grow this ring; capacity is reserved before streams start.
+            if let Ok(mut ring) = capture.lock() {
+                let cap = in_rate as usize * RING_MS / 1000;
+                let additional = cap.saturating_sub(ring.len());
+                ring.reserve(additional);
+            }
+            let in_stream = match in_cfg.sample_format() {
+                cpal::SampleFormat::I16 => in_dev.build_input_stream(
+                    &in_cfg.config(),
+                    move |buf: &[i16], _| take_input(buf, in_ch, &capture, in_rate),
+                    make_err_fn(),
+                    None,
+                ),
+                cpal::SampleFormat::F32 => {
+                    let mut pcm = vec![0i16; input_chunk];
+                    in_dev.build_input_stream(
+                        &in_cfg.config(),
+                        move |buf: &[f32], _| {
+                            for chunk in buf.chunks(input_chunk) {
+                                capture_f32(chunk, in_ch, &capture, in_rate, &mut pcm);
+                            }
+                        },
+                        make_err_fn(),
+                        None,
+                    )
+                }
+                other => return Err(Error::SampleFormat(other)),
+            }
+            .map_err(|e| Error::Build(e.to_string()))?;
+            in_stream.play().map_err(|e| Error::Play(e.to_string()))?;
+            Ok((in_rate, in_ch, in_stream))
+        })()
+    } else {
+        Err(Error::NoDevice("input"))
+    };
+    let (in_rate, in_ch, in_stream) = match input {
+        Ok((rate, channels, stream)) => (rate, channels, Some(stream)),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not open the input device; continuing without capture");
+            (48_000, 1, None)
         }
-        cpal::SampleFormat::F32 => {
-            let mut pcm = vec![0i16; output_chunk];
-            let mut mono = Vec::with_capacity(MAX_CALLBACK_FRAMES + 1);
-            out_dev.build_output_stream(
-                &out_cfg.config(),
-                move |buf: &mut [f32], _| {
-                    for chunk in buf.chunks_mut(output_chunk) {
-                        render_f32(chunk, out_ch, &playback, &out_clock, &mut pcm, &mut mono);
-                    }
-                },
-                make_err_fn(),
-                None,
-            )
-        }
-        other => return Err(Error::SampleFormat(other)),
+    };
+
+    if out_stream.is_none() && in_stream.is_none() {
+        return Err(Error::NoDevice("input/output"));
     }
-    .map_err(|e| Error::Build(e.to_string()))?;
 
-    let in_stream = match in_cfg.sample_format() {
-        cpal::SampleFormat::I16 => in_dev.build_input_stream(
-            &in_cfg.config(),
-            move |buf: &[i16], _| take_input(buf, in_ch, &capture, in_rate),
-            make_err_fn(),
-            None,
-        ),
-        cpal::SampleFormat::F32 => {
-            let mut pcm = vec![0i16; input_chunk];
-            in_dev.build_input_stream(
-                &in_cfg.config(),
-                move |buf: &[f32], _| {
-                    for chunk in buf.chunks(input_chunk) {
-                        capture_f32(chunk, in_ch, &capture, in_rate, &mut pcm);
-                    }
-                },
-                make_err_fn(),
-                None,
-            )
-        }
-        other => return Err(Error::SampleFormat(other)),
-    }
-    .map_err(|e| Error::Build(e.to_string()))?;
-
-    out_stream.play().map_err(|e| Error::Play(e.to_string()))?;
-    in_stream.play().map_err(|e| Error::Play(e.to_string()))?;
+    // **重建出来的设备采样率可能和原来那个不一样**，而目标水位、硬上限和死区
+    // 都是按采样率算的。顺带把"攒水位"重新置上：重建之后环里那点东西是按旧
+    // 采样率重采样过的，不该被当成已经攒好的水位。
     tracing::info!(out_rate, in_rate, out_ch, in_ch, "audio devices opened");
     Ok((out_stream, in_stream, (out_rate, in_rate)))
 }

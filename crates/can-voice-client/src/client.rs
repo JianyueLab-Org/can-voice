@@ -229,7 +229,9 @@ pub(crate) enum Command {
         mic: f32,
         speaker: f32,
     },
-    Shutdown,
+    Shutdown {
+        done: Option<tokio::sync::oneshot::Sender<()>>,
+    },
 }
 
 impl VoiceClient {
@@ -365,12 +367,19 @@ impl VoiceClient {
 
     /// 关闭。
     pub fn request_shutdown(&self) {
-        let _ = self.commands.send(Command::Shutdown);
+        let _ = self.commands.send(Command::Shutdown { done: None });
     }
 
     /// 关闭。
     pub async fn shutdown(self) {
-        self.request_shutdown();
+        let (done, closed) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(Command::Shutdown { done: Some(done) })
+            .is_ok()
+        {
+            let _ = closed.await;
+        }
     }
 }
 

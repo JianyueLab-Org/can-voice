@@ -17,7 +17,7 @@
 
 use crate::snapshot::{Ended, Snapshot};
 use can_voice_client::stack::RadioStack;
-use can_voice_client::{Config, Event, VoiceClient};
+use can_voice_client::{Config, Event, LinkState, VoiceClient};
 use can_voice_token::{TokenScope, TokenSource};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -206,6 +206,12 @@ impl Bridge {
             // 先清重连依据，再关连接。反过来的话，关闭事件到达时监护任务还看得见
             // 凭据，会把一次主动下线当成掉线连回来。
             *self.inner.session.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            // The generation guard deliberately makes the old supervisor ignore its
+            // final Offline event. Update the snapshot here so an explicit disconnect
+            // cannot leave the bridge reporting the dead session as Online.
+            if let Ok(mut snapshot) = self.inner.snapshot.lock() {
+                snapshot.apply(&Event::State(LinkState::Offline));
+            }
             self.inner.client.lock().ok().and_then(|mut c| c.take())
         };
         if let Some(c) = client {
@@ -597,6 +603,27 @@ mod tests {
                 }));
         }
         assert_eq!(bridge.snapshot().max_tx, Some(2));
+    }
+
+    #[tokio::test]
+    async fn explicit_disconnect_marks_the_snapshot_offline_immediately() {
+        let bridge = Bridge::new();
+        bridge
+            .inner
+            .snapshot
+            .lock()
+            .expect("snapshot")
+            .apply(&Event::State(LinkState::Online));
+        assert_eq!(bridge.snapshot().link, LinkState::Online);
+
+        bridge.disconnect().await;
+
+        let snapshot = bridge.snapshot();
+        assert_eq!(snapshot.link, LinkState::Offline);
+        assert_eq!(snapshot.max_tx, None);
+        assert!(snapshot.effective_rx.is_empty());
+        assert!(snapshot.effective_tx.is_empty());
+        assert!(snapshot.effective_xc.is_empty());
     }
 
     #[tokio::test]

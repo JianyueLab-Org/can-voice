@@ -68,6 +68,8 @@ const vatisFile = ref<HTMLInputElement | null>(null);
 const asking = ref<"profile" | "rename" | "station" | "edit" | "preset" | null>(null);
 
 let timer: number | undefined;
+let refreshInFlight = false;
+let reloadInFlight = false;
 
 const station = computed(() => stations.value.find((s) => callsignOf(s) === selected.value));
 /**
@@ -109,18 +111,40 @@ const letterText = computed(() => {
 const shown = computed<Rendered | null>(() => (current.value ? current.value : preview.value));
 
 async function reload() {
-  profiles.value = await invoke("profiles");
-  stations.value = await invoke("stations");
-  if (!stations.value.some((s) => callsignOf(s) === selected.value)) {
-    selected.value = stations.value.length ? callsignOf(stations.value[0]) : "";
+  if (reloadInFlight) return;
+  reloadInFlight = true;
+  try {
+    profiles.value = await invoke("profiles");
+    stations.value = await invoke("stations");
+    if (!stations.value.some((s) => callsignOf(s) === selected.value)) {
+      selected.value = stations.value.length ? callsignOf(stations.value[0]) : "";
+    }
+    syncPreset();
+    await refreshLive();
+    await renderPreview();
+  } catch (e) {
+    error.value = e;
+  } finally {
+    reloadInFlight = false;
   }
-  syncPreset();
-  await refreshLive();
-  await renderPreview();
 }
 
 async function refreshLive() {
-  live.value = await invoke("live");
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const request = invoke<Record<string, Live>>("live");
+  void request.then(
+    () => { refreshInFlight = false; },
+    () => { refreshInFlight = false; },
+  );
+  try {
+    live.value = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("refresh timeout")), 1500)),
+    ]);
+  } catch (e) {
+    error.value = e;
+  }
 }
 
 function syncPreset() {
@@ -322,20 +346,27 @@ async function loadSettings() {
   cid.value = s.cid;
 }
 
-onMounted(async () => {
-  void loadAppearance();
-  await loadSettings();
-  await reload();
-  // 在播的那几路状态一直在变，轮询比订阅省事，也不会漏掉挂载之前发生的事。
-  timer = window.setInterval(refreshLive, 1000);
+onMounted(() => {
+  void init();
 });
+
+async function init() {
+  void loadAppearance().catch((e) => { error.value = e; });
+  timer = window.setInterval(() => void refreshLive(), 1000);
+  try {
+    await loadSettings();
+    await reload();
+  } catch (e) {
+    error.value = e;
+  }
+}
 onUnmounted(() => window.clearInterval(timer));
 </script>
 
 <template>
   <StartupGate>
     <main
-      class="mx-auto flex h-screen max-w-6xl flex-col text-sm"
+      class="app-shell mx-auto flex h-screen max-w-6xl flex-col text-sm"
       :class="compact ? 'gap-2 p-2' : 'gap-3 p-4'"
     >
       <!-- 精简时两个分支都是假：账号行藏在 !compact 里，WindowToggles 只给了

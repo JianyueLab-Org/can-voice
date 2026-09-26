@@ -194,6 +194,7 @@ impl App {
             ))),
             settings: Mutex::new(settings),
             http: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
                 .timeout(HTTP_TIMEOUT)
                 .build()
                 .unwrap_or_default(),

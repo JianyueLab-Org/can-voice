@@ -168,32 +168,63 @@ const holding = ref(false);
 const talking = computed(() => holding.value || pressed.value);
 
 let timer: number | undefined;
+let refreshInFlight = false;
 
 // 界面**读快照**，不从事件流拼：事件是广播，窗口重开之前发生的事收不到。
 async function refresh() {
-  snap.value = await invoke<Snapshot>("snapshot");
-  radios.value = await invoke<Radio[]>("radios");
-  pressed.value = await invoke<boolean>("ptt_pressed");
-  feed.value = await invoke<FeedView>("feed");
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  const snapshotRequest = invoke<Snapshot>("snapshot");
+  const radiosRequest = invoke<Radio[]>("radios");
+  const pressedRequest = invoke<boolean>("ptt_pressed");
+  const feedRequest = invoke<FeedView>("feed");
+  const request = Promise.all([snapshotRequest, radiosRequest, pressedRequest, feedRequest]);
+  void Promise.allSettled([snapshotRequest, radiosRequest, pressedRequest, feedRequest]).then(() => {
+    refreshInFlight = false;
+  });
+  try {
+    const [nextSnap, nextRadios, nextPressed, nextFeed] = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => window.setTimeout(() => reject(new Error("refresh timeout")), 1500)),
+    ]);
+    snap.value = nextSnap;
+    radios.value = nextRadios;
+    pressed.value = nextPressed;
+    feed.value = nextFeed;
+  } catch (e) {
+    report({ kind: "command", error: e });
+  }
 }
 
 let detachPtt: (() => void) | undefined;
-onMounted(async () => {
-  void loadAppearance();
+onMounted(() => {
+  void init();
+});
+
+async function init() {
+  void loadAppearance().catch((e) => report({ kind: "command", error: e }));
+  timer = window.setInterval(() => void refresh(), 200);
+  detachPtt = attachPttKeys();
+  window.addEventListener("blur", pttUp);
+  document.addEventListener("visibilitychange", pttUp);
   // 上次用的 CAN 号预填。密码不存——它只换一张 60 秒的票。
-  cid.value = (await invoke<{ cid: string }>("settings")).cid;
+  try {
+    cid.value = (await invoke<{ cid: string }>("settings")).cid;
+  } catch (e) {
+    report({ kind: "command", error: e });
+  }
   try {
     version.value = await invoke<string>("app_version");
   } catch {
     // 版本号显示不出来不该拖垮轮询：下面这几行不能因为这一句失败而不跑。
   }
   await refresh();
-  timer = window.setInterval(refresh, 200);
-  detachPtt = attachPttKeys();
-});
+}
 onUnmounted(() => {
   window.clearInterval(timer);
   detachPtt?.();
+  window.removeEventListener("blur", pttUp);
+  document.removeEventListener("visibilitychange", pttUp);
 });
 
 /** 此刻是不是真的在线。**只给"就在这一秒"的地方用**，别拿它切页面，见 `signedIn`。 */
@@ -327,7 +358,7 @@ function parseFreq(raw: string): number | null {
   const khz = text.includes(".") ? Math.round(n * 1000) : Math.round(n);
   // 夹在 VHF 波段里：服务端把 freq_khz 当不透明路由键，不做范围校验，
   // 所以打错的那个数会变成一个谁也不在的频率，而一切看起来正常。
-  return khz >= 118000 && khz <= 136975 ? khz : null;
+  return khz >= 118000 && khz <= 136975 && khz % 5 === 0 ? khz : null;
 }
 
 async function addFrequency() {
@@ -348,9 +379,10 @@ const addOnline = (khz: number, callsign: string) =>
   act("add_frequency", { freqKhz: khz, callsign });
 
 /** 在席位上没有。**查不到不算不在**——那两句话要分开说。 */
-const onDuty = computed(() => !!feed.value?.duty.callsign);
+const onDuty = computed(() => !!feed.value?.reachable && !!feed.value?.duty.callsign);
 const tuned = computed(() => radios.value.map((r) => r.freq_khz));
-const locked = (khz: number) => feed.value?.duty.freq_khz === khz;
+const locked = (khz: number) =>
+  !!feed.value?.reachable && feed.value.duty.freq_khz === khz;
 /** 画灰与否照着台面的真相，不自己推：推出来的那份迟早和它对不上。 */
 const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
 
@@ -359,6 +391,7 @@ const mayTransmit = computed(() => feed.value?.transmit_allowed ?? true);
  * 时（切精简）它会补发一次松手，重复的那一次不该再发一趟命令。
  */
 function pttDown() {
+  if (!connected.value) return;
   if (holding.value) return;
   holding.value = true;
   void invoke("set_transmitting", { on: true });
@@ -452,7 +485,7 @@ async function act(name: string, args: Record<string, unknown>) {
          ——Rust 侧启动时就把存着的 compact 应用上去了（lib.rs 的 setup）。 -->
     <main
       v-if="!signedIn"
-      class="flex h-screen w-full flex-col text-sm"
+      class="app-shell flex h-screen w-full flex-col text-sm"
       :class="compact ? 'gap-1 p-1.5' : 'gap-3 p-5'"
     >
       <header class="flex items-center gap-2">
@@ -472,7 +505,7 @@ async function act(name: string, args: Record<string, unknown>) {
     <!-- 精简时留白也跟着缩：留着正常模式的边距，一张卡的窗口里有一半是空的。 -->
     <main
       v-else
-      class="flex h-screen w-full flex-col text-sm"
+      class="app-shell flex h-screen w-full flex-col text-sm"
       :class="compact ? 'gap-1 p-1.5' : 'gap-4 p-5'"
     >
       <!-- can-audio 的顺序（controller/gui.py:536-583）：灯、链路、会话、撑开、

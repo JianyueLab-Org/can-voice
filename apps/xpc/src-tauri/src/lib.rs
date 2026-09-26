@@ -38,6 +38,7 @@ use can_voice_sim::csl::ModelSet;
 use can_voice_sim::traffic::{Entry, TrafficTable};
 use can_voice_sim::{bridge, xplane, Snapshot};
 use can_voice_token::TokenSource;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::Manager;
@@ -295,7 +296,7 @@ pub struct App {
     /// webview 还没加载完自己的包，监听器一个都不存在，而 tauri 不会为还没起来的
     /// 页面补发事件。而且这四个端的 capabilities 只给了 `updater:default`，
     /// 事件那一套要另外放权限。
-    menu: Mutex<Option<MenuRequest>>,
+    menu: Mutex<VecDeque<MenuRequest>>,
 }
 
 #[derive(Clone)]
@@ -384,10 +385,12 @@ impl App {
             csl_loading: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             http: reqwest::Client::builder()
                 .user_agent(concat!("xpc-for-can/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_default(),
             ptt: Mutex::new(None),
-            menu: Mutex::new(None),
+            menu: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -561,7 +564,7 @@ pub struct View {
     pub csl: CslView,
     /// 以观察员身份连着时的状况；没连、或者正常上着网是 `None`。
     pub observer: Option<ObserverView>,
-    /// 菜单上刚点的那一项。**读一次就没了**——见 `build_view`。
+    /// 菜单请求按点击顺序排队，前端每次快照取走一项——见 `build_view`。
     pub menu: Option<MenuRequest>,
 }
 
@@ -1207,7 +1210,7 @@ fn build_view(app: &App) -> View {
                 manual: manual.is_some(),
             }
         }),
-        menu: app.menu.lock().expect("menu").take(),
+        menu: app.menu.lock().expect("menu").pop_front(),
     }
 }
 
@@ -1894,11 +1897,6 @@ fn open_log_dir_inner() -> Result<(), Message> {
     can_voice_update::open_folder(&dir)
 }
 
-#[tauri::command]
-fn open_log_dir() -> Result<(), Message> {
-    open_log_dir_inner()
-}
-
 /// 当前版本号。关于框那一行用它。
 ///
 /// **不用 `@tauri-apps/api/app` 的 getVersion**：那是插件命令，要 `core:app` 权限，
@@ -2128,7 +2126,7 @@ pub fn run() {
                 _ => None,
             };
             if let Some(request) = request {
-                *handle.state::<App>().menu.lock().expect("menu") = Some(request);
+                handle.state::<App>().menu.lock().expect("menu").push_back(request);
             }
         })
         // 置顶和精简在窗口一出来就还原。压在雷达屏上用的人不该每次启动都再点一遍。
@@ -2148,7 +2146,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             log_file,
-            open_log_dir,
             app_version,
             set_menu,
             set_appearance,
@@ -2300,15 +2297,17 @@ mod tests {
         assert_eq!(v.reason, Some(Reason::Online));
     }
 
-    /// 菜单那一项是**取走就没了**。留着的话，前端每一拍都会重新开一次对话框——
+    /// 菜单请求是**取走就没了**。留着的话，前端每一拍都会重新开一次对话框——
     /// 250 ms 一次，关都关不掉。
     #[test]
     fn a_menu_request_is_taken_once() {
         let rt = tokio::runtime::Runtime::new().expect("rt");
         let _guard = rt.enter();
         let app = App::new();
-        *app.menu.lock().expect("menu") = Some(MenuRequest::Settings);
+        app.menu.lock().expect("menu").push_back(MenuRequest::Settings);
+        app.menu.lock().expect("menu").push_back(MenuRequest::About);
         assert_eq!(build_view(&app).menu, Some(MenuRequest::Settings));
+        assert_eq!(build_view(&app).menu, Some(MenuRequest::About));
         assert_eq!(build_view(&app).menu, None);
     }
 

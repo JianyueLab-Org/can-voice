@@ -8,6 +8,45 @@
 <label>Frequency (kHz) <input id="frequency" value="118500" inputmode="numeric"></label>
 <button id="play">Listen</button><p id="status">Stopped</p>
 <script>
-const status=document.querySelector('#status'), input=document.querySelector('#frequency'); let audio, source, nextTime=0;
-document.querySelector('#play').onclick=async()=>{const f=Number(input.value);if(!Number.isInteger(f)||f<118000||f>136975||f%5){status.textContent='Enter a valid 5 kHz frequency.';return}audio??=new AudioContext({sampleRate:48000});await audio.resume();const r=await fetch(`/audio?frequency=${f}`);if(!r.ok){status.textContent='Please sign in first.';return}status.textContent='Listening';const reader=r.body.getReader();let pending=new Uint8Array();for(;;){const n=await reader.read();if(n.done)break;const joined=new Uint8Array(pending.length+n.value.length);joined.set(pending);joined.set(n.value,pending.length);pending=joined;while(pending.length>=1920){const frame=pending.slice(0,1920);pending=pending.slice(1920);const pcm=new Int16Array(frame.buffer);const b=audio.createBuffer(1,pcm.length,48000),ch=b.getChannelData(0);for(let i=0;i<pcm.length;i++)ch[i]=pcm[i]/32768;source=audio.createBufferSource();source.buffer=b;source.connect(audio.destination);const start=Math.max(audio.currentTime,nextTime);source.start(start);nextTime=start+b.duration}}};
+const status=document.querySelector('#status'), input=document.querySelector('#frequency'), button=document.querySelector('#play');
+let audio, active, nextTime=0; const sources=new Set();
+function stop() {
+  if (!active) return;
+  active.abort(); active = undefined;
+  for (const source of sources) { try { source.stop(); } catch {} }
+  sources.clear(); nextTime=0; button.textContent='Listen'; status.textContent='Stopped';
+}
+button.onclick=async()=>{
+  if (active) { stop(); return; }
+  const f=Number(input.value);
+  if(!Number.isInteger(f)||f<118000||f>136975||f%5){status.textContent='Enter a valid 5 kHz frequency.';return}
+  audio??=new AudioContext({sampleRate:48000});
+  const controller=new AbortController(); active=controller; button.textContent='Stop'; status.textContent='Connecting...'; nextTime=audio.currentTime;
+  let reader;
+  try {
+    await audio.resume();
+    const response=await fetch(`/audio?frequency=${f}`,{signal:controller.signal});
+    if(!response.ok) throw new Error(response.status===401?'Please sign in first.':'Voice stream unavailable.');
+    if(!response.body) throw new Error('Voice stream unavailable.');
+    status.textContent='Listening'; reader=response.body.getReader(); let pending=new Uint8Array();
+    for(;;){
+      const n=await reader.read(); if(n.done) break;
+      const joined=new Uint8Array(pending.length+n.value.length); joined.set(pending); joined.set(n.value,pending.length); pending=joined;
+      while(pending.length>=1920){
+        const frame=pending.slice(0,1920); pending=pending.slice(1920); const pcm=new Int16Array(frame.buffer);
+        const buffer=audio.createBuffer(1,pcm.length,48000), channel=buffer.getChannelData(0);
+        for(let i=0;i<pcm.length;i++) channel[i]=pcm[i]/32768;
+        const source=audio.createBufferSource(); source.buffer=buffer; source.connect(audio.destination); sources.add(source);
+        source.onended=()=>sources.delete(source);
+        const start=Math.max(audio.currentTime,nextTime); source.start(start); nextTime=start+buffer.duration;
+      }
+    }
+    if(active===controller) status.textContent='Stream ended.';
+  } catch(error) {
+    if(active===controller) status.textContent=error?.name==='AbortError'?'Stopped':(error?.message||'Stream failed.');
+  } finally {
+    try { reader?.releaseLock(); } catch {}
+    if(active===controller){ active=undefined; button.textContent='Listen'; }
+  }
+};
 </script>

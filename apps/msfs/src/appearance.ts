@@ -63,11 +63,6 @@ systemDark.addEventListener("change", () => paint(appearance.value.theme));
 export async function loadAppearance() {
   const s = await invoke<{ appearance?: Partial<Appearance> }>("settings");
   if (s.appearance) appearance.value = { ...appearance.value, ...s.appearance };
-  // 原来 voice 只有深色。以前默认「跟随系统」的，第一次读过来改成深色并写回去。
-  if (appearance.value.theme === "system") {
-    appearance.value = { ...appearance.value, theme: "dark" };
-    await invoke("set_appearance", { appearance: appearance.value });
-  }
   paint(appearance.value.theme);
   applyLanguage(appearance.value.language);
 }

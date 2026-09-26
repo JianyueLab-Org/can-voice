@@ -12,6 +12,25 @@ const props = defineProps<{ open: boolean; title: string; width?: string }>();
 const emit = defineEmits<{ close: [] }>();
 
 const box = ref<HTMLElement | null>(null);
+const titleId = `modal-title-${Math.random().toString(36).slice(2)}`;
+let previousFocus: HTMLElement | null = null;
+const inertSiblings = new Map<HTMLElement, boolean>();
+
+function setBackgroundInert(active: boolean) {
+  const host = box.value?.parentElement;
+  const parent = host?.parentElement;
+  if (!parent) return;
+  if (active) {
+    for (const child of Array.from(parent.children)) {
+      if (child === host || !(child instanceof HTMLElement)) continue;
+      inertSiblings.set(child, child.inert);
+      child.inert = true;
+    }
+  } else {
+    for (const [child, wasInert] of inertSiblings) child.inert = wasInert;
+    inertSiblings.clear();
+  }
+}
 
 // 这个组件本身一直挂着，`v-if` 在它自己的根节点上，所以普通 watch 就够了。
 // （`SettingsCommon` 要 `{ immediate: true }`，是因为它整个被挂在外层的
@@ -19,11 +38,41 @@ const box = ref<HTMLElement | null>(null);
 watch(
   () => props.open,
   async (open) => {
-    if (!open) return;
+    if (!open) {
+      setBackgroundInert(false);
+      previousFocus?.focus();
+      previousFocus = null;
+      return;
+    }
+    previousFocus = document.activeElement as HTMLElement | null;
     await nextTick();
-    box.value?.focus();
+    setBackgroundInert(true);
+    const first = box.value?.querySelector<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+    );
+    (first ?? box.value)?.focus();
   },
 );
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    close();
+    return;
+  }
+  if (e.key !== "Tab" || !box.value) return;
+  const focusable = [...box.value.querySelectorAll<HTMLElement>(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])',
+  )];
+  if (!focusable.length) return;
+  const current = document.activeElement;
+  const index = focusable.indexOf(current as HTMLElement);
+  const next = e.shiftKey
+    ? focusable[(index <= 0 ? focusable.length : index) - 1]
+    : focusable[(index + 1) % focusable.length];
+  e.preventDefault();
+  next.focus();
+}
 
 // 三条关闭路径（遮罩点击、「关闭」钮、Esc）都先手动 blur 当前焦点元素再 emit
 // `close`，编辑才保证落盘。遮罩点击和「关闭」钮原先指望浏览器点击时自己把输入框
@@ -39,16 +88,20 @@ function close() {
   <div
     v-if="open"
     class="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-3"
+    role="presentation"
     @click.self="close"
   >
     <div
       ref="box"
+      role="dialog"
+      aria-modal="true"
+      :aria-labelledby="titleId"
       tabindex="-1"
       class="flex max-h-full flex-col gap-4 overflow-auto rounded border bg-white p-4 text-sm outline-none"
       :class="width ?? 'w-[44rem]'"
-      @keyup.escape="close"
+      @keydown="onKeydown"
     >
-      <h2 class="font-semibold">{{ title }}</h2>
+      <h2 :id="titleId" class="font-semibold">{{ title }}</h2>
 
       <slot />
 
